@@ -30,8 +30,6 @@ export function useTempDir(
 }
 
 export const noopLogger: SessionLogger = {
-  file: "",
-  jsonFile: "",
   request() {},
   response() {},
   toolResult() {},
@@ -39,7 +37,7 @@ export const noopLogger: SessionLogger = {
   hook() {},
   console() {},
   config() {},
-  writeTranscript() {},
+  section() {},
   userInput() {},
 };
 

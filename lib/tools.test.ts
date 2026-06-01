@@ -1,3 +1,4 @@
+// lib/tools.test.ts - tools.ts 的单元测试
 import type Anthropic from "@anthropic-ai/sdk";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";

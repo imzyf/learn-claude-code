@@ -1,3 +1,4 @@
+// lib/smoke.ts - 最小端到端冒烟检查：一次提问、一次回复
 import { createClient, MODEL_ID } from "./model";
 import { textOf } from "./tools";
 

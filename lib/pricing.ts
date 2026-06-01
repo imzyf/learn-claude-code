@@ -1,3 +1,4 @@
+// lib/pricing.ts - 取价并累计调用成本：供 logger 写入，不碰终端
 import type Anthropic from "@anthropic-ai/sdk";
 
 // 从 LiteLLM model catalog 取价并累计费用。

@@ -1,10 +1,5 @@
+// lib/model.ts - Claude client 与 model id：agent 的 LLM 接入层
 import Anthropic from "@anthropic-ai/sdk";
-
-// SDK 自动读取 ANTHROPIC_API_KEY 和 ANTHROPIC_BASE_URL 环境变量。
-// 注意：base URL 不要带 /v1 后缀。
-export function createClient(): Anthropic {
-  return new Anthropic();
-}
 
 export const MODEL_ID: string = process.env.MODEL_ID ?? "claude-sonnet-4-6";
 
@@ -15,4 +10,10 @@ export interface ModelClient {
       params: Anthropic.MessageCreateParamsNonStreaming,
     ): Promise<Anthropic.Message>;
   };
+}
+
+// SDK 自动读取 ANTHROPIC_API_KEY 和 ANTHROPIC_BASE_URL 环境变量。
+// 注意：base URL 不要带 /v1 后缀。
+export function createClient(): Anthropic {
+  return new Anthropic();
 }

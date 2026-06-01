@@ -1,3 +1,4 @@
+// lib/tools.ts - Claude 工具定义与回复文本解析：LLM 工具层
 import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
 
@@ -17,13 +18,25 @@ export function zodTool(
 
 // 拼接回复中所有 text block 的内容。
 // content 是 block 联合类型数组（text | tool_use | ...），此处只取文字。
+// 根据 stop_reason 对空文本或截断结果补上明确信号，避免调用方拿到空字符串。
 export function textOf(response: Anthropic.Message): string {
-  return (
-    response.content
-      // `b is Anthropic.TextBlock` 是类型谓词：过滤后把联合类型收窄成 TextBlock，
-      // 这样下一步 b.text 才合法。
-      .filter((b): b is Anthropic.TextBlock => b.type === "text")
-      .map((b) => b.text)
-      .join("")
-  );
+  const text = response.content
+    // `b is Anthropic.TextBlock` 是类型谓词：过滤后把联合类型收窄成 TextBlock，
+    // 这样下一步 b.text 才合法。
+    .filter((b): b is Anthropic.TextBlock => b.type === "text")
+    .map((b) => b.text)
+    .join("");
+
+  switch (response.stop_reason) {
+    case "max_tokens":
+      return text
+        ? `${text}\n[truncated: hit max_tokens]`
+        : "[no output: hit max_tokens before the model produced any text]";
+    case "refusal":
+      return text || "[model declined to respond]";
+    case "pause_turn":
+      return text || "[paused mid-turn]";
+    default:
+      return text || "[no text in response]";
+  }
 }
