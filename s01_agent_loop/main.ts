@@ -39,13 +39,13 @@ import { textOf, zodTool } from "../lib/tools";
 
 const SYSTEM = `You are a coding agent at ${process.cwd()}. Use bash to solve tasks. Act, don't explain.`;
 
-// ── Tool definition: just bash ────────────────────────────
-const bashSchema = z.object({ command: z.string() });
+// ── 工具定义：只有 bash ────────────────────────────
+export const bashSchema = z.object({ command: z.string() });
 const tools: Anthropic.Tool[] = [
   zodTool("bash", "Run a shell command.", bashSchema),
 ];
 
-// ── Tool execution ────────────────────────────────────────
+// ── 工具执行 ────────────────────────────────────────
 export function runBash(command: string, timeoutMs = 120_000): string {
   if (isDangerous(command)) {
     return "Error: Dangerous command blocked";
@@ -66,13 +66,13 @@ export function runBash(command: string, timeoutMs = 120_000): string {
   return out ? out.slice(0, 50_000) : "(no output)";
 }
 
-// Block a few obviously destructive commands before running them
+// 在执行前拦截几个明显有破坏性的 command
 export function isDangerous(command: string): boolean {
   const dangerous = ["rm -rf /", "sudo", "shutdown", "reboot", "> /dev/"];
   return dangerous.some((d) => command.includes(d));
 }
 
-// ── The core pattern: a while loop that calls tools until the model stops ──
+// ── 核心模式：一个 while loop，不断调用 tool 直到 model 停止 ──
 export async function agentLoop(
   messages: Anthropic.MessageParam[],
   deps: { client: ModelClient; logger: SessionLogger },
@@ -89,39 +89,39 @@ export async function agentLoop(
     });
     logger.response(response);
 
-    // Append assistant turn (includes any tool-call blocks)
+    // 追加 assistant 这一轮（包含所有 tool-call block）
     messages.push({ role: "assistant", content: response.content });
 
-    // If the model didn't call a tool, we're done
+    // 如果 model 没有调用 tool，就结束
     if (response.stop_reason !== "tool_use") {
       return textOf(response);
     }
 
-    // Execute each tool call, collect results
+    // 逐个执行 tool call，收集结果
     const results: Anthropic.ToolResultBlockParam[] = [];
     for (const block of response.content) {
-      // Might be a thinking block, skip it
+      // 可能是 thinking block，跳过
       if (block.type !== "tool_use") continue;
       /*
-      block
-      {
-        "type": "tool_use",
-        "id": "call_00_e3IosLtwiBk4IpGPy0QC7370",
-        "name": "bash",
-        "input": {
-          "command": "node --version"
+        block 结构
+        {
+          "type": "tool_use",
+          "id": "call_00_e3IosLtwiBk4IpGPy0QC7370",
+          "name": "bash",
+          "input": {
+            "command": "node --version"
+          }
         }
-      }
-       */
+      */
       const input = bashSchema.parse(block.input);
       print(input.command, "yellow");
 
-      // Run the command and log a short preview of the output
+      // 执行 command，并记录 output 的简短预览
       const output = runBash(input.command);
       print(output.slice(0, 200), "gray");
       logger.toolResult(input.command, output);
 
-      // Pair the result with its tool_use_id so the model can match them
+      // 用 tool_use_id 把结果配对，让 model 能对应上
       results.push({
         type: "tool_result",
         tool_use_id: block.id,
@@ -129,12 +129,12 @@ export async function agentLoop(
       });
     }
 
-    // Feed tool results back, loop continues
+    // 把 tool 结果喂回去，loop 继续
     messages.push({ role: "user", content: results });
   }
 }
 
-// ── Entry point ──────────────────────────────────────────
+// ── 入口 ──────────────────────────────────────────
 // import.meta.main 只在文件被直接运行时为 true。
 if (import.meta.main) {
   const client = createClient();
@@ -142,14 +142,14 @@ if (import.meta.main) {
   logger.config({ model: MODEL_ID, system: SYSTEM, tools });
 
   print("s01: Agent Loop", "cyan");
-  print("输入问题，回车发送。输入 q 退出。\n");
+  print("输入问题，回车发送。输入 q 退出。\n", "green");
 
-  // Read user input line by line from the terminal
+  // 从 terminal 逐行读取用户输入
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
   });
-  // Exit cleanly on Ctrl+C
+  // Ctrl+C 时干净退出
   rl.on("SIGINT", () => {
     rl.close();
     process.exit(0);
@@ -159,18 +159,18 @@ if (import.meta.main) {
   while (true) {
     let query: string;
     try {
-      // Prompt for the next question (cyan prompt text)
+      // 提示输入下一个问题（cyan 颜色的提示文字）
       query = await rl.question(colorize("s01 >> ", "cyan"));
     } catch {
-      break; // stdin closed (Ctrl+D)
+      break; // stdin 关闭（Ctrl+D）
     }
     const q = query.trim().toLowerCase();
     if (q === "" || q === "q" || q === "exit") break;
     logger.userInput(query);
 
-    // Keep the full conversation so each turn has prior context
+    // 保留完整对话，让每一轮都有之前的 context
     history.push({ role: "user", content: query });
-    // Run the agent loop until the model stops calling tools
+    // 运行 agent loop，直到 model 不再调用 tool
     const finalText = await agentLoop(history, { client, logger });
     print(finalText, "green");
     print();

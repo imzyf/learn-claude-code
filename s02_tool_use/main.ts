@@ -25,8 +25,9 @@ import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
 import { createLogger, type SessionLogger } from "../lib/logger";
 import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
+import { colorize, print } from "../lib/terminal";
 import { textOf, zodTool } from "../lib/tools";
-import { runBash as s01RunBash } from "../s01_agent_loop/main";
+import { bashSchema, runBash as s01RunBash } from "../s01_agent_loop/main";
 
 const WORKDIR = process.cwd();
 const SYSTEM = `You are a coding agent at ${WORKDIR}. Use tools to solve tasks. Act, don't explain.`;
@@ -34,15 +35,15 @@ const SYSTEM = `You are a coding agent at ${WORKDIR}. Use tools to solve tasks. 
 const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 // ═══════════════════════════════════════════════════════════
-//  FROM s01 (reused)
+//  来自 s01（未改动）
 // ═══════════════════════════════════════════════════════════
 
-export function runBash(command: string): string {
-  return s01RunBash(command);
+export function runBash(command: string, timeoutMs = 120_000): string {
+  return s01RunBash(command, timeoutMs);
 }
 
 // ═══════════════════════════════════════════════════════════
-//  NEW in s02: four new tools
+//  s02 新增：四个新 tool
 // ═══════════════════════════════════════════════════════════
 
 export function safePath(p: string): string {
@@ -83,8 +84,8 @@ export function runEdit(p: string, oldText: string, newText: string): string {
   try {
     const filePath = safePath(p);
     const text = fs.readFileSync(filePath, "utf8");
-    // indexOf + slice instead of String.replace: replace would treat
-    // `$&`-style patterns in newText as special replacement syntax.
+    // 用 indexOf + slice 而不是 String.replace：replace 会把 newText 里
+    // `$&` 这类 pattern 当成特殊的替换语法处理。
     const i = text.indexOf(oldText);
     if (i === -1) return `Error: text not found in ${p}`;
     fs.writeFileSync(
@@ -109,10 +110,9 @@ export function runGlob(pattern: string): string {
 }
 
 // ═══════════════════════════════════════════════════════════
-//  NEW in s02: tool definitions (s01 had only bash, now five)
+//  s02 新增：tool 定义（s01 只有 bash，现在有五个）
 // ═══════════════════════════════════════════════════════════
 
-const bashSchema = z.object({ command: z.string() });
 const readSchema = z.object({
   path: z.string(),
   limit: z.number().int().optional(),
@@ -124,7 +124,6 @@ const editSchema = z.object({
   new_text: z.string(),
 });
 const globSchema = z.object({ pattern: z.string() });
-
 const tools: Anthropic.Tool[] = [
   zodTool("bash", "Run a shell command.", bashSchema),
   zodTool("read_file", "Read file contents.", readSchema),
@@ -134,7 +133,7 @@ const tools: Anthropic.Tool[] = [
 ];
 
 // ═══════════════════════════════════════════════════════════
-//  NEW in s02: dispatch map (s01 hardcoded runBash, now a lookup)
+//  s02 新增：dispatch 分发表（s01 写死 runBash，现在改成查表）
 // ═══════════════════════════════════════════════════════════
 
 const TOOL_SCHEMAS: Partial<Record<string, z.ZodObject>> = {
@@ -145,8 +144,9 @@ const TOOL_SCHEMAS: Partial<Record<string, z.ZodObject>> = {
   glob: globSchema,
 };
 
-// `input: any` mirrors Python's `handler(**block.input)` — each handler
-// destructures the shape its schema guarantees after `.parse()`.
+// `input: any` 对应 Python 的 `handler(**block.input)` —— 每个 handler
+// 解构出各自 schema 在 `.parse()` 之后保证的结构。
+// biome-ignore lint/suspicious/noExplicitAny: handlers destructure schema-validated input
 const TOOL_HANDLERS: Partial<Record<string, (input: any) => string>> = {
   bash: ({ command }) => runBash(command),
   read_file: ({ path, limit }) => runRead(path, limit),
@@ -157,7 +157,7 @@ const TOOL_HANDLERS: Partial<Record<string, (input: any) => string>> = {
 };
 
 // ═══════════════════════════════════════════════════════════
-//  agentLoop — same structure as s01, only tool execution changed
+//  agentLoop —— 结构和 s01 一样，只有 tool 执行部分变了
 // ═══════════════════════════════════════════════════════════
 
 export async function agentLoop(
@@ -176,28 +176,42 @@ export async function agentLoop(
     });
     logger.response(response);
 
-    // Append assistant turn (includes any tool-call blocks)
+    // 追加 assistant 这一轮（包含所有 tool-call block）
     messages.push({ role: "assistant", content: response.content });
 
-    // If the model didn't call a tool, we're done
+    // 如果 model 没有调用 tool，就结束
     if (response.stop_reason !== "tool_use") {
       return textOf(response);
     }
 
-    // Execute each tool call via the dispatch map, collect results
+    // 通过 dispatch 分发表逐个执行 tool call，收集结果
     const results: Anthropic.ToolResultBlockParam[] = [];
     for (const block of response.content) {
       if (block.type !== "tool_use") continue;
-
-      console.log(`\x1b[33m> ${block.name}\x1b[0m`);
+      /*
+        block 结构
+        {
+          "type": "tool_use",
+          "id": "call_00_e3IosLtwiBk4IpGPy0QC7370",
+          "name": "bash",
+          "input": {
+            "command": "node --version"
+          }
+        }
+      */
+      print(`> ${block.name}`, "yellow");
+      // 按 tool 名字查出对应的 schema
       const schema = TOOL_SCHEMAS[block.name];
+      // 按 tool 名字查出对应的 handler
       const handler = TOOL_HANDLERS[block.name];
+      // schema 先 parse 校验 input，再交给 handler 执行；查不到就返回 Unknown
       const output =
         handler && schema
           ? handler(schema.parse(block.input))
           : `Unknown: ${block.name}`;
-      console.log(output.slice(0, 200));
+      print(output.slice(0, 200), "gray");
       logger.toolResult(block.name, output);
+
       results.push({
         type: "tool_result",
         tool_use_id: block.id,
@@ -205,20 +219,20 @@ export async function agentLoop(
       });
     }
 
-    // Feed tool results back, loop continues
+    // 把 tool 结果喂回去，loop 继续
     messages.push({ role: "user", content: results });
   }
 }
 
-// ── Entry point ──────────────────────────────────────────
+// ── 入口 ──────────────────────────────────────────
 // import.meta.main 只在文件被直接运行时为 true。
 if (import.meta.main) {
   const client = createClient();
   const logger = createLogger(import.meta.dirname);
   logger.config({ model: MODEL_ID, system: SYSTEM, tools });
 
-  console.log("s02: Tool Use — s01 plus four new tools");
-  console.log("输入问题，回车发送。输入 q 退出。\n");
+  print("s02: Tool Use — s01 plus four new tools", "cyan");
+  print("输入问题，回车发送。输入 q 退出。\n", "green");
 
   const rl = readline.createInterface({
     input: process.stdin,
@@ -233,9 +247,9 @@ if (import.meta.main) {
   while (true) {
     let query: string;
     try {
-      query = await rl.question("\x1b[36ms02 >> \x1b[0m");
+      query = await rl.question(colorize("s02 >> ", "cyan"));
     } catch {
-      break; // stdin closed (Ctrl+D)
+      break; // stdin 关闭（Ctrl+D）
     }
     const q = query.trim().toLowerCase();
     if (q === "" || q === "q" || q === "exit") break;
@@ -243,8 +257,8 @@ if (import.meta.main) {
 
     history.push({ role: "user", content: query });
     const finalText = await agentLoop(history, { client, logger });
-    console.log(finalText);
-    console.log();
+    print(finalText, "green");
+    print();
   }
   rl.close();
 }
