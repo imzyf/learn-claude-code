@@ -19,8 +19,8 @@ export interface SessionLogger {
   // 记录用户输入。
   userInput(query: string): void;
 
-  // API 调用前：记录本轮新增的请求消息。
-  request(messages: Anthropic.MessageParam[]): void;
+  // API 调用前：记录请求消息。incremental=true（默认）只记本轮新增，false 记全部。
+  request(messages: Anthropic.MessageParam[], incremental?: boolean): void;
   // API 返回后：记录响应内容与 token / 成本。
   response(res: Anthropic.Message): void;
 
@@ -33,13 +33,16 @@ export interface SessionLogger {
   ): void;
   // 记录一次工具执行的命令与输出。
   toolResult(command: string, output: string): void;
-  // 记录 hook 生命周期（注册 / 触发 / 结果）。
-  hook(
-    phase: "register" | "trigger" | "result",
+  // 记录 hook 执行结果：仅当该 hook 拦截了调用（blocked 非空）时落一条，
+  // 并把触发时的 args 序列化进去（超长会截断），便于看清被拦的是什么输入。
+  hookResult(
     event: string,
     name: string,
-    blocked?: string | null,
+    args: unknown[],
+    blocked: string | null,
   ): void;
+  // 记录默认 hook 的一次性注册：按 event 列出各 hook 名字。
+  hookRegister(hooks: Record<string, readonly { name: string }[]>): void;
 
   // 带颜色打到终端，同时把纯文本写进 transcript。
   console(message: string, color?: Color): void;
@@ -79,11 +82,11 @@ export function createLogger(sessionDir: string): SessionLogger {
     section: writeTranscript,
 
     config(data: Record<string, unknown>) {
-      writeTranscript("CONFIG", JSON.stringify(data, null, 2));
+      writeJson("config", data);
       if (typeof data.model === "string") {
         void costMeter
           .load(data.model)
-          .then((body) => writeTranscript("PRICE", body));
+          .then((price) => writeJson("price", price));
       }
     },
 
@@ -91,9 +94,9 @@ export function createLogger(sessionDir: string): SessionLogger {
       writeTranscript("USER", query);
     },
 
-    request(messages: Anthropic.MessageParam[]) {
+    request(messages: Anthropic.MessageParam[], incremental = true) {
       writeJson("api_request", {
-        new_messages: messages.slice(loggedMessages),
+        new_messages: incremental ? messages.slice(loggedMessages) : messages,
       });
       loggedMessages = messages.length;
     },
@@ -120,19 +123,25 @@ export function createLogger(sessionDir: string): SessionLogger {
       writeTranscript(`TOOL RESULT (${command})`, output);
     },
 
-    hook(phase, event, name, blocked) {
+    hookResult(event, name, args, blocked) {
+      if (!blocked) return;
       const hookName = name || "(anonymous)";
-      if (phase === "register") {
-        writeTranscript("HOOK REGISTER", `${event} ← ${hookName}`);
-        return;
-      } else if (phase === "trigger") {
-        writeTranscript("HOOK TRIGGER", `${event} → ${hookName}`);
-      } else if (phase === "result" && blocked) {
-        writeTranscript(
-          "HOOK RESULT",
-          `${event} → ${hookName} blocked: ${blocked}`,
-        );
-      }
+      const serialized = JSON.stringify(args).slice(0, 500);
+      writeTranscript(
+        "HOOK RESULT",
+        `${event} → ${hookName}(${serialized}) blocked: ${blocked}`,
+      );
+    },
+
+    hookRegister(hooks) {
+      const summary = Object.entries(hooks)
+        .filter(([, hs]) => hs.length > 0)
+        .map(
+          ([event, hs]) =>
+            `${event}: ${hs.map((h) => h.name || "(anonymous)").join(", ")}`,
+        )
+        .join("\n");
+      writeTranscript("HOOK REGISTER", summary);
     },
 
     console(message: string, color?: Color) {

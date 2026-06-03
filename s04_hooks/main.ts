@@ -54,108 +54,32 @@
 import * as path from "node:path";
 import * as readline from "node:readline/promises";
 import type Anthropic from "@anthropic-ai/sdk";
-import { z } from "zod";
 import { createLogger, type SessionLogger } from "../lib/logger";
 import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
-import { textOf, zodTool } from "../lib/tools";
-import {
-  runEdit as s02RunEdit,
-  runGlob as s02RunGlob,
-  runRead as s02RunRead,
-  runWrite as s02RunWrite,
-  safePath as s02SafePath,
-} from "../s02_tool_use/main";
-import { runBash as s03RunBash } from "../s03_permission/main";
+import { colorize, print } from "../lib/terminal";
+import { textOf } from "../lib/tools";
+//
+import { TOOL_SCHEMAS, tools } from "../s02_tool_use/main";
+//
+import { TOOL_HANDLERS } from "../s03_permission/main";
 
 const WORKDIR = process.cwd();
 const SYSTEM = `You are a coding agent at ${WORKDIR}. Use tools to solve tasks. Act, don't explain.`;
 
-//#region 之前章节的实现
-
 // ═══════════════════════════════════════════════════════════
-//  FROM s02-s03: Tool Implementations
-//  - runBash 直接复用 s03（s03 已去掉内联危险检查，改由 permissionHook 把关）
-//  - safePath + 四个文件工具 unchanged：从 s02 导入并起别名，本地保留
-//    同名 wrapper，结构与 TOOL_HANDLERS 调用点都不用动
+//  来自 s02-s03：工具层直接复用，s04 不再重复定义
+//  - tools / TOOL_SCHEMAS 复用 s02（schema 从没变过，s03 也是这么用的）
+//  - TOOL_HANDLERS 复用 s03：它的 bash handler 指向 s03 的 runBash
+//    （去掉了内联危险检查，改由 permissionHook 把关）
 // ═══════════════════════════════════════════════════════════
 
-export function runBash(command: string): string {
-  return s03RunBash(command);
-}
-
-export function safePath(p: string): string {
-  return s02SafePath(p);
-}
-
-export function runRead(p: string, limit?: number): string {
-  return s02RunRead(p, limit);
-}
-
-export function runWrite(p: string, content: string): string {
-  return s02RunWrite(p, content);
-}
-
-export function runEdit(p: string, oldText: string, newText: string): string {
-  return s02RunEdit(p, oldText, newText);
-}
-
-export function runGlob(pattern: string): string {
-  return s02RunGlob(pattern);
-}
-
 // ═══════════════════════════════════════════════════════════
-//  FROM s02-s03 (unchanged): Tool Definitions & Dispatch
+//  s04 新增：Hook 系统（s03 的权限逻辑现在通过 hook 实现）
 // ═══════════════════════════════════════════════════════════
 
-const bashSchema = z.object({ command: z.string() });
-const readSchema = z.object({
-  path: z.string(),
-  limit: z.number().int().optional(),
-});
-const writeSchema = z.object({ path: z.string(), content: z.string() });
-const editSchema = z.object({
-  path: z.string(),
-  old_text: z.string(),
-  new_text: z.string(),
-});
-const globSchema = z.object({ pattern: z.string() });
-
-const tools: Anthropic.Tool[] = [
-  zodTool("bash", "Run a shell command.", bashSchema),
-  zodTool("read_file", "Read file contents.", readSchema),
-  zodTool("write_file", "Write content to a file.", writeSchema),
-  zodTool("edit_file", "Replace exact text in a file once.", editSchema),
-  zodTool("glob", "Find files matching a glob pattern.", globSchema),
-];
-
-const TOOL_SCHEMAS: Partial<Record<string, z.ZodObject>> = {
-  bash: bashSchema,
-  read_file: readSchema,
-  write_file: writeSchema,
-  edit_file: editSchema,
-  glob: globSchema,
-};
-
-// `input: any` mirrors Python's `handler(**block.input)` — each handler
-// destructures the shape its schema guarantees after `.parse()`.
-const TOOL_HANDLERS: Partial<Record<string, (input: any) => string>> = {
-  bash: ({ command }) => runBash(command),
-  read_file: ({ path, limit }) => runRead(path, limit),
-  write_file: ({ path, content }) => runWrite(path, content),
-  edit_file: ({ path, old_text, new_text }) =>
-    runEdit(path, old_text, new_text),
-  glob: ({ pattern }) => runGlob(pattern),
-};
-
-//#endregion
-
-// ═══════════════════════════════════════════════════════════
-//  NEW in s04: Hook System (s03 permission logic now via hooks)
-// ═══════════════════════════════════════════════════════════
-
-// Hooks are async because permissionHook awaits rl.question()
-// (Python just calls input()). `...args: any[]` mirrors Python's
-// `callback(*args)` — each event passes its own argument shape.
+// hook 是 async 的，因为 permissionHook 要 await rl.question()
+//（Python 里就是 input()）。`...args: any[]` 对应 Python 的
+// `callback(*args)` —— 每个事件传入各自的参数结构。
 type Hook = (...args: any[]) => string | null | Promise<string | null>;
 
 const HOOKS: Record<string, Hook[]> = {
@@ -172,14 +96,12 @@ const HOOKS: Record<string, Hook[]> = {
 //      改所有调用点和测试的签名。
 // 入口调用 setHookLogger 注入一次，测试不注入即静默（null）。
 let hookLogger: SessionLogger | null = null;
-
 export function setHookLogger(logger: SessionLogger | null): void {
   hookLogger = logger;
 }
 
 export function registerHook(event: string, callback: Hook): void {
   HOOKS[event].push(callback);
-  hookLogger?.hook("register", event, callback.name);
 }
 
 export async function triggerHooks(
@@ -187,10 +109,9 @@ export async function triggerHooks(
   ...args: any[]
 ): Promise<string | null> {
   for (const callback of HOOKS[event]) {
-    hookLogger?.hook("trigger", event, callback.name);
     const result = await callback(...args);
     // 执行记录集中在这里，而不是散落进每个 hook。
-    hookLogger?.hook("result", event, callback.name, result);
+    hookLogger?.hookResult(event, callback.name, args, result);
     if (result != null) return result; // teaching shortcut: block this tool call
   }
   return null;
@@ -202,15 +123,15 @@ export function clearHooks(): void {
   for (const event of Object.keys(HOOKS)) HOOKS[event] = [];
 }
 
-// The shape PreToolUse/PostToolUse hooks receive — the raw tool_use block
-// (matches what Python hooks receive too).
+// PreToolUse/PostToolUse hook 收到的结构 —— 原始的 tool_use block
+//（和 Python hook 收到的一致）。
 type ToolCallInfo = Anthropic.ToolUseBlock;
 
 // permissionHook 需要「问用户」的能力，但不该自己持有 readline。
 // 把确认动作抽象成 Confirm：入口注入真实 readline 提示，测试注入 fake。
 export type Confirm = (call: ToolCallInfo, warning: string) => Promise<boolean>;
 
-// s03 permission check logic, now wrapped as a hook
+// s03 的权限检查逻辑，现在包装成 hook
 const DENY_LIST = [
   "rm -rf /",
   "sudo",
@@ -222,7 +143,7 @@ const DENY_LIST = [
 ];
 const DESTRUCTIVE = ["rm ", "> /etc/", "chmod 777"];
 
-// PreToolUse: s03 checkPermission() logic moved here.
+// PreToolUse：s03 的 checkPermission() 逻辑搬到这里。
 // 工厂函数：闭包捕获 confirm，返回真正的 hook（这就是给回调注入依赖的标准手法）。
 export function makePermissionHook(confirm: Confirm): Hook {
   return async function permissionHook(
@@ -233,12 +154,9 @@ export function makePermissionHook(confirm: Confirm): Hook {
       const command: string = input.command ?? "";
       for (const pattern of DENY_LIST) {
         if (command.includes(pattern)) {
-          hookLogger?.console(`⛔ Blocked: '${pattern}'`, "red");
-          hookLogger?.permission(
-            call.name,
-            input,
-            `deny list: '${pattern}'`,
-            "deny",
+          hookLogger?.console(
+            `[HOOK] PreToolUse(makePermissionHook): ⛔ Blocked: '${pattern}'`,
+            "red",
           );
           return "Permission denied by deny list";
         }
@@ -261,33 +179,39 @@ export function makePermissionHook(confirm: Confirm): Hook {
   };
 }
 
-// PreToolUse: log every tool call.
+// PreToolUse：记录每一次工具调用。
 export function logHook(call: ToolCallInfo): null {
   const argsPreview = JSON.stringify(
     Object.values((call.input as any) ?? {}).slice(0, 2),
   ).slice(0, 60);
-  hookLogger?.console(`[HOOK] ${call.name}(${argsPreview})`);
+  hookLogger?.console(
+    `[HOOK] PreToolUse(logHook): ${call.name}(${argsPreview})`,
+    "gray",
+  );
   return null;
 }
 
-// PostToolUse: warn on large output.
+// PostToolUse：输出过大时告警。
 export function largeOutputHook(call: ToolCallInfo, output: string): null {
   if (output.length > 100_000) {
     hookLogger?.console(
-      `[HOOK] ⚠ Large output from ${call.name}: ${output.length} chars`,
+      `[HOOK] PostToolUse(largeOutputHook): ⚠ Large output from ${call.name}: ${output.length} chars`,
       "yellow",
     );
   }
   return null;
 }
 
-// UserPromptSubmit hook: log user input before it reaches the LLM
+// UserPromptSubmit hook：在用户输入抵达 LLM 前记录它
 export function contextInjectHook(_query: string): null {
-  hookLogger?.console(`[HOOK] UserPromptSubmit: working in ${WORKDIR}`);
+  hookLogger?.console(
+    `[HOOK] UserPromptSubmit(contextInjectHook): working in ${WORKDIR}`,
+    "gray",
+  );
   return null;
 }
 
-// Stop hook: print summary when loop is about to exit
+// Stop hook：循环即将退出时打印小结
 export function summaryHook(messages: Anthropic.MessageParam[]): null {
   const toolCount = messages.reduce(
     (n, m) =>
@@ -297,7 +221,10 @@ export function summaryHook(messages: Anthropic.MessageParam[]): null {
         : 0),
     0,
   );
-  hookLogger?.console(`[HOOK] Stop: session used ${toolCount} tool calls`);
+  hookLogger?.console(
+    `[HOOK] Stop(summaryHook): session used ${toolCount} tool calls`,
+    "gray",
+  );
   return null;
 }
 
@@ -309,10 +236,13 @@ export function registerDefaultHooks(confirm: Confirm): void {
   registerHook("PreToolUse", logHook);
   registerHook("PostToolUse", largeOutputHook);
   registerHook("Stop", summaryHook);
+
+  // 注册完一次性记录：格式化由 logger.hookRegister 负责。
+  hookLogger?.hookRegister(HOOKS);
 }
 
 // ═══════════════════════════════════════════════════════════
-//  agentLoop — same structure as s03, but no hard-coded check
+//  agentLoop —— 和 s03 结构相同，只是不再硬编码检查
 //  s03: if (!(await checkPermission(call))) ...
 //  s04: if (await triggerHooks("PreToolUse", call)) ...
 // ═══════════════════════════════════════════════════════════
@@ -349,6 +279,7 @@ export async function agentLoop(
     for (const block of response.content) {
       if (block.type !== "tool_use") continue;
 
+      print(`> [${block.name}] ${JSON.stringify(block.input)}`, "cyan");
       // 特殊点 2：PreToolUse hook 取代 s03 的 checkPermission()——
       // 返回非 null 即拦截，返回值直接当成 tool_result 内容回给模型。
       const blocked = await triggerHooks("PreToolUse", block);
@@ -383,14 +314,14 @@ export async function agentLoop(
   }
 }
 
-// ── Entry point ──────────────────────────────────────────
+// ── 入口 ──────────────────────────────────────────
 // import.meta.main 只在文件被直接运行时为 true。
 if (import.meta.main) {
   const client = createClient();
   const logger = createLogger(import.meta.dirname);
   logger.config({ model: MODEL_ID, system: SYSTEM, tools });
 
-  // Shared readline: hooks (Allow? prompt) and the REPL both use it.
+  // 共用的 readline：hook（Allow? 提示）和 REPL 都用它。
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
@@ -403,14 +334,14 @@ if (import.meta.main) {
   // confirmWithUser 就在入口里，直接握着 logger，用它专门的 permission()
   // 记录放行/拦截决定——无需绕道 hookLogger 单例。
   const confirmWithUser: Confirm = async (call, warning) => {
-    console.log(`\n\x1b[33m⚠  ${warning}\x1b[0m`);
-    console.log(`   Tool: ${call.name}(${JSON.stringify(call.input)})`);
+    print(`\n⚠  ${warning}`, "yellow");
+    print(`   Tool: ${call.name}(${JSON.stringify(call.input)})`);
     let choice: string;
     try {
       choice = (await rl.question("   Allow? [y/N] ")).trim().toLowerCase();
     } catch {
       logger.permission(call.name, call.input, warning, "deny");
-      return false; // stdin closed — nobody left to approve
+      return false; // stdin 关闭 —— 没人能批准了
     }
     const allowed = choice === "y" || choice === "yes";
     logger.permission(
@@ -425,16 +356,16 @@ if (import.meta.main) {
   setHookLogger(logger);
   registerDefaultHooks(confirmWithUser);
 
-  console.log("s04: Hooks — extension logic on hooks, loop stays clean");
-  console.log("输入问题，回车发送。输入 q 退出。\n");
+  print("s04: Hooks — extension logic on hooks, loop stays clean", "cyan");
+  print("输入问题，回车发送。输入 q 退出。\n", "green");
 
   const history: Anthropic.MessageParam[] = [];
   while (true) {
     let query: string;
     try {
-      query = await rl.question("\x1b[36ms04 >> \x1b[0m");
+      query = await rl.question(colorize("s04 >> ", "cyan"));
     } catch {
-      break; // stdin closed (Ctrl+D)
+      break; // stdin 关闭（Ctrl+D）
     }
     const q = query.trim().toLowerCase();
     if (q === "" || q === "q" || q === "exit") break;
@@ -443,8 +374,8 @@ if (import.meta.main) {
     await triggerHooks("UserPromptSubmit", query);
     history.push({ role: "user", content: query });
     const finalText = await agentLoop(history, { client, logger });
-    console.log(finalText);
-    console.log();
+    print(finalText, "green");
+    print();
   }
   rl.close();
 }

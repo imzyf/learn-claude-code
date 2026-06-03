@@ -36,8 +36,8 @@ function costUSD(u: Anthropic.Usage, p: LiteLLMPrice): number {
 }
 
 export interface CostMeter {
-  // 异步取价；resolve 出一段可写进 transcript 的说明文字。
-  load(modelId: string): Promise<string>;
+  // 异步取价；resolve 出价格对象，供 logger 原样写进 JSON；取价失败为 null。
+  load(modelId: string): Promise<LiteLLMPrice | null>;
   // 单次 response 的费用后缀，如 ", ¥0.01 / Σ ¥0.05"；取价成功前返回 ""。
   costSuffix(usage: Anthropic.Usage): string;
 }
@@ -48,11 +48,9 @@ export function createCostMeter(): CostMeter {
   let totalCost = 0;
 
   return {
-    async load(modelId: string): Promise<string> {
+    async load(modelId: string): Promise<LiteLLMPrice | null> {
       price = await fetchPrice(modelId);
-      return price
-        ? JSON.stringify(price, null, 2)
-        : `fetch failed for ${modelId}, cost will not be shown`;
+      return price;
     },
 
     costSuffix(usage: Anthropic.Usage): string {

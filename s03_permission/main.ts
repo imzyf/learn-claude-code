@@ -32,26 +32,28 @@ import { spawnSync } from "node:child_process";
 import * as path from "node:path";
 import * as readline from "node:readline/promises";
 import type Anthropic from "@anthropic-ai/sdk";
-import { z } from "zod";
 import { createLogger, type SessionLogger } from "../lib/logger";
 import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
-import { textOf, zodTool } from "../lib/tools";
+import { colorize, print } from "../lib/terminal";
+import { textOf } from "../lib/tools";
+// 四个文件工具、tool 定义、schema 表在 s03 都没变，直接从 s02 复用，
+// 不再包一层同名 wrapper。只有 runBash 是 s03 自己的版本（见下）。
 import {
-  runEdit as s02RunEdit,
-  runGlob as s02RunGlob,
-  runRead as s02RunRead,
-  runWrite as s02RunWrite,
-  safePath as s02SafePath,
+  runEdit,
+  runGlob,
+  runRead,
+  runWrite,
+  TOOL_SCHEMAS,
+  tools,
 } from "../s02_tool_use/main";
 
 const WORKDIR = process.cwd();
 const SYSTEM = `You are a coding agent at ${WORKDIR}. All destructive operations require user approval.`;
 
 // ═══════════════════════════════════════════════════════════
-//  FROM s02: Tool Implementations
-//  - runBash changed: inline dangerous-check removed, Gate 1 replaces it
-//  - safePath + 四个文件工具 unchanged：从 s02 导入并起别名，本地保留
-//    同名 wrapper，结构与调用点（TOOL_HANDLERS）都不用动
+//  来自 s02：工具实现
+//  runBash 是 s03 本地版：内联的危险命令检查移除，改由关卡 1 负责。
+//  四个文件工具没变，已在顶部直接从 s02 import 复用。
 // ═══════════════════════════════════════════════════════════
 
 export function runBash(command: string): string {
@@ -70,62 +72,14 @@ export function runBash(command: string): string {
   return out ? out.slice(0, 50_000) : "(no output)";
 }
 
-export function safePath(p: string): string {
-  return s02SafePath(p);
-}
-
-export function runRead(p: string, limit?: number): string {
-  return s02RunRead(p, limit);
-}
-
-export function runWrite(p: string, content: string): string {
-  return s02RunWrite(p, content);
-}
-
-export function runEdit(p: string, oldText: string, newText: string): string {
-  return s02RunEdit(p, oldText, newText);
-}
-
-export function runGlob(pattern: string): string {
-  return s02RunGlob(pattern);
-}
-
 // ═══════════════════════════════════════════════════════════
-//  FROM s02 (unchanged): Tool Definitions & Dispatch
+//  来自 s02（未改动）：tool 定义与 dispatch
+//  tools 和 TOOL_SCHEMAS 都是纯数据，直接从 s02 复用
 // ═══════════════════════════════════════════════════════════
 
-const bashSchema = z.object({ command: z.string() });
-const readSchema = z.object({
-  path: z.string(),
-  limit: z.number().int().optional(),
-});
-const writeSchema = z.object({ path: z.string(), content: z.string() });
-const editSchema = z.object({
-  path: z.string(),
-  old_text: z.string(),
-  new_text: z.string(),
-});
-const globSchema = z.object({ pattern: z.string() });
-
-const tools: Anthropic.Tool[] = [
-  zodTool("bash", "Run a shell command.", bashSchema),
-  zodTool("read_file", "Read file contents.", readSchema),
-  zodTool("write_file", "Write content to a file.", writeSchema),
-  zodTool("edit_file", "Replace exact text in a file once.", editSchema),
-  zodTool("glob", "Find files matching a glob pattern.", globSchema),
-];
-
-const TOOL_SCHEMAS: Partial<Record<string, z.ZodObject>> = {
-  bash: bashSchema,
-  read_file: readSchema,
-  write_file: writeSchema,
-  edit_file: editSchema,
-  glob: globSchema,
-};
-
-// `input: any` mirrors Python's `handler(**block.input)` — each handler
-// destructures the shape its schema guarantees after `.parse()`.
-const TOOL_HANDLERS: Partial<Record<string, (input: any) => string>> = {
+// `input: any` 对应 Python 的 `handler(**block.input)` —— 每个 handler
+// 解构出各自 schema 在 `.parse()` 之后保证的结构。
+export const TOOL_HANDLERS: Partial<Record<string, (input: any) => string>> = {
   bash: ({ command }) => runBash(command),
   read_file: ({ path, limit }) => runRead(path, limit),
   write_file: ({ path, content }) => runWrite(path, content),
@@ -135,10 +89,10 @@ const TOOL_HANDLERS: Partial<Record<string, (input: any) => string>> = {
 };
 
 // ═══════════════════════════════════════════════════════════
-//  NEW in s03: Three-Gate Permission Pipeline
+//  s03 新增：三道关卡的 permission pipeline
 // ═══════════════════════════════════════════════════════════
 
-// Gate 1: Hard deny list — always forbidden
+// 关卡 1：硬性拒绝名单 —— 永远禁止
 const DENY_LIST = [
   "rm -rf /",
   "sudo",
@@ -159,13 +113,14 @@ export function checkDenyList(command: string): string | null {
   return null;
 }
 
-// Gate 2: Rule matching — context-dependent checks
+// 关卡 2：规则匹配 —— 依赖上下文的检查
 const PERMISSION_RULES: {
   tools: string[];
   check: (args: any) => boolean;
   message: string;
 }[] = [
   {
+    // 规则 1：write_file / edit_file 的目标路径落在工作区之外
     tools: ["write_file", "edit_file"],
     check: (args) => {
       const resolved = path.resolve(WORKDIR, args.path ?? "");
@@ -174,6 +129,7 @@ const PERMISSION_RULES: {
     message: "Writing outside workspace",
   },
   {
+    // 规则 2：bash 命令含破坏性关键字（rm、写入 /etc、chmod 777）
     tools: ["bash"],
     check: (args) =>
       ["rm ", "> /etc/", "chmod 777"].some((kw) =>
@@ -192,29 +148,41 @@ export function checkRules(toolName: string, args: unknown): string | null {
   return null;
 }
 
-// Gate 3: User approval — wait for confirmation after rule match.
-// The prompt itself is injected (AskUser) so the pipeline stays free of
-// readline: the entry point wires in a real terminal prompt, tests a fake.
+// 关卡 3：用户批准 —— 规则匹配后等待确认。
+// 提示本身通过依赖注入传入（AskUser），让 pipeline 不依赖 readline：
+// 入口接入真实的 terminal 提示，测试则用 fake。
 export type AskUser = (
   toolName: string,
   args: unknown,
   reason: string,
 ) => Promise<"allow" | "deny">;
 
-// Pipeline: all three gates chained
+// Pipeline：三道关卡串起来
 export async function checkPermission(
   block: Anthropic.ToolUseBlock,
   askUser: AskUser,
   logger: SessionLogger,
 ): Promise<boolean> {
+  /*
+    block 结构
+    {
+      "type": "tool_use",
+      "id": "call_00_e3IosLtwiBk4IpGPy0QC7370",
+      "name": "bash",
+      "input": {
+        "command": "node --version"
+      }
+    }
+  */
   if (block.name === "bash") {
     const reason = checkDenyList((block.input as any).command ?? "");
     if (reason) {
-      console.log(`\n\x1b[31m⛔ ${reason}\x1b[0m`);
+      print(`\n⛔ ${reason}`, "red");
       logger.permission(block.name, block.input, reason, "deny");
       return false;
     }
   }
+
   const reason = checkRules(block.name, block.input);
   if (reason) {
     const decision = await askUser(block.name, block.input, reason);
@@ -225,7 +193,7 @@ export async function checkPermission(
 }
 
 // ═══════════════════════════════════════════════════════════
-//  agentLoop — same as s02, with checkPermission() inserted
+//  agentLoop —— 和 s02 一样，只是插入了 checkPermission()
 // ═══════════════════════════════════════════════════════════
 
 export async function agentLoop(
@@ -234,7 +202,7 @@ export async function agentLoop(
 ): Promise<string> {
   const { client, logger, askUser } = deps;
   while (true) {
-    logger.request(messages);
+    logger.request(messages, false);
     const response = await client.messages.create({
       model: MODEL_ID,
       system: SYSTEM,
@@ -253,14 +221,14 @@ export async function agentLoop(
     const results: Anthropic.ToolResultBlockParam[] = [];
     for (const block of response.content) {
       if (block.type !== "tool_use") continue;
-      console.log(`\x1b[36m> ${block.name}\x1b[0m`);
 
-      // s03 change: run through permission pipeline before executing
+      print(`> [${block.name}] ${JSON.stringify(block.input)}`, "cyan");
+      // s03 改动：执行前先过一遍 permission pipeline
       if (!(await checkPermission(block, askUser, logger))) {
         results.push({
           type: "tool_result",
           tool_use_id: block.id,
-          content: "Permission denied.",
+          content: "Permission denied by rule or user.",
         });
         continue;
       }
@@ -271,7 +239,7 @@ export async function agentLoop(
         handler && schema
           ? handler(schema.parse(block.input))
           : `Unknown: ${block.name}`;
-      console.log(output.slice(0, 200));
+      print(output.slice(0, 200), "gray");
       logger.toolResult(block.name, output);
       results.push({
         type: "tool_result",
@@ -280,12 +248,11 @@ export async function agentLoop(
       });
     }
 
-    // Feed tool results back, loop continues
     messages.push({ role: "user", content: results });
   }
 }
 
-// ── Entry point ──────────────────────────────────────────
+// ── 入口 ──────────────────────────────────────────
 // import.meta.main 只在文件被直接运行时为 true。
 if (import.meta.main) {
   const client = createClient();
@@ -303,29 +270,27 @@ if (import.meta.main) {
   });
 
   const askUser: AskUser = async (toolName, args, reason) => {
-    console.log(`\n\x1b[33m⚠  ${reason}\x1b[0m`);
-    console.log(`   Tool: ${toolName}(${JSON.stringify(args)})`);
+    print(`\n⚠  ${reason}`, "yellow");
+    print(`   Tool: ${toolName}(${JSON.stringify(args)})`);
     let choice: string;
     try {
       choice = (await rl.question("   Allow? [y/N] ")).trim().toLowerCase();
     } catch {
-      return "deny"; // stdin closed — nobody left to approve
+      return "deny"; // stdin 关闭 —— 没人能批准了
     }
     return choice === "y" || choice === "yes" ? "allow" : "deny";
   };
 
-  console.log("s03: Permission");
-  console.log(
-    "输入问题，回车发送。输入 q 退出。e.g., delete the README.md file\n",
-  );
+  print("s03: Permission", "cyan");
+  print("输入问题，回车发送。输入 q 退出。\n", "green");
 
   const history: Anthropic.MessageParam[] = [];
   while (true) {
     let query: string;
     try {
-      query = await rl.question("\x1b[36ms03 >> \x1b[0m");
+      query = await rl.question(colorize("s03 >> ", "cyan"));
     } catch {
-      break; // stdin closed (Ctrl+D)
+      break; // stdin 关闭（Ctrl+D）
     }
     const q = query.trim().toLowerCase();
     if (q === "" || q === "q" || q === "exit") break;
@@ -333,8 +298,8 @@ if (import.meta.main) {
 
     history.push({ role: "user", content: query });
     const finalText = await agentLoop(history, { client, logger, askUser });
-    console.log(finalText);
-    console.log();
+    print(finalText, "green");
+    print();
   }
   rl.close();
 }

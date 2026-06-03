@@ -1165,7 +1165,9 @@ async function nextEvent(): Promise<AgentEvent> {
       eventWaiter = resolve;
     });
   }
-  return events.shift()!;
+  const event = events.shift();
+  if (!event) throw new Error("unreachable: events non-empty after wait");
+  return event;
 }
 
 void (async function inputReader() {

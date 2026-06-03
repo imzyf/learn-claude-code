@@ -3,6 +3,11 @@
   "vcs": { "enabled": true, "clientKind": "git", "useIgnoreFile": true },
   "files": { "includes": ["**", "!bin", "!**/*.svg"] },
   "formatter": { "indentStyle": "space", "indentWidth": 2 },
-  "linter": { "rules": { "preset": "recommended" } },
+  "linter": {
+    "rules": {
+      "preset": "recommended",
+      "suspicious": { "noExplicitAny": "off" }
+    }
+  },
   "assist": { "actions": { "source": { "organizeImports": "on" } } }
 }

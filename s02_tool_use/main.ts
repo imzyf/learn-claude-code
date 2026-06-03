@@ -113,18 +113,18 @@ export function runGlob(pattern: string): string {
 //  s02 新增：tool 定义（s01 只有 bash，现在有五个）
 // ═══════════════════════════════════════════════════════════
 
-const readSchema = z.object({
+export const readSchema = z.object({
   path: z.string(),
   limit: z.number().int().optional(),
 });
-const writeSchema = z.object({ path: z.string(), content: z.string() });
-const editSchema = z.object({
+export const writeSchema = z.object({ path: z.string(), content: z.string() });
+export const editSchema = z.object({
   path: z.string(),
   old_text: z.string(),
   new_text: z.string(),
 });
-const globSchema = z.object({ pattern: z.string() });
-const tools: Anthropic.Tool[] = [
+export const globSchema = z.object({ pattern: z.string() });
+export const tools: Anthropic.Tool[] = [
   zodTool("bash", "Run a shell command.", bashSchema),
   zodTool("read_file", "Read file contents.", readSchema),
   zodTool("write_file", "Write content to a file.", writeSchema),
@@ -136,7 +136,7 @@ const tools: Anthropic.Tool[] = [
 //  s02 新增：dispatch 分发表（s01 写死 runBash，现在改成查表）
 // ═══════════════════════════════════════════════════════════
 
-const TOOL_SCHEMAS: Partial<Record<string, z.ZodObject>> = {
+export const TOOL_SCHEMAS: Partial<Record<string, z.ZodObject>> = {
   bash: bashSchema,
   read_file: readSchema,
   write_file: writeSchema,
@@ -146,7 +146,6 @@ const TOOL_SCHEMAS: Partial<Record<string, z.ZodObject>> = {
 
 // `input: any` 对应 Python 的 `handler(**block.input)` —— 每个 handler
 // 解构出各自 schema 在 `.parse()` 之后保证的结构。
-// biome-ignore lint/suspicious/noExplicitAny: handlers destructure schema-validated input
 const TOOL_HANDLERS: Partial<Record<string, (input: any) => string>> = {
   bash: ({ command }) => runBash(command),
   read_file: ({ path, limit }) => runRead(path, limit),
@@ -199,7 +198,7 @@ export async function agentLoop(
           }
         }
       */
-      print(`> ${block.name}`, "yellow");
+      print(`> [${block.name}] ${JSON.stringify(block.input)}`, "cyan");
       // 按 tool 名字查出对应的 schema
       const schema = TOOL_SCHEMAS[block.name];
       // 按 tool 名字查出对应的 handler
