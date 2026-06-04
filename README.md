@@ -9,7 +9,7 @@ A **TypeScript port** of [shareAI-lab/learn-claude-code](https://github.com/shar
 ## Quick Start
 
 ```sh
-make setup      # pnpm install + create .env from .env.upstream
+make setup      # pnpm install + create .env from .env.example.upstream
 # then fill in ANTHROPIC_API_KEY in .env (MODEL_ID / ANTHROPIC_BASE_URL are optional)
 make smoke      # one-shot API call to verify the setup
 make s01        # run the first session (interactive); make help lists s01–s20

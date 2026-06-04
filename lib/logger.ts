@@ -50,6 +50,8 @@ export interface SessionLogger {
   section(title: string, body: string): void;
   // 把带状态标记的清单按 `[status] content` 逐行写进 transcript（纯文本、无 ANSI）。
   plain(items: readonly { content: string; status: string }[]): void;
+  // 记录一次技能加载：名称、是否命中、内容大小（完整内容另由 toolResult 落一份）。
+  skill(name: string, found: boolean, size: number): void;
 
   // 派生一个带 scope 标签的子 logger：写同一对文件，但各自维护增量计数，
   // 记录标注来源（main / sub），用于区分父 agent 与子 agent 的日志。
@@ -101,6 +103,14 @@ export function createLogger(sessionDir: string): SessionLogger {
           .map((it) => `[${it.status}] ${it.content}`)
           .join("\n");
         writeTranscript("TASKS", body || "(empty)");
+      },
+
+      skill(name, found, size) {
+        writeJson("skill", { name, found, size });
+        writeTranscript(
+          "SKILL",
+          found ? `load ${name} (${size} chars)` : `not found: ${name}`,
+        );
       },
 
       config(data: Record<string, unknown>) {

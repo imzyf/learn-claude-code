@@ -34,6 +34,7 @@ SYNC_DIRS=(
   s18_worktree_isolation
   s19_mcp_plugin
   s20_comprehensive
+  skills
 )
 
 # 要从上游拉取的独立文件（也决定 sparse-checkout 范围）。每项是
@@ -42,7 +43,7 @@ SYNC_DIRS=(
 SYNC_FILES=(
   "requirements.txt"
   "README-zh.md:README-zh.upstream.md"
-  ".env.example:.env.upstream"
+  ".env.example:.env.example.upstream"
 )
 
 # 从同步中排除的本地化文件（传递给 rsync --exclude）。我们仅保留中文基础

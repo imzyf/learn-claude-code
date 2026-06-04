@@ -40,6 +40,7 @@ export const noopLogger: SessionLogger = {
   config() {},
   section() {},
   plain() {},
+  skill() {},
   userInput() {},
   child() {
     return noopLogger;

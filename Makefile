@@ -10,9 +10,9 @@ help: ## Show this help
 
 ##@ Setup
 
-setup: ## Install deps and create .env from .env.upstream
+setup: ## Install deps and create .env from .env.example.upstream
 	pnpm install
-	[ -f .env ] || cp .env.upstream .env
+	[ -f .env ] || cp .env.example.upstream .env
 
 smoke: ## One-shot API call to verify the setup
 	pnpm smoke

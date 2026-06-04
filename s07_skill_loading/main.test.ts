@@ -11,6 +11,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type Anthropic from "@anthropic-ai/sdk";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import type { SessionLogger } from "../lib/logger";
 import {
   fakeClient,
   fakeMessage,
@@ -18,21 +19,38 @@ import {
   textBlock,
   toolUseBlock,
 } from "../lib/testing";
+import { clearHooks } from "../s04_hooks/main";
+// 复用来的符号从源头 import（和 s06 的测试一致），s07 只导出自己的技能层。
 import {
-  agentLoop,
-  buildSystem,
-  clearHooks,
-  listSkills,
-  loadSkill,
   normalizeTodos,
-  parseFrontmatter,
   permissionHook,
   resetNagCounter,
   runTodoWrite,
+} from "../s05_todo_write/main";
+import { spawnSubagent } from "../s06_subagent/main";
+import {
+  agentLoop,
+  buildSystem,
+  listSkills,
+  loadSkill,
+  parseFrontmatter,
+  runLoadSkill,
   type SkillRegistry,
   scanSkills,
-  spawnSubagent,
 } from "./main";
+
+// 记录 skill() 调用的探针 logger，用来验证专属 skill 日志通道。
+type SkillLog = { name: string; found: boolean; size: number };
+function spyLogger(): { logger: SessionLogger; logged: SkillLog[] } {
+  const logged: SkillLog[] = [];
+  const logger: SessionLogger = {
+    ...noopLogger,
+    skill: (name, found, size) => {
+      logged.push({ name, found, size });
+    },
+  };
+  return { logger, logged };
+}
 
 beforeEach(() => {
   clearHooks();
@@ -158,6 +176,39 @@ describe("loadSkill", () => {
   });
 });
 
+// ── runLoadSkill: 专属 skill 日志通道 ─────────────────────
+describe("runLoadSkill", () => {
+  it("returns content and logs the hit through the dedicated skill channel", () => {
+    const { logger, logged } = spyLogger();
+
+    const out = runLoadSkill("code-review", {
+      client: fakeClient(),
+      logger,
+      skills: registry,
+      system: "",
+    });
+
+    expect(out).toBe("FULL code-review content");
+    expect(logged).toEqual([
+      { name: "code-review", found: true, size: "FULL code-review content".length },
+    ]);
+  });
+
+  it("logs a miss without throwing and still returns the not-found text", () => {
+    const { logger, logged } = spyLogger();
+
+    const out = runLoadSkill("ghost", {
+      client: fakeClient(),
+      logger,
+      skills: registry,
+      system: "",
+    });
+
+    expect(out).toBe("Skill not found: ghost");
+    expect(logged[0]).toMatchObject({ name: "ghost", found: false });
+  });
+});
+
 // ── todo helpers (same as s05) ────────────────────────────
 describe("todo helpers", () => {
   it("normalizeTodos accepts an array", () => {
@@ -178,7 +229,7 @@ describe("permissionHook", () => {
   it("denies deny-list bash commands", () => {
     expect(
       permissionHook(toolUseBlock("t", "bash", { command: "sudo x" })),
-    ).toBe("Permission denied");
+    ).toBe("Blocked: 'sudo' is on the deny list");
   });
 });
 
