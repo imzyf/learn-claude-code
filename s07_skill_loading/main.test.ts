@@ -207,7 +207,6 @@ describe("spawnSubagent", () => {
     expect(result).toBe("summary");
     expect(client.messages.create).toHaveBeenCalledTimes(2);
   });
-
 });
 
 // ── agentLoop: load_skill + task dispatch ─────────────────

@@ -16,9 +16,9 @@ import {
   textBlock,
   toolUseBlock,
 } from "../lib/testing";
+import type { Confirm } from "../s03_permission/main";
 import {
   agentLoop,
-  type Confirm,
   clearHooks,
   contextInjectHook,
   largeOutputHook,

@@ -58,10 +58,14 @@ import { createLogger, type SessionLogger } from "../lib/logger";
 import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
 import { colorize, print } from "../lib/terminal";
 import { textOf } from "../lib/tools";
-//
+// 来自 s02：tool 定义（tools）与 schema 表（TOOL_SCHEMAS）——纯数据，原样复用。
 import { TOOL_SCHEMAS, tools } from "../s02_tool_use/main";
-//
-import { TOOL_HANDLERS } from "../s03_permission/main";
+// 来自 s03：dispatch 表（TOOL_HANDLERS）+ 权限确认抽象（Confirm / makeConfirm）。
+import {
+  type Confirm,
+  makeConfirm,
+  TOOL_HANDLERS,
+} from "../s03_permission/main";
 
 const WORKDIR = process.cwd();
 const SYSTEM = `You are a coding agent at ${WORKDIR}. Use tools to solve tasks. Act, don't explain.`;
@@ -128,8 +132,7 @@ export function clearHooks(): void {
 type ToolCallInfo = Anthropic.ToolUseBlock;
 
 // permissionHook 需要「问用户」的能力，但不该自己持有 readline。
-// 把确认动作抽象成 Confirm：入口注入真实 readline 提示，测试注入 fake。
-export type Confirm = (call: ToolCallInfo, warning: string) => Promise<boolean>;
+// Confirm 抽象复用 s03（见顶部 import）：入口注入真实提示，测试注入 fake。
 
 // s03 的权限检查逻辑，现在包装成 hook
 const DENY_LIST = [
@@ -331,30 +334,12 @@ if (import.meta.main) {
     process.exit(0);
   });
 
-  // confirmWithUser 就在入口里，直接握着 logger，用它专门的 permission()
-  // 记录放行/拦截决定——无需绕道 hookLogger 单例。
-  const confirmWithUser: Confirm = async (call, warning) => {
-    print(`\n⚠  ${warning}`, "yellow");
-    print(`   Tool: ${call.name}(${JSON.stringify(call.input)})`);
-    let choice: string;
-    try {
-      choice = (await rl.question("   Allow? [y/N] ")).trim().toLowerCase();
-    } catch {
-      logger.permission(call.name, call.input, warning, "deny");
-      return false; // stdin 关闭 —— 没人能批准了
-    }
-    const allowed = choice === "y" || choice === "yes";
-    logger.permission(
-      call.name,
-      call.input,
-      warning,
-      allowed ? "allow" : "deny",
-    );
-    return allowed;
-  };
+  // confirm 复用 s03 的 makeConfirm：握着 logger，用它专门的 permission()
+  // 记录放行/拦截决定。
+  const confirm = makeConfirm(rl, logger);
 
   setHookLogger(logger);
-  registerDefaultHooks(confirmWithUser);
+  registerDefaultHooks(confirm);
 
   print("s04: Hooks — extension logic on hooks, loop stays clean", "cyan");
   print("输入问题，回车发送。输入 q 退出。\n", "green");

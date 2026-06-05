@@ -21,7 +21,8 @@
  *
  * 相比 s02 还有两处改动：
  *   - runBash 内联的危险命令检查被移除——现在归关卡 1 管
- *   - 关卡 3（askUser）做成可注入依赖：入口用真实 readline，测试用 fake
+ *   - 关卡 3（Confirm）做成可注入依赖：入口用 makeConfirm 接真实 readline，
+ *     测试用 fake；s04 也复用同一个 Confirm / makeConfirm
  *
  * 基于 s02（多工具）构建。Usage:
  *
@@ -149,18 +150,43 @@ export function checkRules(toolName: string, args: unknown): string | null {
 }
 
 // 关卡 3：用户批准 —— 规则匹配后等待确认。
-// 提示本身通过依赖注入传入（AskUser），让 pipeline 不依赖 readline：
-// 入口接入真实的 terminal 提示，测试则用 fake。
-export type AskUser = (
-  toolName: string,
-  args: unknown,
-  reason: string,
-) => Promise<"allow" | "deny">;
+// 确认动作通过依赖注入传入（Confirm），让 pipeline 不依赖 readline：
+// 入口用 makeConfirm 接入真实 terminal 提示，测试则注入 fake。
+export type Confirm = (
+  call: Anthropic.ToolUseBlock,
+  warning: string,
+) => Promise<boolean>;
+
+// Confirm 的真实实现：打印告警、问 y/N，并自己记录放行/拦截决定。
+// 工厂闭包捕获 rl 与 logger，返回纯 (call, warning) => boolean 的确认函数。
+export function makeConfirm(
+  rl: readline.Interface,
+  logger: SessionLogger,
+): Confirm {
+  return async function confirmWithUser(call, warning) {
+    print(`\n⚠  ${warning}`, "yellow");
+    print(`   Tool: ${call.name}(${JSON.stringify(call.input)})`);
+    let choice: string;
+    try {
+      choice = (await rl.question("   Allow? [y/N] ")).trim().toLowerCase();
+    } catch {
+      return false; // stdin 关闭 —— 没人能批准了
+    }
+    const allowed = choice === "y" || choice === "yes";
+    logger.permission(
+      call.name,
+      call.input,
+      warning,
+      allowed ? "allow" : "deny",
+    );
+    return allowed;
+  };
+}
 
 // Pipeline：三道关卡串起来
 export async function checkPermission(
   block: Anthropic.ToolUseBlock,
-  askUser: AskUser,
+  confirm: Confirm,
   logger: SessionLogger,
 ): Promise<boolean> {
   /*
@@ -185,9 +211,8 @@ export async function checkPermission(
 
   const reason = checkRules(block.name, block.input);
   if (reason) {
-    const decision = await askUser(block.name, block.input, reason);
-    logger.permission(block.name, block.input, reason, decision);
-    if (decision === "deny") return false;
+    // confirm 自己记录放行/拦截，这里只看它返回的布尔结果。
+    if (!(await confirm(block, reason))) return false;
   }
   return true;
 }
@@ -198,9 +223,9 @@ export async function checkPermission(
 
 export async function agentLoop(
   messages: Anthropic.MessageParam[],
-  deps: { client: ModelClient; logger: SessionLogger; askUser: AskUser },
+  deps: { client: ModelClient; logger: SessionLogger; confirm: Confirm },
 ): Promise<string> {
-  const { client, logger, askUser } = deps;
+  const { client, logger, confirm } = deps;
   while (true) {
     logger.request(messages, false);
     const response = await client.messages.create({
@@ -224,7 +249,7 @@ export async function agentLoop(
 
       print(`> [${block.name}] ${JSON.stringify(block.input)}`, "cyan");
       // s03 改动：执行前先过一遍 permission pipeline
-      if (!(await checkPermission(block, askUser, logger))) {
+      if (!(await checkPermission(block, confirm, logger))) {
         results.push({
           type: "tool_result",
           tool_use_id: block.id,
@@ -269,17 +294,7 @@ if (import.meta.main) {
     process.exit(0);
   });
 
-  const askUser: AskUser = async (toolName, args, reason) => {
-    print(`\n⚠  ${reason}`, "yellow");
-    print(`   Tool: ${toolName}(${JSON.stringify(args)})`);
-    let choice: string;
-    try {
-      choice = (await rl.question("   Allow? [y/N] ")).trim().toLowerCase();
-    } catch {
-      return "deny"; // stdin 关闭 —— 没人能批准了
-    }
-    return choice === "y" || choice === "yes" ? "allow" : "deny";
-  };
+  const confirm = makeConfirm(rl, logger);
 
   print("s03: Permission", "cyan");
   print("输入问题，回车发送。输入 q 退出。\n", "green");
@@ -297,7 +312,7 @@ if (import.meta.main) {
     logger.userInput(query);
 
     history.push({ role: "user", content: query });
-    const finalText = await agentLoop(history, { client, logger, askUser });
+    const finalText = await agentLoop(history, { client, logger, confirm });
     print(finalText, "green");
     print();
   }
