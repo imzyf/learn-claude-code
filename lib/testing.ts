@@ -39,6 +39,7 @@ export const noopLogger: SessionLogger = {
   console() {},
   config() {},
   section() {},
+  plain() {},
   userInput() {},
 };
 

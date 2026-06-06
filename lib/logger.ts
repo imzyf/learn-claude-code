@@ -48,6 +48,8 @@ export interface SessionLogger {
   console(message: string, color?: Color): void;
   // 往 transcript 追加一节：标题 + 正文。
   section(title: string, body: string): void;
+  // 把带状态标记的清单按 `[status] content` 逐行写进 transcript（纯文本、无 ANSI）。
+  plain(items: readonly { content: string; status: string }[]): void;
 }
 
 export function createLogger(sessionDir: string): SessionLogger {
@@ -80,6 +82,11 @@ export function createLogger(sessionDir: string): SessionLogger {
 
   return {
     section: writeTranscript,
+
+    plain(items) {
+      const body = items.map((it) => `[${it.status}] ${it.content}`).join("\n");
+      writeTranscript("TASKS", body || "(empty)");
+    },
 
     config(data: Record<string, unknown>) {
       writeJson("config", data);
@@ -134,11 +141,14 @@ export function createLogger(sessionDir: string): SessionLogger {
     },
 
     hookRegister(hooks) {
-      const summary = Object.entries(hooks)
-        .filter(([, hs]) => hs.length > 0)
+      const entries = Object.entries(hooks).filter(([, hs]) => hs.length > 0);
+      // 按最长 event 名补空格，让各行的 hook 列表左对齐。
+      const pad = Math.max(...entries.map(([event]) => event.length)) + 2;
+      const summary = entries
         .map(
           ([event, hs]) =>
-            `${event}: ${hs.map((h) => h.name || "(anonymous)").join(", ")}`,
+            `${event}:`.padEnd(pad) +
+            hs.map((h) => h.name || "(anonymous)").join(", "),
         )
         .join("\n");
       writeTranscript("HOOK REGISTER", summary);

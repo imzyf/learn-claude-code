@@ -103,9 +103,17 @@ let hookLogger: SessionLogger | null = null;
 export function setHookLogger(logger: SessionLogger | null): void {
   hookLogger = logger;
 }
+// 跨模块的 hook（如 s05 的 permissionHook）用它读同一个环境 logger。
+export function getHookLogger(): SessionLogger | null {
+  return hookLogger;
+}
 
 export function registerHook(event: string, callback: Hook): void {
   HOOKS[event].push(callback);
+}
+// 跨模块读同一份注册表（如 s05 的 registerDefaultHooks 一次性记录注册结果）。
+export function getHooks(): Record<string, Hook[]> {
+  return HOOKS;
 }
 
 export async function triggerHooks(
@@ -158,7 +166,7 @@ export function makePermissionHook(confirm: Confirm): Hook {
       for (const pattern of DENY_LIST) {
         if (command.includes(pattern)) {
           hookLogger?.console(
-            `[HOOK] PreToolUse(makePermissionHook): ⛔ Blocked: '${pattern}'`,
+            `[HOOK] PreToolUse(permissionHook): ⛔ Blocked: '${pattern}'`,
             "red",
           );
           return "Permission denied by deny list";

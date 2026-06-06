@@ -16,15 +16,14 @@ import {
   textBlock,
   toolUseBlock,
 } from "../lib/testing";
+import { clearHooks } from "../s04_hooks/main";
 import {
-  agentLoop,
-  clearHooks,
   normalizeTodos,
   permissionHook,
   resetNagCounter,
   runTodoWrite,
-  spawnSubagent,
-} from "./main";
+} from "../s05_todo_write/main";
+import { agentLoop, spawnSubagent } from "./main";
 
 beforeEach(() => {
   clearHooks();
@@ -51,7 +50,7 @@ describe("permissionHook", () => {
   it("denies deny-list bash commands", () => {
     expect(
       permissionHook(toolUseBlock("t", "bash", { command: "sudo x" })),
-    ).toBe("Permission denied");
+    ).toBe("Blocked: 'sudo' is on the deny list");
   });
 });
 
@@ -93,7 +92,6 @@ describe("spawnSubagent", () => {
 
     const result = await spawnSubagent("do x", { client, logger: noopLogger });
 
-    // TODO
     expect(result).toBe("[no text in response]");
   });
 });

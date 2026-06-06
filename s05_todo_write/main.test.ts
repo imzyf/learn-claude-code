@@ -86,7 +86,7 @@ describe("permissionHook", () => {
   it("denies deny-list bash commands", () => {
     expect(
       permissionHook(toolUseBlock("t", "bash", { command: "sudo ls" })),
-    ).toBe("Permission denied");
+    ).toBe("Blocked: 'sudo' is on the deny list");
   });
 
   it("allows safe commands", () => {
@@ -131,7 +131,7 @@ describe("agentLoop", () => {
     await agentLoop(messages, { client, logger: noopLogger });
 
     const toolResults = messages[2].content as Anthropic.ToolResultBlockParam[];
-    expect(toolResults[0].content).toBe("Permission denied");
+    expect(toolResults[0].content).toBe("Blocked: 'sudo' is on the deny list");
   });
 
   it("injects a <reminder> after 3 tool rounds without todo_write", async () => {
