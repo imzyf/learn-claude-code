@@ -1,0 +1,10 @@
+{
+  "explicitFolding.rules": {
+    "log": [
+      {
+        "beginRegex": "^── ",
+        "endRegex": "^──$"
+      }
+    ]
+  }
+}

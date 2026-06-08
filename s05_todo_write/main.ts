@@ -134,6 +134,7 @@ export function runTodoWrite(todosInput: unknown): string {
 }
 
 const todoWriteSchema = z.object({
+  // string 一支：兼容模型偶尔把数组发成 JSON 字符串，schema.parse 才不会抛错（normalizeTodos 负责解开）。
   todos: z.union([z.array(todoItem), z.string()]),
 });
 

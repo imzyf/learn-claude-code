@@ -41,6 +41,9 @@ export const noopLogger: SessionLogger = {
   section() {},
   plain() {},
   userInput() {},
+  child() {
+    return noopLogger;
+  },
 };
 
 export function fakeMessage(

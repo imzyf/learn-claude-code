@@ -121,7 +121,10 @@ export async function spawnSubagent(
   description: string,
   deps: Deps,
 ): Promise<string> {
-  const { client, logger } = deps;
+  const { client } = deps;
+  // 子 agent 用 scope="sub" 的 child logger：同一对文件，记录标注来源。
+  const logger = deps.logger.child("sub");
+
   print("[Subagent spawned]", "magenta");
   const messages: Anthropic.MessageParam[] = [
     { role: "user", content: description },

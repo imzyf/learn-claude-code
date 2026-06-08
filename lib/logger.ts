@@ -50,6 +50,10 @@ export interface SessionLogger {
   section(title: string, body: string): void;
   // 把带状态标记的清单按 `[status] content` 逐行写进 transcript（纯文本、无 ANSI）。
   plain(items: readonly { content: string; status: string }[]): void;
+
+  // 派生一个带 scope 标签的子 logger：写同一对文件，但各自维护增量计数，
+  // 记录标注来源（main / sub），用于区分父 agent 与子 agent 的日志。
+  child(scope: string): SessionLogger;
 }
 
 export function createLogger(sessionDir: string): SessionLogger {
@@ -62,103 +66,121 @@ export function createLogger(sessionDir: string): SessionLogger {
   const json = fs.createWriteStream(`${base}.json`, { flags: "a" });
   const text = fs.createWriteStream(`${base}.log`, { flags: "a" });
 
-  // request 只记增量消息，避免日志随对话轮数平方级膨胀。
-  let loggedMessages = 0;
-
   const costMeter = createCostMeter();
 
-  function writeJson(tag: string, data: unknown): void {
-    json.write(
-      JSON.stringify({ ts: new Date().toISOString(), tag, data }, null, 2) +
-        "\n",
-    );
+  // 每个 scope（"main" / "sub"）各自维护增量计数，但共享同一对文件流：
+  // main 与 sub 的 request 增量互不干扰，同时每条记录都标出来源。
+  function make(scope: string): SessionLogger {
+    // request 只记增量消息，避免日志随对话轮数平方级膨胀。
+    let loggedMessages = 0;
+
+    function writeJson(tag: string, data: unknown): void {
+      json.write(
+        `${JSON.stringify(
+          { ts: new Date().toISOString(), scope, tag, data },
+          null,
+          2,
+        )}\n`,
+      );
+    }
+
+    function writeTranscript(title: string, body: string): void {
+      const time = new Date().toTimeString().slice(0, 8);
+      const rule = "─".repeat(Math.max(3, 46 - title.length));
+      // main 保持原样；子 scope 前缀 [sub] 便于扫读与 grep。
+      const heading = scope === "main" ? title : `[${scope}] ${title}`;
+      // ── region 标记让编辑器可折叠每一节。
+      text.write(`── [${time}] ${heading} ${rule}\n${body}\n──\n\n`);
+    }
+
+    return {
+      section: writeTranscript,
+
+      plain(items) {
+        const body = items
+          .map((it) => `[${it.status}] ${it.content}`)
+          .join("\n");
+        writeTranscript("TASKS", body || "(empty)");
+      },
+
+      config(data: Record<string, unknown>) {
+        writeJson("config", data);
+        if (typeof data.model === "string") {
+          void costMeter
+            .load(data.model)
+            .then((price) => writeJson("price", price));
+        }
+      },
+
+      userInput(query: string) {
+        writeTranscript("USER", query);
+      },
+
+      request(messages: Anthropic.MessageParam[], incremental = true) {
+        writeJson("api_request", {
+          new_messages: incremental ? messages.slice(loggedMessages) : messages,
+        });
+        loggedMessages = messages.length;
+      },
+
+      response(res: Anthropic.Message) {
+        writeJson("api_response", res);
+        const u = res.usage;
+        writeTranscript(
+          `ASSISTANT (${u.input_tokens} in / ${u.output_tokens} out / ` +
+            `${u.cache_creation_input_tokens ?? 0} cache-w / ` +
+            `${u.cache_read_input_tokens ?? 0} cache-r${costMeter.costSuffix(u)})`,
+          formatBlocks(res.content),
+        );
+      },
+
+      permission(toolName, args, reason, decision) {
+        writeTranscript(
+          "PERMISSION",
+          `${reason}\nTool: ${toolName}(${JSON.stringify(args)})\nDecision: ${decision}`,
+        );
+      },
+
+      toolResult(command: string, output: string) {
+        writeTranscript(`TOOL RESULT (${command})`, output);
+      },
+
+      hookResult(event, name, args, blocked) {
+        if (!blocked) return;
+        const hookName = name || "(anonymous)";
+        const serialized = JSON.stringify(args).slice(0, 500);
+        writeTranscript(
+          "HOOK RESULT",
+          `${event} → ${hookName}(${serialized}) blocked: ${blocked}`,
+        );
+      },
+
+      hookRegister(hooks) {
+        const entries = Object.entries(hooks).filter(([, hs]) => hs.length > 0);
+        // 按最长 event 名补空格，让各行的 hook 列表左对齐。
+        const pad = Math.max(...entries.map(([event]) => event.length)) + 2;
+        const summary = entries
+          .map(
+            ([event, hs]) =>
+              `${event}:`.padEnd(pad) +
+              hs.map((h) => h.name || "(anonymous)").join(", "),
+          )
+          .join("\n");
+        writeTranscript("HOOK REGISTER", summary);
+      },
+
+      console(message: string, color?: Color) {
+        print(message, color);
+        writeTranscript("CONSOLE", message);
+      },
+
+      child(sub: string) {
+        return make(scope === "main" ? sub : `${scope}/${sub}`);
+      },
+    };
   }
 
-  function writeTranscript(title: string, body: string): void {
-    const time = new Date().toTimeString().slice(0, 8);
-    const rule = "─".repeat(Math.max(3, 46 - title.length));
-    text.write(`── [${time}] ${title} ${rule}\n${body}\n\n`);
-  }
-
-  return {
-    section: writeTranscript,
-
-    plain(items) {
-      const body = items.map((it) => `[${it.status}] ${it.content}`).join("\n");
-      writeTranscript("TASKS", body || "(empty)");
-    },
-
-    config(data: Record<string, unknown>) {
-      writeJson("config", data);
-      if (typeof data.model === "string") {
-        void costMeter
-          .load(data.model)
-          .then((price) => writeJson("price", price));
-      }
-    },
-
-    userInput(query: string) {
-      writeTranscript("USER", query);
-    },
-
-    request(messages: Anthropic.MessageParam[], incremental = true) {
-      writeJson("api_request", {
-        new_messages: incremental ? messages.slice(loggedMessages) : messages,
-      });
-      loggedMessages = messages.length;
-    },
-
-    response(res: Anthropic.Message) {
-      writeJson("api_response", res);
-      const u = res.usage;
-      writeTranscript(
-        `ASSISTANT (${u.input_tokens} in / ${u.output_tokens} out / ` +
-          `${u.cache_creation_input_tokens ?? 0} cache-w / ` +
-          `${u.cache_read_input_tokens ?? 0} cache-r${costMeter.costSuffix(u)})`,
-        formatBlocks(res.content),
-      );
-    },
-
-    permission(toolName, args, reason, decision) {
-      writeTranscript(
-        "PERMISSION",
-        `${reason}\nTool: ${toolName}(${JSON.stringify(args)})\nDecision: ${decision}`,
-      );
-    },
-
-    toolResult(command: string, output: string) {
-      writeTranscript(`TOOL RESULT (${command})`, output);
-    },
-
-    hookResult(event, name, args, blocked) {
-      if (!blocked) return;
-      const hookName = name || "(anonymous)";
-      const serialized = JSON.stringify(args).slice(0, 500);
-      writeTranscript(
-        "HOOK RESULT",
-        `${event} → ${hookName}(${serialized}) blocked: ${blocked}`,
-      );
-    },
-
-    hookRegister(hooks) {
-      const entries = Object.entries(hooks).filter(([, hs]) => hs.length > 0);
-      // 按最长 event 名补空格，让各行的 hook 列表左对齐。
-      const pad = Math.max(...entries.map(([event]) => event.length)) + 2;
-      const summary = entries
-        .map(
-          ([event, hs]) =>
-            `${event}:`.padEnd(pad) +
-            hs.map((h) => h.name || "(anonymous)").join(", "),
-        )
-        .join("\n");
-      writeTranscript("HOOK REGISTER", summary);
-    },
-
-    console(message: string, color?: Color) {
-      print(message, color);
-      writeTranscript("CONSOLE", message);
-    },
-  };
+  return make("main");
 }
 
 function formatBlocks(blocks: Anthropic.ContentBlock[]): string {
