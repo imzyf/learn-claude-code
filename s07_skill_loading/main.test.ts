@@ -190,7 +190,11 @@ describe("runLoadSkill", () => {
 
     expect(out).toBe("FULL code-review content");
     expect(logged).toEqual([
-      { name: "code-review", found: true, size: "FULL code-review content".length },
+      {
+        name: "code-review",
+        found: true,
+        size: "FULL code-review content".length,
+      },
     ]);
   });
 

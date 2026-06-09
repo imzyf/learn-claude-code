@@ -61,7 +61,8 @@ import {
   tools as s05Tools,
 } from "../s05_todo_write/main";
 
-// s06 只导出自己拥有的东西：agentLoop / spawnSubagent / Deps。
+// s06 导出自己拥有的东西：agentLoop / spawnSubagent / Deps，
+// 以及装配好的三张工具表（base + todo + task），供 s07 继续叠加。
 // 复用来的符号由测试各自从源头（s04/s05）import，本模块不做 re-export 中转。
 
 const WORKDIR = process.cwd();
@@ -89,7 +90,8 @@ const taskSchema = z.object({ description: z.string() });
 // subagent 只拿基础工具层（没有 task），从源头杜绝递归派生。
 const subTools = baseTools;
 
-const tools: Anthropic.Tool[] = [
+// 三张装配表导出，供 s07 在其上继续叠加（base + todo + task）。
+export const tools: Anthropic.Tool[] = [
   ...s05Tools,
   // s06 新增：task 工具
   zodTool(
@@ -99,14 +101,14 @@ const tools: Anthropic.Tool[] = [
   ),
 ];
 
-const TOOL_SCHEMAS: Partial<Record<string, z.ZodObject>> = {
+export const TOOL_SCHEMAS: Partial<Record<string, z.ZodObject>> = {
   ...S05_SCHEMAS,
   task: taskSchema,
 };
 
 // handler 可能是 async：task -> spawnSubagent 返回 Promise。
 // 第二参 deps 让 task 拿到 client/logger；基础 handler 是 (input)=>string，忽略它。
-const TOOL_HANDLERS: Partial<
+export const TOOL_HANDLERS: Partial<
   Record<string, (input: any, deps: Deps) => string | Promise<string>>
 > = {
   ...S05_HANDLERS,

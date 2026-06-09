@@ -18,8 +18,8 @@
  *     pdf/SKILL.md
  *
  * 相比 s06 的变化：
- *   工具层：parent 复用 s05 的 tools / TOOL_SCHEMAS / TOOL_HANDLERS（base + todo），
- *          在其上追加 task + load_skill；subagent 由 s06 的 spawnSubagent 内部只拿 base 工具。
+ *   工具层：parent 复用 s06 的 tools / TOOL_SCHEMAS / TOOL_HANDLERS（base + todo + task），
+ *          在其上只追加 load_skill；subagent 由 s06 的 spawnSubagent 内部只拿 base 工具。
  *   Hook 层：注册表/触发器与默认 hook 全部复用 s05（它又复用 s04），s07 不再重复定义。
  *   Subagent：直接复用 s06 的 spawnSubagent（全新 messages[]、只回摘要、无法递归）。
  *   Nag 机制：nagIfStale / bumpNagCounter / resetNagCounter 全部复用 s05。
@@ -50,19 +50,21 @@ import { colorize, print } from "../lib/terminal";
 import { textOf, zodTool } from "../lib/tools";
 // 来自 s04：hook 系统（触发器 + logger 注入）。
 import { setHookLogger, triggerHooks } from "../s04_hooks/main";
-// 来自 s05：默认 hook 注册 + 装配好的工具三张表（base + todo），
-// 以及 nag 机制（nagIfStale / bumpNagCounter / resetNagCounter）——单一出处在 s05。
+// 来自 s05：默认 hook 注册 + nag 机制（nagIfStale / bumpNagCounter / resetNagCounter）。
 import {
   bumpNagCounter,
   nagIfStale,
   registerDefaultHooks,
   resetNagCounter,
-  TOOL_HANDLERS as S05_HANDLERS,
-  TOOL_SCHEMAS as S05_SCHEMAS,
-  tools as s05Tools,
 } from "../s05_todo_write/main";
-// 来自 s06：subagent（全新 messages[]、只回摘要）与共享的 Deps 类型。
-import { type Deps, spawnSubagent } from "../s06_subagent/main";
+// 来自 s06：subagent（全新 messages[]、只回摘要）、共享的 Deps 类型，
+// 以及装配好的工具三张表（base + todo + task）——s07 只在其上追加 load_skill。
+import {
+  type Deps,
+  TOOL_HANDLERS as S06_HANDLERS,
+  TOOL_SCHEMAS as S06_SCHEMAS,
+  tools as s06Tools,
+} from "../s06_subagent/main";
 
 // s07 只导出自己拥有的东西：技能层 + agentLoop + LoopDeps。
 // 复用来的符号（spawnSubagent / 各 hook / nag）由测试各自从源头 import。
@@ -160,22 +162,15 @@ export function runLoadSkill(name: string, deps: LoopDeps): string {
 }
 
 // ═══════════════════════════════════════════════════════════
-//  工具装配：parent = s05（base + todo）+ task + load_skill
-//  三张表都在 s05 之上用展开语法追加，调用点（agentLoop）不用改。
+//  工具装配：parent = s06（base + todo + task）+ load_skill
+//  三张表都在 s06 之上用展开语法追加，调用点（agentLoop）不用改。
 //  subagent 的工具由 s06 的 spawnSubagent 内部持有（只有 base，不能递归）。
 // ═══════════════════════════════════════════════════════════
 
-const taskSchema = z.object({ description: z.string() });
 const loadSkillSchema = z.object({ name: z.string() });
 
 const tools: Anthropic.Tool[] = [
-  ...s05Tools,
-  // s06 引入：task 工具
-  zodTool(
-    "task",
-    "Launch a subagent to handle a complex subtask. Returns only the final conclusion.",
-    taskSchema,
-  ),
+  ...s06Tools,
   // s07 新增：load_skill（清单已在 SYSTEM 里，这里加载完整内容）
   zodTool(
     "load_skill",
@@ -185,18 +180,16 @@ const tools: Anthropic.Tool[] = [
 ];
 
 const TOOL_SCHEMAS: Partial<Record<string, z.ZodObject>> = {
-  ...S05_SCHEMAS,
-  task: taskSchema,
+  ...S06_SCHEMAS,
   load_skill: loadSkillSchema,
 };
 
-// handler 可能是 async：task -> spawnSubagent 返回 Promise。
-// 第二参 deps 让需要依赖的 handler 拿到 client/logger/skills，纯工具忽略它。
+// s06 的 handler 收 Deps，放进 LoopDeps 表没问题——参数逆变：收窄依赖的函数
+// 能接受更宽的实参。第二参 deps 让 load_skill 拿到 skills/logger。
 const TOOL_HANDLERS: Partial<
   Record<string, (input: any, deps: LoopDeps) => string | Promise<string>>
 > = {
-  ...S05_HANDLERS,
-  task: ({ description }, deps) => spawnSubagent(description, deps),
+  ...S06_HANDLERS,
   // load_skill 走 runLoadSkill：查表 + 专属 [skill] logger。
   load_skill: ({ name }, deps) => runLoadSkill(name, deps),
 };
@@ -237,6 +230,12 @@ export async function agentLoop(
     bumpNagCounter();
     const results: Anthropic.ToolResultBlockParam[] = [];
     for (const block of response.content) {
+      // 工具调用前的铺垫文字：和 tool_use 同批返回，打印出来而不是只存进历史。
+      if (block.type === "text") {
+        const text = block.text.trim();
+        if (text) print(text, "green");
+        continue;
+      }
       if (block.type !== "tool_use") continue;
 
       print(`> [${block.name}] ${JSON.stringify(block.input)}`, "cyan");
