@@ -11,7 +11,7 @@ import type { SessionLogger } from "./logger";
 import type { ModelClient } from "./model";
 
 // 工具以 WORKDIR = process.cwd() 为根，临时目录必须建在仓库内。
-// 统一放在 .tmp/（已 gitignore）下，注册 beforeAll/afterAll 自动创建与清理。
+// 统一放在 .runtime/（已 gitignore）下，注册 beforeAll/afterAll 自动创建与清理。
 // onReady 在目录建好后回传其绝对路径；返回值把目录内文件转成相对 WORKDIR 的路径。
 export function useTempDir(
   prefix: string,
@@ -19,8 +19,8 @@ export function useTempDir(
 ): (name: string) => string {
   let dir = "";
   beforeAll(() => {
-    fs.mkdirSync(path.join(process.cwd(), ".tmp"), { recursive: true });
-    dir = fs.mkdtempSync(path.join(process.cwd(), ".tmp", `${prefix}-`));
+    fs.mkdirSync(path.join(process.cwd(), ".runtime"), { recursive: true });
+    dir = fs.mkdtempSync(path.join(process.cwd(), ".runtime", `${prefix}-`));
     onReady(dir);
   });
   afterAll(() => {

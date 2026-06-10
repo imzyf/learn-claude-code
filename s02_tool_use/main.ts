@@ -26,7 +26,7 @@ import { z } from "zod";
 import { createLogger, type SessionLogger } from "../lib/logger";
 import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
 import { colorize, print } from "../lib/terminal";
-import { textOf, zodTool } from "../lib/tools";
+import { printProse, textOf, zodTool } from "../lib/tools";
 import { bashSchema, runBash as s01RunBash } from "../s01_agent_loop/main";
 
 const WORKDIR = process.cwd();
@@ -186,7 +186,11 @@ export async function agentLoop(
     // 通过 dispatch 分发表逐个执行 tool call，收集结果
     const results: Anthropic.ToolResultBlockParam[] = [];
     for (const block of response.content) {
-      if (block.type !== "tool_use") continue;
+      if (block.type !== "tool_use") {
+        printProse(block);
+        continue;
+      }
+
       /*
         block 结构
         {
@@ -198,7 +202,6 @@ export async function agentLoop(
           }
         }
       */
-      print(`> [${block.name}] ${JSON.stringify(block.input)}`, "cyan");
       // 按 tool 名字查出对应的 schema
       const schema = TOOL_SCHEMAS[block.name];
       // 按 tool 名字查出对应的 handler

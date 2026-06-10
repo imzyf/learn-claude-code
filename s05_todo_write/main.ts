@@ -44,7 +44,7 @@ import { z } from "zod";
 import { createLogger, type SessionLogger } from "../lib/logger";
 import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
 import { colorize, print } from "../lib/terminal";
-import { textOf, zodTool } from "../lib/tools";
+import { printProse, textOf, zodTool } from "../lib/tools";
 // 来自 s02：tool 定义（tools）与 schema 表（TOOL_SCHEMAS）——纯数据，原样复用。
 import {
   TOOL_SCHEMAS as BASE_SCHEMAS,
@@ -264,9 +264,11 @@ export async function agentLoop(
     bumpNagCounter();
     const results: Anthropic.ToolResultBlockParam[] = [];
     for (const block of response.content) {
-      if (block.type !== "tool_use") continue;
+      if (block.type !== "tool_use") {
+        printProse(block);
+        continue;
+      }
 
-      print(`> [${block.name}] ${JSON.stringify(block.input)}`, "cyan");
       const blocked = await triggerHooks("PreToolUse", block);
       if (blocked) {
         results.push({

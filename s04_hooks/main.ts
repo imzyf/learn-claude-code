@@ -57,7 +57,7 @@ import type Anthropic from "@anthropic-ai/sdk";
 import { createLogger, type SessionLogger } from "../lib/logger";
 import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
 import { colorize, print } from "../lib/terminal";
-import { textOf } from "../lib/tools";
+import { printProse, textOf } from "../lib/tools";
 // 来自 s02：tool 定义（tools）与 schema 表（TOOL_SCHEMAS）——纯数据，原样复用。
 import { TOOL_SCHEMAS, tools } from "../s02_tool_use/main";
 // 来自 s03：dispatch 表（TOOL_HANDLERS）+ 权限确认抽象（Confirm / makeConfirm）。
@@ -288,9 +288,11 @@ export async function agentLoop(
 
     const results: Anthropic.ToolResultBlockParam[] = [];
     for (const block of response.content) {
-      if (block.type !== "tool_use") continue;
+      if (block.type !== "tool_use") {
+        printProse(block);
+        continue;
+      }
 
-      print(`> [${block.name}] ${JSON.stringify(block.input)}`, "cyan");
       // 特殊点 2：PreToolUse hook 取代 s03 的 checkPermission()——
       // 返回非 null 即拦截，返回值直接当成 tool_result 内容回给模型。
       const blocked = await triggerHooks("PreToolUse", block);

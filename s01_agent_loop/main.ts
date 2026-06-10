@@ -35,7 +35,7 @@ import { z } from "zod";
 import { createLogger, type SessionLogger } from "../lib/logger";
 import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
 import { colorize, print } from "../lib/terminal";
-import { textOf, zodTool } from "../lib/tools";
+import { printProse, textOf, zodTool } from "../lib/tools";
 
 const SYSTEM = `You are a coding agent at ${process.cwd()}. Use bash to solve tasks. Act, don't explain.`;
 
@@ -101,7 +101,11 @@ export async function agentLoop(
     const results: Anthropic.ToolResultBlockParam[] = [];
     for (const block of response.content) {
       // 可能是 thinking block，跳过
-      if (block.type !== "tool_use") continue;
+      if (block.type !== "tool_use") {
+        printProse(block);
+        continue;
+      }
+
       /*
         block 结构
         {

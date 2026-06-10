@@ -1,5 +1,6 @@
 // lib/smoke.ts - 最小端到端冒烟检查：一次提问、一次回复
 import { createClient, MODEL_ID } from "./model";
+import { print } from "./terminal";
 import { textOf } from "./tools";
 
 const client = createClient();
@@ -12,6 +13,6 @@ const response = await client.messages.create({
   messages: [{ role: "user", content: "Reply with exactly: ok" }],
 });
 
-console.log(`model: ${MODEL_ID}`);
-console.log(`reply: ${textOf(response)}`);
-console.log(`usage: ${JSON.stringify(response.usage)}`);
+print(`model: ${MODEL_ID}`, "cyan");
+print(`reply: ${textOf(response)}`, "green");
+print(`usage: ${JSON.stringify(response.usage)}`, "gray");

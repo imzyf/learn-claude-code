@@ -36,7 +36,7 @@ import type Anthropic from "@anthropic-ai/sdk";
 import { createLogger, type SessionLogger } from "../lib/logger";
 import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
 import { colorize, print } from "../lib/terminal";
-import { textOf } from "../lib/tools";
+import { printProse, textOf } from "../lib/tools";
 // 四个文件工具、tool 定义、schema 表在 s03 都没变，直接从 s02 复用，
 // 不再包一层同名 wrapper。只有 runBash 是 s03 自己的版本（见下）。
 import {
@@ -245,9 +245,11 @@ export async function agentLoop(
 
     const results: Anthropic.ToolResultBlockParam[] = [];
     for (const block of response.content) {
-      if (block.type !== "tool_use") continue;
+      if (block.type !== "tool_use") {
+        printProse(block);
+        continue;
+      }
 
-      print(`> [${block.name}] ${JSON.stringify(block.input)}`, "cyan");
       // s03 改动：执行前先过一遍 permission pipeline
       if (!(await checkPermission(block, confirm, logger))) {
         results.push({

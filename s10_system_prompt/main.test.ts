@@ -95,8 +95,8 @@ describe("updateContext", () => {
   let tmp: string;
 
   beforeEach(() => {
-    fs.mkdirSync(path.join(process.cwd(), ".tmp"), { recursive: true });
-    tmp = fs.mkdtempSync(path.join(process.cwd(), ".tmp", "s10-"));
+    fs.mkdirSync(path.join(process.cwd(), ".runtime"), { recursive: true });
+    tmp = fs.mkdtempSync(path.join(process.cwd(), ".runtime", "s10-"));
   });
 
   afterEach(() => {
@@ -120,7 +120,7 @@ describe("updateContext", () => {
 describe("agentLoop", () => {
   const memoryIndex = path.join(
     process.cwd(),
-    ".tmp",
+    ".runtime",
     "s10-nonexistent",
     "MEMORY.md",
   );

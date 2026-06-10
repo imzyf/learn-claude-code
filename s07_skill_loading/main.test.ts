@@ -5,7 +5,7 @@
  * SYSTEM 里只放名称+描述（便宜），完整 SKILL.md 由 load_skill 工具按需注入（昂贵）。
  * 扫描/解析都是纯函数（传目录或 registry，不依赖模块级全局），可直接单测；
  * agentLoop 通过 load_skill 工具分发，用 fake client + 内存 registry 验证。
- * 其余（subagent 隔离、permissionHook、todo）沿用 s06。
+ * 其余（subagent 隔离、permissionHook、todo）沿用 s05/s06，其测试不在此重复。
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -20,14 +20,8 @@ import {
   toolUseBlock,
 } from "../lib/testing";
 import { clearHooks } from "../s04_hooks/main";
-// 复用来的符号从源头 import（和 s06 的测试一致），s07 只导出自己的技能层。
-import {
-  normalizeTodos,
-  permissionHook,
-  resetNagCounter,
-  runTodoWrite,
-} from "../s05_todo_write/main";
-import { spawnSubagent } from "../s06_subagent/main";
+// s05/s06 的层沿用旧实现，各自的测试不在此重复；这里只借 resetNagCounter 做 setup。
+import { resetNagCounter } from "../s05_todo_write/main";
 import {
   agentLoop,
   buildSystem,
@@ -98,15 +92,29 @@ describe("parseFrontmatter", () => {
     const { body } = parseFrontmatter("---\nname: x\n---\nabove\n---\nbelow");
     expect(body).toBe("above\n---\nbelow");
   });
+
+  it("parses a multi-line block scalar (yaml lib, not line-by-line parsing)", () => {
+    const { meta, body } = parseFrontmatter(
+      "---\nname: x\ndescription: |\n  First line.\n  Second line.\n---\nbody",
+    );
+    expect(meta.description).toBe("First line.\nSecond line.\n");
+    expect(body).toBe("body");
+  });
+
+  it("falls back to empty meta when the frontmatter is invalid YAML", () => {
+    const { meta, body } = parseFrontmatter("---\nkey: [unclosed\n---\nbody");
+    expect(meta).toEqual({});
+    expect(body).toBe("body");
+  });
 });
 
-// ── scanSkills (real files under .tmp/) ───────────────────
+// ── scanSkills (real files under .runtime/) ───────────────
 describe("scanSkills", () => {
   let dir: string;
 
   beforeAll(() => {
-    fs.mkdirSync(path.join(process.cwd(), ".tmp"), { recursive: true });
-    dir = fs.mkdtempSync(path.join(process.cwd(), ".tmp", "s07-"));
+    fs.mkdirSync(path.join(process.cwd(), ".runtime"), { recursive: true });
+    dir = fs.mkdtempSync(path.join(process.cwd(), ".runtime", "s07-"));
     const skill = (name: string, body: string) => {
       fs.mkdirSync(path.join(dir, name), { recursive: true });
       fs.writeFileSync(path.join(dir, name, "SKILL.md"), body);
@@ -210,57 +218,6 @@ describe("runLoadSkill", () => {
 
     expect(out).toBe("Skill not found: ghost");
     expect(logged[0]).toMatchObject({ name: "ghost", found: false });
-  });
-});
-
-// ── todo helpers (same as s05) ────────────────────────────
-describe("todo helpers", () => {
-  it("normalizeTodos accepts an array", () => {
-    expect(
-      normalizeTodos([{ content: "a", status: "pending" }]).error,
-    ).toBeUndefined();
-  });
-
-  it("runTodoWrite reports the count", () => {
-    expect(runTodoWrite([{ content: "a", status: "pending" }])).toBe(
-      "Updated 1 tasks",
-    );
-  });
-});
-
-// ── permissionHook (same as s06) ──────────────────────────
-describe("permissionHook", () => {
-  it("denies deny-list bash commands", () => {
-    expect(
-      permissionHook(toolUseBlock("t", "bash", { command: "sudo x" })),
-    ).toBe("Blocked: 'sudo' is on the deny list");
-  });
-});
-
-// ── spawnSubagent (same as s06) ───────────────────────────
-describe("spawnSubagent", () => {
-  it("returns the subagent's final text", async () => {
-    const client = fakeClient(fakeMessage([textBlock("answer")], "end_turn"));
-
-    const result = await spawnSubagent("do x", { client, logger: noopLogger });
-
-    expect(result).toBe("answer");
-    expect(client.messages.create).toHaveBeenCalledOnce();
-  });
-
-  it("runs its own tool loop before returning a summary", async () => {
-    const client = fakeClient(
-      fakeMessage(
-        [toolUseBlock("s1", "bash", { command: "echo hi" })],
-        "tool_use",
-      ),
-      fakeMessage([textBlock("summary")], "end_turn"),
-    );
-
-    const result = await spawnSubagent("do x", { client, logger: noopLogger });
-
-    expect(result).toBe("summary");
-    expect(client.messages.create).toHaveBeenCalledTimes(2);
   });
 });
 

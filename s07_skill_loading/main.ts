@@ -47,7 +47,7 @@ import { z } from "zod";
 import { createLogger, type SessionLogger } from "../lib/logger";
 import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
 import { colorize, print } from "../lib/terminal";
-import { textOf, zodTool } from "../lib/tools";
+import { printProse, textOf, zodTool } from "../lib/tools";
 // 来自 s04：hook 系统（触发器 + logger 注入）。
 import { setHookLogger, triggerHooks } from "../s04_hooks/main";
 // 来自 s05：默认 hook 注册 + nag 机制（nagIfStale / bumpNagCounter / resetNagCounter）。
@@ -117,6 +117,7 @@ export function scanSkills(dir: string): SkillRegistry {
     const raw = fs.readFileSync(manifest, "utf8");
     const { meta } = parseFrontmatter(raw);
     const name = meta.name ?? entry.name;
+    // 描述优先取 frontmatter 的 description，缺省则退回正文首行（去掉开头的 # 号）
     const description =
       meta.description ?? (raw.split("\n")[0] ?? "").replace(/^#+/, "").trim();
     registry[name] = { name, description, content: raw };
@@ -230,15 +231,11 @@ export async function agentLoop(
     bumpNagCounter();
     const results: Anthropic.ToolResultBlockParam[] = [];
     for (const block of response.content) {
-      // 工具调用前的铺垫文字：和 tool_use 同批返回，打印出来而不是只存进历史。
-      if (block.type === "text") {
-        const text = block.text.trim();
-        if (text) print(text, "green");
+      if (block.type !== "tool_use") {
+        printProse(block);
         continue;
       }
-      if (block.type !== "tool_use") continue;
 
-      print(`> [${block.name}] ${JSON.stringify(block.input)}`, "cyan");
       const blocked = await triggerHooks("PreToolUse", block);
       if (blocked) {
         results.push({
