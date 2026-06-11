@@ -5,6 +5,7 @@
  * 不发 API 也不写盘（只测 under-budget 的 no-op 路径，避免落 .transcripts/），
  * 直接单测最合适；summarizeHistory 用 fake client 验证摘要提取。
  * agentLoop 复用 s07 的分发骨架：load_skill / task / 普通工具。
+ * 其余（技能层、permissionHook、subagent 隔离、todo）沿用 s05/s06/s07，其测试不在此重复。
  */
 
 import type Anthropic from "@anthropic-ai/sdk";
@@ -16,29 +17,28 @@ import {
   textBlock,
   toolUseBlock,
 } from "../lib/testing";
+import { clearHooks } from "../s04_hooks/main";
+// s05/s06/s07 的层沿用旧实现，各自的测试不在此重复；这里只借 resetNagCounter 做 setup。
+import { resetNagCounter } from "../s05_todo_write/main";
+import type { SkillRegistry } from "../s07_skill_loading/main";
 import {
   agentLoop,
-  buildSystem,
-  clearHooks,
   collectToolResults,
   estimateSize,
-  loadSkill,
   microCompact,
-  parseFrontmatter,
-  permissionHook,
   persistLargeOutput,
-  type SkillRegistry,
   setMessages,
   snipCompact,
-  spawnSubagent,
   summarizeHistory,
   toolResultBudget,
 } from "./main";
 
 beforeEach(() => {
   clearHooks();
+  resetNagCounter();
 });
 
+// 内存 registry：load_skill 分发无需碰文件系统。
 const registry: SkillRegistry = {
   "code-review": {
     name: "code-review",
@@ -60,26 +60,6 @@ function toolRound(id: string, output: string): Anthropic.MessageParam[] {
     },
   ];
 }
-
-// ── skill catalog (same as s07) ───────────────────────────
-describe("skill catalog", () => {
-  it("parses frontmatter and keeps a later '---' in the body", () => {
-    const { meta, body } = parseFrontmatter(
-      "---\nname: x\n---\nabove\n---\nbelow",
-    );
-    expect(meta.name).toBe("x");
-    expect(body).toBe("above\n---\nbelow");
-  });
-
-  it("builds a SYSTEM prompt containing the catalog", () => {
-    expect(buildSystem(registry)).toContain("code-review");
-  });
-
-  it("loadSkill returns content or a miss message", () => {
-    expect(loadSkill(registry, "code-review")).toBe("FULL code-review content");
-    expect(loadSkill(registry, "ghost")).toBe("Skill not found: ghost");
-  });
-});
 
 // ── compaction preprocessors (pure, no I/O) ───────────────
 describe("snipCompact", () => {
@@ -185,27 +165,6 @@ describe("summarizeHistory", () => {
     });
 
     expect(summary).toBe("[no text in response]");
-  });
-});
-
-// ── permissionHook ────────────────────────────────────────
-describe("permissionHook", () => {
-  it("denies deny-list bash commands", () => {
-    expect(
-      permissionHook(toolUseBlock("t", "bash", { command: "sudo rm" })),
-    ).toBe("Permission denied");
-  });
-});
-
-// ── spawnSubagent (same as s06/s07) ───────────────────────
-describe("spawnSubagent", () => {
-  it("returns the subagent's final text", async () => {
-    const client = fakeClient(fakeMessage([textBlock("answer")], "end_turn"));
-
-    const result = await spawnSubagent("do x", { client, logger: noopLogger });
-
-    expect(result).toBe("answer");
-    expect(client.messages.create).toHaveBeenCalledOnce();
   });
 });
 

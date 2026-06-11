@@ -1,4 +1,4 @@
-.PHONY: help setup sync sync-force smoke test test-watch typecheck lint lint-check \
+.PHONY: help setup sync sync-force smoke test typecheck lint lint-check open \
 	s01 s02 s03 s04 s05 s06 s07 s08 s09 s10 \
 	s11 s12 s13 s14 s15 s16 s17 s18 s19 s20
 
@@ -9,6 +9,9 @@ help: ## Show this help
 		$(MAKEFILE_LIST)
 
 ##@ Setup
+
+open: ## Open the upstream repo in the browser
+	open https://github.com/shareAI-lab/learn-claude-code
 
 setup: ## Install deps and create .env from .env.example.upstream
 	pnpm install
@@ -21,9 +24,6 @@ smoke: ## One-shot API call to verify the setup
 
 test: ## Run the test suite once
 	pnpm test
-
-test-watch: ## Run the test suite in watch mode
-	pnpm test:watch
 
 typecheck: ## Type-check without emitting
 	pnpm typecheck

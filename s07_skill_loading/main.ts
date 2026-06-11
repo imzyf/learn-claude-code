@@ -66,7 +66,8 @@ import {
   tools as s06Tools,
 } from "../s06_subagent/main";
 
-// s07 只导出自己拥有的东西：技能层 + agentLoop + LoopDeps。
+// s07 导出自己拥有的东西：技能层 + agentLoop + LoopDeps，
+// 外加装配好的三张工具表（base + todo + task + load_skill），供 s08 继续叠加。
 // 复用来的符号（spawnSubagent / 各 hook / nag）由测试各自从源头 import。
 
 const WORKDIR = process.cwd();
@@ -170,7 +171,7 @@ export function runLoadSkill(name: string, deps: LoopDeps): string {
 
 const loadSkillSchema = z.object({ name: z.string() });
 
-const tools: Anthropic.Tool[] = [
+export const tools: Anthropic.Tool[] = [
   ...s06Tools,
   // s07 新增：load_skill（清单已在 SYSTEM 里，这里加载完整内容）
   zodTool(
@@ -180,14 +181,14 @@ const tools: Anthropic.Tool[] = [
   ),
 ];
 
-const TOOL_SCHEMAS: Partial<Record<string, z.ZodObject>> = {
+export const TOOL_SCHEMAS: Partial<Record<string, z.ZodObject>> = {
   ...S06_SCHEMAS,
   load_skill: loadSkillSchema,
 };
 
 // s06 的 handler 收 Deps，放进 LoopDeps 表没问题——参数逆变：收窄依赖的函数
 // 能接受更宽的实参。第二参 deps 让 load_skill 拿到 skills/logger。
-const TOOL_HANDLERS: Partial<
+export const TOOL_HANDLERS: Partial<
   Record<string, (input: any, deps: LoopDeps) => string | Promise<string>>
 > = {
   ...S06_HANDLERS,
