@@ -52,12 +52,12 @@ import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
 import { colorize, print } from "../lib/terminal";
 import { printProse, textOf, zodTool } from "../lib/tools";
 // 来自 s04：hook 系统（触发器 + logger 注入）。
-import { setHookLogger, triggerHooks } from "../s04_hooks/main";
-// 来自 s05：默认 hook 注册 + nag 机制（nagIfStale / bumpNagCounter / resetNagCounter）。
+import { triggerHooks } from "../s04_hooks/main";
+// 来自 s05：hook 装配（loadHooks = setHookLogger + registerDefaultHooks）+ nag 机制。
 import {
   bumpNagCounter,
+  loadHooks,
   nagIfStale,
-  registerDefaultHooks,
   resetNagCounter,
 } from "../s05_todo_write/main";
 // 来自 s06：共享的 Deps 类型（client + logger）。
@@ -66,12 +66,11 @@ import type { Deps } from "../s06_subagent/main";
 // s08 只在 tools 列表上追加 compact，schema/handler 表原样复用。
 import {
   buildSystem,
-  listSkills,
   type LoopDeps,
-  scanSkills,
+  loadSkills,
+  tools as s07Tools,
   TOOL_HANDLERS,
   TOOL_SCHEMAS,
-  tools as s07Tools,
 } from "../s07_skill_loading/main";
 
 // s08 导出自己拥有的东西：压缩流水线（L1~L4 + reactive）+ agentLoop。
@@ -419,19 +418,16 @@ export async function agentLoop(
 }
 
 // ── 入口 ──────────────────────────────────────────
-// Prompt example: 让对话变长，观察四层压缩何时触发（或直接用 compact 工具）。
+// Prompt example: Read the file README.md, then read code.py, then read s01_agent_loop/README.md
 if (import.meta.main) {
   const client: ModelClient = createClient();
   const logger: SessionLogger = createLogger(import.meta.dirname);
-  const skills = scanSkills(SKILLS_DIR);
+  const skills = loadSkills(SKILLS_DIR, logger);
   const system = buildSystem(skills);
 
   logger.config({ model: MODEL_ID, system, tools });
-  // 启动时把技能清单单独记进 transcript，便于对照后续的 skill 加载事件。
-  logger.section("SKILL CATALOG", listSkills(skills));
 
-  setHookLogger(logger);
-  registerDefaultHooks();
+  loadHooks(logger);
 
   const rl = readline.createInterface({
     input: process.stdin,

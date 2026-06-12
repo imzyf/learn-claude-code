@@ -44,62 +44,62 @@ sync-force: ## Sync from upstream, ignoring the clone cache
 
 ##@ Sessions
 
-s01: ## Run s01 agent loop (interactive)
+s01: ## Run s01 agent loop
 	pnpm dev s01_agent_loop/main.ts
 
-s02: ## Run s02 tool use (interactive)
+s02: ## Run s02 tool use
 	pnpm dev s02_tool_use/main.ts
 
-s03: ## Run s03 permission system (interactive)
+s03: ## Run s03 permission system
 	pnpm dev s03_permission/main.ts
 
-s04: ## Run s04 hooks (interactive)
+s04: ## Run s04 hooks
 	pnpm dev s04_hooks/main.ts
 
-s05: ## Run s05 todo write (interactive)
+s05: ## Run s05 todo write
 	pnpm dev s05_todo_write/main.ts
 
-s06: ## Run s06 subagent (interactive)
+s06: ## Run s06 subagent
 	pnpm dev s06_subagent/main.ts
 
-s07: ## Run s07 skill loading (interactive)
+s07: ## Run s07 skill loading
 	pnpm dev s07_skill_loading/main.ts
 
-s08: ## Run s08 context compaction (interactive)
+s08: ## Run s08 context compaction
 	pnpm dev s08_context_compact/main.ts
 
-s09: ## Run s09 memory (interactive)
+s09: ## Run s09 memory
 	pnpm dev s09_memory/main.ts
 
-s10: ## Run s10 system prompt (interactive)
+s10: ## Run s10 system prompt
 	pnpm dev s10_system_prompt/main.ts
 
-s11: ## Run s11 error recovery (interactive)
+s11: ## Run s11 error recovery
 	pnpm dev s11_error_recovery/main.ts
 
-s12: ## Run s12 task system (interactive)
+s12: ## Run s12 task system
 	pnpm dev s12_task_system/main.ts
 
-s13: ## Run s13 background tasks (interactive)
+s13: ## Run s13 background tasks
 	pnpm dev s13_background_tasks/main.ts
 
-s14: ## Run s14 cron scheduler (interactive)
+s14: ## Run s14 cron scheduler
 	pnpm dev s14_cron_scheduler/main.ts
 
-s15: ## Run s15 agent teams (interactive)
+s15: ## Run s15 agent teams
 	pnpm dev s15_agent_teams/main.ts
 
-s16: ## Run s16 team protocols (interactive)
+s16: ## Run s16 team protocols
 	pnpm dev s16_team_protocols/main.ts
 
-s17: ## Run s17 autonomous agents (interactive)
+s17: ## Run s17 autonomous agents
 	pnpm dev s17_autonomous_agents/main.ts
 
-s18: ## Run s18 worktree isolation (interactive)
+s18: ## Run s18 worktree isolation
 	pnpm dev s18_worktree_isolation/main.ts
 
-s19: ## Run s19 MCP plugin (interactive)
+s19: ## Run s19 MCP plugin
 	pnpm dev s19_mcp_plugin/main.ts
 
-s20: ## Run s20 comprehensive (interactive)
+s20: ## Run s20 comprehensive
 	pnpm dev s20_comprehensive/main.ts

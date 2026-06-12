@@ -49,12 +49,12 @@ import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
 import { colorize, print } from "../lib/terminal";
 import { printProse, textOf, zodTool } from "../lib/tools";
 // 来自 s04：hook 系统（触发器 + logger 注入）。
-import { setHookLogger, triggerHooks } from "../s04_hooks/main";
-// 来自 s05：默认 hook 注册 + nag 机制（nagIfStale / bumpNagCounter / resetNagCounter）。
+import { triggerHooks } from "../s04_hooks/main";
+// 来自 s05：hook 装配（loadHooks = setHookLogger + registerDefaultHooks）+ nag 机制。
 import {
   bumpNagCounter,
+  loadHooks,
   nagIfStale,
-  registerDefaultHooks,
   resetNagCounter,
 } from "../s05_todo_write/main";
 // 来自 s06：subagent（全新 messages[]、只回摘要）、共享的 Deps 类型，
@@ -140,6 +140,14 @@ export function buildSystem(registry: SkillRegistry): string {
     `Skills available:\n${listSkills(registry)}\n` +
     "Use load_skill to get full details when needed."
   );
+}
+
+// 入口层 helper：扫描 + 把技能清单单独记进 transcript，返回 registry。
+// scanSkills 保持纯净，副作用（日志）留在这层，s07/s08 入口复用。
+export function loadSkills(dir: string, logger: SessionLogger): SkillRegistry {
+  const registry = scanSkills(dir);
+  logger.section("SKILL CATALOG", listSkills(registry));
+  return registry;
 }
 
 // 加载技能完整内容。经 registry 查表——不做路径拼接，杜绝目录穿越。
@@ -277,15 +285,12 @@ export async function agentLoop(
 if (import.meta.main) {
   const client: ModelClient = createClient();
   const logger: SessionLogger = createLogger(import.meta.dirname);
-  const skills = scanSkills(SKILLS_DIR);
+  const skills = loadSkills(SKILLS_DIR, logger);
   const system = buildSystem(skills);
 
   logger.config({ model: MODEL_ID, system, tools });
-  // 启动时把技能清单单独记进 transcript，便于对照后续的 skill 加载事件。
-  logger.section("SKILL CATALOG", listSkills(skills));
 
-  setHookLogger(logger);
-  registerDefaultHooks();
+  loadHooks(logger);
 
   const rl = readline.createInterface({
     input: process.stdin,

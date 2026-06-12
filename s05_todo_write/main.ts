@@ -198,6 +198,12 @@ export function registerDefaultHooks(): void {
   getHookLogger()?.hookRegister(getHooks());
 }
 
+// 入口层 helper：注入 logger + 注册默认 hook，s05/s07/s08 入口复用。
+export function loadHooks(logger: SessionLogger): void {
+  setHookLogger(logger);
+  registerDefaultHooks();
+}
+
 // ═══════════════════════════════════════════════════════════
 //  agentLoop —— 和 s04 一样，只多了 nag 计数器
 // ═══════════════════════════════════════════════════════════
@@ -310,8 +316,7 @@ if (import.meta.main) {
   const logger = createLogger(import.meta.dirname);
   logger.config({ model: MODEL_ID, system: SYSTEM, tools });
 
-  setHookLogger(logger);
-  registerDefaultHooks();
+  loadHooks(logger);
 
   const rl = readline.createInterface({
     input: process.stdin,

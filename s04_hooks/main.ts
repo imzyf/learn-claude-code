@@ -241,7 +241,7 @@ export function summaryHook(messages: Anthropic.MessageParam[]): null {
 
 // 默认 hook 注册收进函数，只在入口调用一次；import 该模块不产生副作用。
 // permissionHook 需要 confirm，所以注册时才把它注入进去。
-export function registerDefaultHooks(confirm: Confirm): void {
+function registerDefaultHooks(confirm: Confirm): void {
   registerHook("UserPromptSubmit", contextInjectHook);
   registerHook("PreToolUse", makePermissionHook(confirm));
   registerHook("PreToolUse", logHook);

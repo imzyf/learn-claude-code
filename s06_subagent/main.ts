@@ -48,13 +48,13 @@ import {
 // 来自 s03：基础 dispatch 表（bash/文件工具的 handler）——subagent 复用。
 import { TOOL_HANDLERS as BASE_HANDLERS } from "../s03_permission/main";
 // 来自 s04：hook 系统（触发器 + logger 注入）。
-import { setHookLogger, triggerHooks } from "../s04_hooks/main";
-// 来自 s05：默认 hook 注册 + 装配好的工具三张表，
-// 以及 nag 机制（nagIfStale / bumpNagCounter / resetNagCounter）——单一出处在 s05。
+import { triggerHooks } from "../s04_hooks/main";
+// 来自 s05：hook 装配（loadHooks = setHookLogger + registerDefaultHooks）+ 装配好的
+// 工具三张表 + nag 机制（nagIfStale / bumpNagCounter / resetNagCounter）——单一出处在 s05。
 import {
   bumpNagCounter,
+  loadHooks,
   nagIfStale,
-  registerDefaultHooks,
   resetNagCounter,
   TOOL_HANDLERS as S05_HANDLERS,
   TOOL_SCHEMAS as S05_SCHEMAS,
@@ -272,8 +272,7 @@ if (import.meta.main) {
   const logger = createLogger(import.meta.dirname);
   logger.config({ model: MODEL_ID, system: SYSTEM, tools });
 
-  setHookLogger(logger);
-  registerDefaultHooks();
+  loadHooks(logger);
 
   const rl = readline.createInterface({
     input: process.stdin,
