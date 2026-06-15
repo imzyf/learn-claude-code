@@ -35,7 +35,6 @@ export const noopLogger: SessionLogger = {
   toolResult() {},
   permission() {},
   hookResult() {},
-  hookRegister() {},
   console() {},
   config() {},
   section() {},

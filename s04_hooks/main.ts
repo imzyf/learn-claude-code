@@ -111,9 +111,21 @@ export function getHookLogger(): SessionLogger | null {
 export function registerHook(event: string, callback: Hook): void {
   HOOKS[event].push(callback);
 }
-// 跨模块读同一份注册表（如 s05 的 registerDefaultHooks 一次性记录注册结果）。
-export function getHooks(): Record<string, Hook[]> {
-  return HOOKS;
+
+// 注册完一次性把各 event 的 hook 名单写进 transcript（按最长 event 名对齐）。
+export function logHookRegistration(): void {
+  // 转成 [event, hooks] 键值对数组，只留至少注册了一个 hook 的 event。
+  const entries = Object.entries(HOOKS).filter(([, hs]) => hs.length > 0);
+  // 按最长 event 名补空格，让各行的 hook 列表左对齐。
+  const pad = Math.max(...entries.map(([event]) => event.length)) + 2;
+  const summary = entries
+    .map(
+      ([event, hs]) =>
+        `${event}:`.padEnd(pad) +
+        hs.map((h) => h.name || "(anonymous)").join(", "),
+    )
+    .join("\n");
+  hookLogger?.section("HOOK REGISTER", summary);
 }
 
 export async function triggerHooks(
@@ -248,8 +260,8 @@ function registerDefaultHooks(confirm: Confirm): void {
   registerHook("PostToolUse", largeOutputHook);
   registerHook("Stop", summaryHook);
 
-  // 注册完一次性记录：格式化由 logger.hookRegister 负责。
-  hookLogger?.hookRegister(HOOKS);
+  // 注册完一次性记录注册结果。
+  logHookRegistration();
 }
 
 // ═══════════════════════════════════════════════════════════

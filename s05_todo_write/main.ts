@@ -60,8 +60,8 @@ import {
   clearHooks,
   contextInjectHook,
   getHookLogger,
-  getHooks,
   logHook,
+  logHookRegistration,
   registerHook,
   setHookLogger,
   summaryHook,
@@ -194,8 +194,8 @@ export function registerDefaultHooks(): void {
   registerHook("PreToolUse", permissionHook);
   registerHook("PreToolUse", logHook);
   registerHook("Stop", summaryHook);
-  // 注册完一次性记录（和 s04 一致，跨模块用 getter 读 logger/registry）。
-  getHookLogger()?.hookRegister(getHooks());
+  // 注册完一次性记录（和 s04 一致，复用 s04 的格式化）。
+  logHookRegistration();
 }
 
 // 入口层 helper：注入 logger + 注册默认 hook，s05/s07/s08 入口复用。

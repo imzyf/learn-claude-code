@@ -41,8 +41,6 @@ export interface SessionLogger {
     args: unknown[],
     blocked: string | null,
   ): void;
-  // 记录默认 hook 的一次性注册：按 event 列出各 hook 名字。
-  hookRegister(hooks: Record<string, readonly { name: string }[]>): void;
 
   // 带颜色打到终端，同时把纯文本写进 transcript。
   console(message: string, color?: Color): void;
@@ -165,19 +163,6 @@ export function createLogger(sessionDir: string): SessionLogger {
         );
       },
 
-      hookRegister(hooks) {
-        const entries = Object.entries(hooks).filter(([, hs]) => hs.length > 0);
-        // 按最长 event 名补空格，让各行的 hook 列表左对齐。
-        const pad = Math.max(...entries.map(([event]) => event.length)) + 2;
-        const summary = entries
-          .map(
-            ([event, hs]) =>
-              `${event}:`.padEnd(pad) +
-              hs.map((h) => h.name || "(anonymous)").join(", "),
-          )
-          .join("\n");
-        writeTranscript("HOOK REGISTER", summary);
-      },
 
       console(message: string, color?: Color) {
         print(message, color);
