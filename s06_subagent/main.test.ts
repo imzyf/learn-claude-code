@@ -16,7 +16,7 @@ import {
   textBlock,
   toolUseBlock,
 } from "../lib/testing";
-import { clearHooks } from "../s04_hooks/main";
+import { createHooks } from "../s04_hooks/main";
 import {
   normalizeTodos,
   permissionHook,
@@ -26,7 +26,6 @@ import {
 import { agentLoop, spawnSubagent } from "./main";
 
 beforeEach(() => {
-  clearHooks();
   resetNagCounter();
 });
 
@@ -39,9 +38,9 @@ describe("todo helpers", () => {
   });
 
   it("runTodoWrite reports the count", () => {
-    expect(runTodoWrite([{ content: "a", status: "pending" }])).toBe(
-      "Updated 1 tasks",
-    );
+    expect(
+      runTodoWrite([{ content: "a", status: "pending" }], noopLogger),
+    ).toBe("Updated 1 tasks");
   });
 });
 
@@ -49,7 +48,10 @@ describe("todo helpers", () => {
 describe("permissionHook", () => {
   it("denies deny-list bash commands", () => {
     expect(
-      permissionHook(toolUseBlock("t", "bash", { command: "sudo x" })),
+      permissionHook(
+        noopLogger,
+        toolUseBlock("t", "bash", { command: "sudo x" }),
+      ),
     ).toBe("Blocked: 'sudo' is on the deny list");
   });
 });
@@ -59,7 +61,11 @@ describe("spawnSubagent", () => {
   it("returns the subagent's final text", async () => {
     const client = fakeClient(fakeMessage([textBlock("answer")], "end_turn"));
 
-    const result = await spawnSubagent("do x", { client, logger: noopLogger });
+    const result = await spawnSubagent("do x", {
+      client,
+      logger: noopLogger,
+      hooks: createHooks(noopLogger),
+    });
 
     expect(result).toBe("answer");
     expect(client.messages.create).toHaveBeenCalledOnce();
@@ -74,7 +80,11 @@ describe("spawnSubagent", () => {
       fakeMessage([textBlock("summary")], "end_turn"),
     );
 
-    const result = await spawnSubagent("do x", { client, logger: noopLogger });
+    const result = await spawnSubagent("do x", {
+      client,
+      logger: noopLogger,
+      hooks: createHooks(noopLogger),
+    });
 
     expect(result).toBe("summary");
     expect(client.messages.create).toHaveBeenCalledTimes(2);
@@ -90,7 +100,11 @@ describe("spawnSubagent", () => {
     );
     const client = fakeClient(...rounds);
 
-    const result = await spawnSubagent("do x", { client, logger: noopLogger });
+    const result = await spawnSubagent("do x", {
+      client,
+      logger: noopLogger,
+      hooks: createHooks(noopLogger),
+    });
 
     expect(result).toBe("[no text in response]");
   });
@@ -111,7 +125,11 @@ describe("agentLoop", () => {
       { role: "user", content: "go" },
     ];
 
-    const result = await agentLoop(messages, { client, logger: noopLogger });
+    const result = await agentLoop(messages, {
+      client,
+      logger: noopLogger,
+      hooks: createHooks(noopLogger),
+    });
 
     expect(result).toBe("parent done");
     expect(client.messages.create).toHaveBeenCalledTimes(3);
@@ -132,7 +150,11 @@ describe("agentLoop", () => {
       { role: "user", content: "go" },
     ];
 
-    const result = await agentLoop(messages, { client, logger: noopLogger });
+    const result = await agentLoop(messages, {
+      client,
+      logger: noopLogger,
+      hooks: createHooks(noopLogger),
+    });
 
     expect(result).toBe("done");
     const toolResults = messages[2].content as Anthropic.ToolResultBlockParam[];

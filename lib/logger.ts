@@ -19,37 +19,18 @@ export interface SessionLogger {
   // 记录用户输入。
   userInput(query: string): void;
 
-  // API 调用前：记录请求消息。incremental=true（默认）只记本轮新增，false 记全部。
-  request(messages: Anthropic.MessageParam[], incremental?: boolean): void;
+  // API 调用前：记录请求消息。full=false（默认）只记本轮新增，true 记全部。
+  request(messages: Anthropic.MessageParam[], full?: boolean): void;
   // API 返回后：记录响应内容与 token / 成本。
   response(res: Anthropic.Message): void;
 
-  // 记录权限关卡对某个工具调用的放行 / 拦截决定。
-  permission(
-    toolName: string,
-    args: unknown,
-    reason: string,
-    decision: "allow" | "deny",
-  ): void;
   // 记录一次工具执行的命令与输出。
   toolResult(command: string, output: string): void;
-  // 记录 hook 执行结果：仅当该 hook 拦截了调用（blocked 非空）时落一条，
-  // 并把触发时的 args 序列化进去（超长会截断），便于看清被拦的是什么输入。
-  hookResult(
-    event: string,
-    name: string,
-    args: unknown[],
-    blocked: string | null,
-  ): void;
 
   // 带颜色打到终端，同时把纯文本写进 transcript。
   console(message: string, color?: Color): void;
-  // 往 transcript 追加一节：标题 + 正文。
+  // 往 transcript 追加一节：标题 + 正文。各模块的领域日志复用这个通用原语。
   section(title: string, body: string): void;
-  // 把带状态标记的清单按 `[status] content` 逐行写进 transcript（纯文本、无 ANSI）。
-  plain(items: readonly { content: string; status: string }[]): void;
-  // 记录一次技能加载：名称、是否命中、内容大小（完整内容另由 toolResult 落一份）。
-  skill(name: string, found: boolean, size: number): void;
 
   // 派生一个带 scope 标签的子 logger：写同一对文件，但各自维护增量计数，
   // 记录标注来源（main / sub），用于区分父 agent 与子 agent 的日志。
@@ -57,7 +38,8 @@ export interface SessionLogger {
 }
 
 export function createLogger(sessionDir: string): SessionLogger {
-  const sessionName = path.basename(sessionDir);
+  // 文件名前缀只取 session 名前三个字母（如 s07_skill_loading → s07）。
+  const sessionName = path.basename(sessionDir).slice(0, 3);
   const logDir = path.join(sessionDir, ".log");
   fs.mkdirSync(logDir, { recursive: true });
 
@@ -96,21 +78,6 @@ export function createLogger(sessionDir: string): SessionLogger {
     return {
       section: writeTranscript,
 
-      plain(items) {
-        const body = items
-          .map((it) => `[${it.status}] ${it.content}`)
-          .join("\n");
-        writeTranscript("TASKS", body || "(empty)");
-      },
-
-      skill(name, found, size) {
-        writeJson("skill", { name, found, size });
-        writeTranscript(
-          "SKILL",
-          found ? `load ${name} (${size} chars)` : `not found: ${name}`,
-        );
-      },
-
       config(data: Record<string, unknown>) {
         writeJson("config", data);
         if (typeof data.model === "string") {
@@ -124,9 +91,9 @@ export function createLogger(sessionDir: string): SessionLogger {
         writeTranscript("USER", query);
       },
 
-      request(messages: Anthropic.MessageParam[], incremental = true) {
+      request(messages: Anthropic.MessageParam[], full = false) {
         writeJson("api_request", {
-          new_messages: incremental ? messages.slice(loggedMessages) : messages,
+          new_messages: full ? messages : messages.slice(loggedMessages),
         });
         loggedMessages = messages.length;
       },
@@ -142,31 +109,13 @@ export function createLogger(sessionDir: string): SessionLogger {
         );
       },
 
-      permission(toolName, args, reason, decision) {
-        writeTranscript(
-          "PERMISSION",
-          `${reason}\nTool: ${toolName}(${JSON.stringify(args)})\nDecision: ${decision}`,
-        );
-      },
-
       toolResult(command: string, output: string) {
         writeTranscript(`TOOL RESULT (${command})`, output);
       },
 
-      hookResult(event, name, args, blocked) {
-        if (!blocked) return;
-        const hookName = name || "(anonymous)";
-        const serialized = JSON.stringify(args).slice(0, 500);
-        writeTranscript(
-          "HOOK RESULT",
-          `${event} → ${hookName}(${serialized}) blocked: ${blocked}`,
-        );
-      },
-
-
       console(message: string, color?: Color) {
         print(message, color);
-        writeTranscript("CONSOLE", message);
+        writeTranscript("CONSOLE PRINT", message);
       },
 
       child(sub: string) {

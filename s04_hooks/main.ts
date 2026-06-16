@@ -7,7 +7,7 @@
  *        │
  *        ▼
  *   ┌──────────────────┐
- *   │ UserPromptSubmit │ ── triggerHooks() before LLM
+ *   │ UserPromptSubmit │ ── hooks.trigger() before LLM
  *   └────────┬─────────┘
  *            ▼
  *   ┌────────────┐     ┌──────────────────────────────┐
@@ -17,7 +17,7 @@
  *                      └─────────────────────────────┘ │
  *                                                      ▼
  *                                          ┌──────────────────┐
- *                                          │ triggerHooks()    │
+ *                                          │ hooks.trigger()   │
  *                                          │  PreToolUse:      │
  *                                          │   permissionHook  │
  *                                          │   logHook         │
@@ -28,7 +28,7 @@
  *                                          └───────┬──────────┘
  *                                                  │
  *                                          ┌───────▼──────────┐
- *                                          │ triggerHooks()    │
+ *                                          │ hooks.trigger()   │
  *                                          │  PostToolUse:     │
  *                                          │   largeOutput     │
  *                                          └───────┬──────────┘
@@ -36,8 +36,8 @@
  *                                          results ──▶ back to messages
  *
  * 相比 s03 的变化：
- *   + HOOKS 注册表（事件 -> 回调列表）
- *   + registerHook() / triggerHooks()
+ *   + hook 实例 createHooks()（注册表 + logger 收进闭包，经 deps 传递）
+ *   + hooks.register() / hooks.trigger()
  *   + contextInjectHook（UserPromptSubmit）
  *   + permissionHook、logHook（PreToolUse）
  *   + largeOutputHook（PostToolUse）
@@ -82,69 +82,84 @@ const SYSTEM = `You are a coding agent at ${WORKDIR}. Use tools to solve tasks. 
 // ═══════════════════════════════════════════════════════════
 
 // hook 是 async 的，因为 permissionHook 要 await rl.question()
-//（Python 里就是 input()）。`...args: any[]` 对应 Python 的
-// `callback(*args)` —— 每个事件传入各自的参数结构。
-type Hook = (...args: any[]) => string | null | Promise<string | null>;
-
-const HOOKS: Record<string, Hook[]> = {
-  UserPromptSubmit: [],
-  PreToolUse: [],
-  PostToolUse: [],
-  Stop: [],
-};
-
-// hook 系统的日志出口，设计成模块级单例（而非当参数传给 registerHook/
-// triggerHooks）：
-//   1. HOOKS 注册表本身已是模块级单例，logger 跟随同一模式，风格一致；
-//   2. triggerHooks 是变长参数（...args），logger 无处安放；当参数传还要
-//      改所有调用点和测试的签名。
-// 入口调用 setHookLogger 注入一次，测试不注入即静默（null）。
-let hookLogger: SessionLogger | null = null;
-export function setHookLogger(logger: SessionLogger | null): void {
-  hookLogger = logger;
-}
-// 跨模块的 hook（如 s05 的 permissionHook）用它读同一个环境 logger。
-export function getHookLogger(): SessionLogger | null {
-  return hookLogger;
-}
-
-export function registerHook(event: string, callback: Hook): void {
-  HOOKS[event].push(callback);
-}
-
-// 注册完一次性把各 event 的 hook 名单写进 transcript（按最长 event 名对齐）。
-export function logHookRegistration(): void {
-  // 转成 [event, hooks] 键值对数组，只留至少注册了一个 hook 的 event。
-  const entries = Object.entries(HOOKS).filter(([, hs]) => hs.length > 0);
-  // 按最长 event 名补空格，让各行的 hook 列表左对齐。
-  const pad = Math.max(...entries.map(([event]) => event.length)) + 2;
-  const summary = entries
-    .map(
-      ([event, hs]) =>
-        `${event}:`.padEnd(pad) +
-        hs.map((h) => h.name || "(anonymous)").join(", "),
-    )
-    .join("\n");
-  hookLogger?.section("HOOK REGISTER", summary);
-}
-
-export async function triggerHooks(
-  event: string,
+//（Python 里就是 input()）。第一参 logger 由 trigger 注入；其后的
+// `...args: any[]` 对应 Python 的 `callback(*args)` —— 每个事件传入
+// 各自的参数结构。
+export type Hook = (
+  logger: SessionLogger,
   ...args: any[]
-): Promise<string | null> {
-  for (const callback of HOOKS[event]) {
-    const result = await callback(...args);
-    // 执行记录集中在这里，而不是散落进每个 hook。
-    hookLogger?.hookResult(event, callback.name, args, result);
-    if (result != null) return result; // teaching shortcut: block this tool call
-  }
-  return null;
+) => string | null | Promise<string | null>;
+
+// hook 系统做成实例：注册表和 logger 都收进 createHooks 的闭包，实例经 deps
+// 传给 agentLoop。没有模块级可变状态——入口建一个带真 logger 的实例，
+// 测试各建各的（noopLogger），互不污染。
+export interface HookSystem {
+  // 注册一个 hook
+  register(event: string, callback: Hook): void;
+  // 记录所有注册情况
+  logRegistration(): void;
+  // 触发一个 event，跑所其有 hook
+  trigger(event: string, ...args: any[]): Promise<string | null>;
 }
 
-// 清空所有已注册 hook。入口不会自动注册（见 registerDefaultHooks），
-// 测试用它在每个用例前重置注册表，避免用例间互相污染。
-export function clearHooks(): void {
-  for (const event of Object.keys(HOOKS)) HOOKS[event] = [];
+export function createHooks(logger: SessionLogger): HookSystem {
+  const registry: Record<string, Hook[]> = {
+    UserPromptSubmit: [],
+    PreToolUse: [],
+    PostToolUse: [],
+    Stop: [],
+  };
+  return {
+    register(event: string, callback: Hook): void {
+      registry[event].push(callback);
+    },
+
+    async trigger(event: string, ...args: any[]): Promise<string | null> {
+      for (const callback of registry[event]) {
+        const result = await callback(logger, ...args);
+        // 执行记录集中在这里，而不是散落进每个 hook。
+        logHookResult(logger, event, callback.name, args, result);
+        if (result != null) return result; // teaching shortcut: block this tool call
+      }
+      return null;
+    },
+
+    // 注册完一次性把各 event 的 hook 名单写进 transcript（按最长 event 名对齐）。
+    logRegistration(): void {
+      // 转成 [event, hooks] 键值对数组，只留至少注册了一个 hook 的 event。
+      const entries = Object.entries(registry).filter(
+        ([, hs]) => hs.length > 0,
+      );
+      // 按最长 event 名补空格，让各行的 hook 列表左对齐。
+      const pad = Math.max(...entries.map(([event]) => event.length)) + 2;
+      const summary = entries
+        .map(
+          ([event, hs]) =>
+            `${event}:`.padEnd(pad) +
+            hs.map((h) => h.name || "(anonymous)").join(", "),
+        )
+        .join("\n");
+      logger.section("HOOK REGISTER", summary);
+    },
+  };
+}
+
+// 把一次 hook 执行结果写进 transcript：仅当该 hook 拦截了调用（blocked 非空）时落一条，
+// 并把触发时的 args 序列化进去（超长会截断），便于看清被拦的是什么输入。
+export function logHookResult(
+  logger: SessionLogger,
+  event: string,
+  name: string,
+  args: unknown[],
+  blocked: string | null,
+): void {
+  if (!blocked) return;
+  const hookName = name || "(anonymous)";
+  const serialized = JSON.stringify(args).slice(0, 500);
+  logger.section(
+    "HOOK RESULT",
+    `${event} → ${hookName}(${serialized}) blocked: ${blocked}`,
+  );
 }
 
 // PreToolUse/PostToolUse hook 收到的结构 —— 原始的 tool_use block
@@ -170,6 +185,7 @@ const DESTRUCTIVE = ["rm ", "> /etc/", "chmod 777"];
 // 工厂函数：闭包捕获 confirm，返回真正的 hook（这就是给回调注入依赖的标准手法）。
 export function makePermissionHook(confirm: Confirm): Hook {
   return async function permissionHook(
+    logger: SessionLogger,
     call: ToolCallInfo,
   ): Promise<string | null> {
     const input = call.input as any;
@@ -177,7 +193,7 @@ export function makePermissionHook(confirm: Confirm): Hook {
       const command: string = input.command ?? "";
       for (const pattern of DENY_LIST) {
         if (command.includes(pattern)) {
-          hookLogger?.console(
+          logger.console(
             `[HOOK] PreToolUse(permissionHook): ⛔ Blocked: '${pattern}'`,
             "red",
           );
@@ -203,11 +219,11 @@ export function makePermissionHook(confirm: Confirm): Hook {
 }
 
 // PreToolUse：记录每一次工具调用。
-export function logHook(call: ToolCallInfo): null {
+export function logHook(logger: SessionLogger, call: ToolCallInfo): null {
   const argsPreview = JSON.stringify(
     Object.values((call.input as any) ?? {}).slice(0, 2),
   ).slice(0, 60);
-  hookLogger?.console(
+  logger.console(
     `[HOOK] PreToolUse(logHook): ${call.name}(${argsPreview})`,
     "gray",
   );
@@ -215,9 +231,13 @@ export function logHook(call: ToolCallInfo): null {
 }
 
 // PostToolUse：输出过大时告警。
-export function largeOutputHook(call: ToolCallInfo, output: string): null {
+export function largeOutputHook(
+  logger: SessionLogger,
+  call: ToolCallInfo,
+  output: string,
+): null {
   if (output.length > 100_000) {
-    hookLogger?.console(
+    logger.console(
       `[HOOK] PostToolUse(largeOutputHook): ⚠ Large output from ${call.name}: ${output.length} chars`,
       "yellow",
     );
@@ -226,8 +246,8 @@ export function largeOutputHook(call: ToolCallInfo, output: string): null {
 }
 
 // UserPromptSubmit hook：在用户输入抵达 LLM 前记录它
-export function contextInjectHook(_query: string): null {
-  hookLogger?.console(
+export function contextInjectHook(logger: SessionLogger, _query: string): null {
+  logger.console(
     `[HOOK] UserPromptSubmit(contextInjectHook): working in ${WORKDIR}`,
     "gray",
   );
@@ -235,7 +255,10 @@ export function contextInjectHook(_query: string): null {
 }
 
 // Stop hook：循环即将退出时打印小结
-export function summaryHook(messages: Anthropic.MessageParam[]): null {
+export function summaryHook(
+  logger: SessionLogger,
+  messages: Anthropic.MessageParam[],
+): null {
   const toolCount = messages.reduce(
     (n, m) =>
       n +
@@ -244,7 +267,7 @@ export function summaryHook(messages: Anthropic.MessageParam[]): null {
         : 0),
     0,
   );
-  hookLogger?.console(
+  logger.console(
     `[HOOK] Stop(summaryHook): session used ${toolCount} tool calls`,
     "gray",
   );
@@ -253,28 +276,35 @@ export function summaryHook(messages: Anthropic.MessageParam[]): null {
 
 // 默认 hook 注册收进函数，只在入口调用一次；import 该模块不产生副作用。
 // permissionHook 需要 confirm，所以注册时才把它注入进去。
-function registerDefaultHooks(confirm: Confirm): void {
-  registerHook("UserPromptSubmit", contextInjectHook);
-  registerHook("PreToolUse", makePermissionHook(confirm));
-  registerHook("PreToolUse", logHook);
-  registerHook("PostToolUse", largeOutputHook);
-  registerHook("Stop", summaryHook);
+function registerDefaultHooks(hooks: HookSystem, confirm: Confirm): void {
+  hooks.register("UserPromptSubmit", contextInjectHook);
+  hooks.register("PreToolUse", makePermissionHook(confirm));
+  hooks.register("PreToolUse", logHook);
+  hooks.register("PostToolUse", largeOutputHook);
+  hooks.register("Stop", summaryHook);
 
   // 注册完一次性记录注册结果。
-  logHookRegistration();
+  hooks.logRegistration();
+}
+
+// 入口层 helper：建 hook 实例 + 注册默认 hook（含 permissionHook 所需的 confirm）。
+export function loadHooks(logger: SessionLogger, confirm: Confirm): HookSystem {
+  const hooks = createHooks(logger);
+  registerDefaultHooks(hooks, confirm);
+  return hooks;
 }
 
 // ═══════════════════════════════════════════════════════════
 //  agentLoop —— 和 s03 结构相同，只是不再硬编码检查
 //  s03: if (!(await checkPermission(call))) ...
-//  s04: if (await triggerHooks("PreToolUse", call)) ...
+//  s04: if (await hooks.trigger("PreToolUse", call)) ...
 // ═══════════════════════════════════════════════════════════
 
 export async function agentLoop(
   messages: Anthropic.MessageParam[],
-  deps: { client: ModelClient; logger: SessionLogger },
+  deps: { client: ModelClient; logger: SessionLogger; hooks: HookSystem },
 ): Promise<string> {
-  const { client, logger } = deps;
+  const { client, logger, hooks } = deps;
   while (true) {
     logger.request(messages);
     const response = await client.messages.create({
@@ -290,7 +320,7 @@ export async function agentLoop(
     if (response.stop_reason !== "tool_use") {
       // 特殊点 1：模型想停，但 Stop hook 的返回值会被当成一条 user 消息，
       // 强制再跑一轮——循环能「自己续命」，不直接退出。
-      const force = await triggerHooks("Stop", messages);
+      const force = await hooks.trigger("Stop", messages);
       if (force) {
         messages.push({ role: "user", content: force });
         continue;
@@ -307,7 +337,7 @@ export async function agentLoop(
 
       // 特殊点 2：PreToolUse hook 取代 s03 的 checkPermission()——
       // 返回非 null 即拦截，返回值直接当成 tool_result 内容回给模型。
-      const blocked = await triggerHooks("PreToolUse", block);
+      const blocked = await hooks.trigger("PreToolUse", block);
       if (blocked) {
         results.push({
           type: "tool_result",
@@ -326,7 +356,7 @@ export async function agentLoop(
       logger.toolResult(block.name, output);
 
       // 特殊点 3：PostToolUse hook 拿到输出做观察（如大输出告警），不改结果。
-      await triggerHooks("PostToolUse", block, output);
+      await hooks.trigger("PostToolUse", block, output);
 
       results.push({
         type: "tool_result",
@@ -356,12 +386,11 @@ if (import.meta.main) {
     process.exit(0);
   });
 
-  // confirm 复用 s03 的 makeConfirm：握着 logger，用它专门的 permission()
+  // confirm 复用 s03 的 makeConfirm：握着 logger，用 s03 的 logPermission
   // 记录放行/拦截决定。
   const confirm = makeConfirm(rl, logger);
 
-  setHookLogger(logger);
-  registerDefaultHooks(confirm);
+  const hooks = loadHooks(logger, confirm);
 
   print("s04: Hooks — extension logic on hooks, loop stays clean", "cyan");
   print("输入问题，回车发送。输入 q 退出。\n", "green");
@@ -378,9 +407,9 @@ if (import.meta.main) {
     if (q === "" || q === "q" || q === "exit") break;
     logger.userInput(query);
 
-    await triggerHooks("UserPromptSubmit", query);
+    await hooks.trigger("UserPromptSubmit", query);
     history.push({ role: "user", content: query });
-    const finalText = await agentLoop(history, { client, logger });
+    const finalText = await agentLoop(history, { client, logger, hooks });
     print(finalText, "green");
     print();
   }

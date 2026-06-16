@@ -47,9 +47,9 @@ import {
 } from "../s02_tool_use/main";
 // 来自 s03：基础 dispatch 表（bash/文件工具的 handler）——subagent 复用。
 import { TOOL_HANDLERS as BASE_HANDLERS } from "../s03_permission/main";
-// 来自 s04：hook 系统（触发器 + logger 注入）。
-import { triggerHooks } from "../s04_hooks/main";
-// 来自 s05：hook 装配（loadHooks = setHookLogger + registerDefaultHooks）+ 装配好的
+// 来自 s04：hook 实例的类型（实例本身由入口经 loadHooks 创建、随 deps 传递）。
+import type { HookSystem } from "../s04_hooks/main";
+// 来自 s05：hook 装配（loadHooks = createHooks + registerDefaultHooks）+ 装配好的
 // 工具三张表 + nag 机制（nagIfStale / bumpNagCounter / resetNagCounter）——单一出处在 s05。
 import {
   bumpNagCounter,
@@ -77,8 +77,12 @@ const SUB_SYSTEM =
   "Complete the task you were given, then return a concise summary. " +
   "Do not delegate further.";
 
-// client 与 logger 通过参数注入到 agentLoop / spawnSubagent。
-export type Deps = { client: ModelClient; logger: SessionLogger };
+// client / logger / hooks 通过参数注入到 agentLoop / spawnSubagent。
+export type Deps = {
+  client: ModelClient;
+  logger: SessionLogger;
+  hooks: HookSystem;
+};
 
 // ═══════════════════════════════════════════════════════════
 //  工具装配：parent = s05（base + todo）+ task；subagent = s02 base
@@ -123,7 +127,7 @@ export async function spawnSubagent(
   description: string,
   deps: Deps,
 ): Promise<string> {
-  const { client } = deps;
+  const { client, hooks } = deps;
   // 子 agent 用 scope="sub" 的 child logger：同一对文件，记录标注来源。
   const logger = deps.logger.child("sub");
 
@@ -154,8 +158,8 @@ export async function spawnSubagent(
       if (block.type !== "tool_use") continue;
 
       print(`> [sub] [${block.name}] ${JSON.stringify(block.input)}`, "cyan");
-      // subagent 同样跑 hooks（权限一并生效）。
-      const blocked = await triggerHooks("PreToolUse", block);
+      // subagent 同样跑父实例的 hooks（权限一并生效）。
+      const blocked = await hooks.trigger("PreToolUse", block);
       if (blocked) {
         results.push({
           type: "tool_result",
@@ -172,7 +176,7 @@ export async function spawnSubagent(
           ? handler(schema.parse(block.input))
           : `Unknown: ${block.name}`;
       logger.toolResult(block.name, output);
-      await triggerHooks("PostToolUse", block, output);
+      await hooks.trigger("PostToolUse", block, output);
       print(`  [sub] [${block.name}] ${output.slice(0, 100)}`, "gray");
       results.push({
         type: "tool_result",
@@ -198,7 +202,7 @@ export async function agentLoop(
   messages: Anthropic.MessageParam[],
   deps: Deps,
 ): Promise<string> {
-  const { client, logger } = deps;
+  const { client, logger, hooks } = deps;
   while (true) {
     nagIfStale(messages, logger);
 
@@ -214,7 +218,7 @@ export async function agentLoop(
     messages.push({ role: "assistant", content: response.content });
 
     if (response.stop_reason !== "tool_use") {
-      const force = await triggerHooks("Stop", messages);
+      const force = await hooks.trigger("Stop", messages);
       if (force) {
         messages.push({ role: "user", content: force });
         continue;
@@ -230,7 +234,7 @@ export async function agentLoop(
         continue;
       }
 
-      const blocked = await triggerHooks("PreToolUse", block);
+      const blocked = await hooks.trigger("PreToolUse", block);
       if (blocked) {
         results.push({
           type: "tool_result",
@@ -249,7 +253,7 @@ export async function agentLoop(
           : `Unknown: ${block.name}`;
       logger.toolResult(block.name, output);
 
-      await triggerHooks("PostToolUse", block, output);
+      await hooks.trigger("PostToolUse", block, output);
 
       // todo_write 被调用即复位唠叨计数器。
       if (block.name === "todo_write") resetNagCounter();
@@ -272,7 +276,7 @@ if (import.meta.main) {
   const logger = createLogger(import.meta.dirname);
   logger.config({ model: MODEL_ID, system: SYSTEM, tools });
 
-  loadHooks(logger);
+  const hooks = loadHooks(logger);
 
   const rl = readline.createInterface({
     input: process.stdin,
@@ -301,10 +305,10 @@ if (import.meta.main) {
     if (q === "" || q === "q" || q === "exit") break;
 
     logger.userInput(query);
-    await triggerHooks("UserPromptSubmit", query);
+    await hooks.trigger("UserPromptSubmit", query);
     history.push({ role: "user", content: query });
 
-    const finalText = await agentLoop(history, { client, logger });
+    const finalText = await agentLoop(history, { client, logger, hooks });
     print(finalText, "green");
     print();
   }

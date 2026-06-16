@@ -20,7 +20,7 @@
  * 相比 s06 的变化：
  *   工具层：parent 复用 s06 的 tools / TOOL_SCHEMAS / TOOL_HANDLERS（base + todo + task），
  *          在其上只追加 load_skill；subagent 由 s06 的 spawnSubagent 内部只拿 base 工具。
- *   Hook 层：注册表/触发器与默认 hook 全部复用 s05（它又复用 s04），s07 不再重复定义。
+ *   Hook 层：hook 实例与默认 hook 全部复用 s05（它又复用 s04），s07 不再重复定义。
  *   Subagent：直接复用 s06 的 spawnSubagent（全新 messages[]、只回摘要、无法递归）。
  *   Nag 机制：nagIfStale / bumpNagCounter / resetNagCounter 全部复用 s05。
  *   + buildSystem() —— 启动时扫描 skills/ 目录，把清单注入 SYSTEM
@@ -48,9 +48,7 @@ import { createLogger, type SessionLogger } from "../lib/logger";
 import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
 import { colorize, print } from "../lib/terminal";
 import { printProse, textOf, zodTool } from "../lib/tools";
-// 来自 s04：hook 系统（触发器 + logger 注入）。
-import { triggerHooks } from "../s04_hooks/main";
-// 来自 s05：hook 装配（loadHooks = setHookLogger + registerDefaultHooks）+ nag 机制。
+// 来自 s05：hook 装配（loadHooks = createHooks + registerDefaultHooks）+ nag 机制。
 import {
   bumpNagCounter,
   loadHooks,
@@ -160,14 +158,27 @@ export function loadSkill(registry: SkillRegistry, name: string): string {
 // agentLoop 需要的完整依赖：基础 Deps + 技能表 + 本轮 system prompt。
 export type LoopDeps = Deps & { skills: SkillRegistry; system: string };
 
-// s07：技能加载走 logger 的专属 skill 通道 —— 单独记一条「加载了哪个技能、
-// 命中与否、多大」，便于和普通 toolResult 区分、grep。（child 是给子 agent 做
-// main/sub 隔离的，技能不是 agent，不借它。）loadSkill 保持纯查表，
-// 日志这个副作用留在这层 wrapper。
+// 记录一次技能加载：往 transcript 记一条摘要（加载了哪个技能、命中与否、多大）。
+// 走独立的 SKILL 一节（而非普通 toolResult），便于区分和 grep；完整内容另由 toolResult 落一份。
+export function logSkill(
+  logger: SessionLogger,
+  name: string,
+  found: boolean,
+  size: number,
+): void {
+  logger.section(
+    "SKILL",
+    found ? `load ${name} (${size} chars)` : `not found: ${name}`,
+  );
+}
+
+// s07：技能加载走独立的 skill 日志通道（logSkill）—— 单独记一条「加载了哪个技能、
+// 命中与否、多大」。（child 是给子 agent 做 main/sub 隔离的，技能不是 agent，不借它。）
+// loadSkill 保持纯查表，日志这个副作用留在这层 wrapper。
 export function runLoadSkill(name: string, deps: LoopDeps): string {
   const content = loadSkill(deps.skills, name);
   const found = deps.skills[name] !== undefined;
-  deps.logger.skill(name, found, content.length);
+  logSkill(deps.logger, name, found, content.length);
   return content;
 }
 
@@ -213,7 +224,7 @@ export async function agentLoop(
   messages: Anthropic.MessageParam[],
   deps: LoopDeps,
 ): Promise<string> {
-  const { client, logger, system } = deps;
+  const { client, logger, system, hooks } = deps;
   while (true) {
     nagIfStale(messages, logger);
 
@@ -229,7 +240,7 @@ export async function agentLoop(
     messages.push({ role: "assistant", content: response.content });
 
     if (response.stop_reason !== "tool_use") {
-      const force = await triggerHooks("Stop", messages);
+      const force = await hooks.trigger("Stop", messages);
       if (force) {
         messages.push({ role: "user", content: force });
         continue;
@@ -245,7 +256,7 @@ export async function agentLoop(
         continue;
       }
 
-      const blocked = await triggerHooks("PreToolUse", block);
+      const blocked = await hooks.trigger("PreToolUse", block);
       if (blocked) {
         results.push({
           type: "tool_result",
@@ -264,7 +275,7 @@ export async function agentLoop(
           : `Unknown: ${block.name}`;
       logger.toolResult(block.name, output);
 
-      await triggerHooks("PostToolUse", block, output);
+      await hooks.trigger("PostToolUse", block, output);
 
       // todo_write 被调用即复位唠叨计数器。
       if (block.name === "todo_write") resetNagCounter();
@@ -290,7 +301,7 @@ if (import.meta.main) {
 
   logger.config({ model: MODEL_ID, system, tools });
 
-  loadHooks(logger);
+  const hooks = loadHooks(logger);
 
   const rl = readline.createInterface({
     input: process.stdin,
@@ -316,12 +327,13 @@ if (import.meta.main) {
     if (q === "" || q === "q" || q === "exit") break;
 
     logger.userInput(query);
-    await triggerHooks("UserPromptSubmit", query);
+    await hooks.trigger("UserPromptSubmit", query);
     history.push({ role: "user", content: query });
 
     const finalText = await agentLoop(history, {
       client,
       logger,
+      hooks,
       skills,
       system,
     });

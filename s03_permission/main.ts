@@ -149,6 +149,21 @@ export function checkRules(toolName: string, args: unknown): string | null {
   return null;
 }
 
+// 把一次权限决定（放行/拦截）格式化后写进 transcript。
+// 格式化归调用方管，logger 只提供通用的 section()。
+export function logPermission(
+  logger: SessionLogger,
+  toolName: string,
+  args: unknown,
+  reason: string,
+  decision: "allow" | "deny",
+): void {
+  logger.section(
+    "PERMISSION",
+    `${reason}\nTool: ${toolName}(${JSON.stringify(args)})\nDecision: ${decision}`,
+  );
+}
+
 // 关卡 3：用户批准 —— 规则匹配后等待确认。
 // 确认动作通过依赖注入传入（Confirm），让 pipeline 不依赖 readline：
 // 入口用 makeConfirm 接入真实 terminal 提示，测试则注入 fake。
@@ -173,7 +188,8 @@ export function makeConfirm(
       return false; // stdin 关闭 —— 没人能批准了
     }
     const allowed = choice === "y" || choice === "yes";
-    logger.permission(
+    logPermission(
+      logger,
       call.name,
       call.input,
       warning,
@@ -204,7 +220,7 @@ export async function checkPermission(
     const reason = checkDenyList((block.input as any).command ?? "");
     if (reason) {
       print(`\n⛔ ${reason}`, "red");
-      logger.permission(block.name, block.input, reason, "deny");
+      logPermission(logger, block.name, block.input, reason, "deny");
       return false;
     }
   }
@@ -227,7 +243,7 @@ export async function agentLoop(
 ): Promise<string> {
   const { client, logger, confirm } = deps;
   while (true) {
-    logger.request(messages, false);
+    logger.request(messages, true);
     const response = await client.messages.create({
       model: MODEL_ID,
       system: SYSTEM,

@@ -113,28 +113,28 @@ describe("checkPermission", () => {
   });
 
   it("logs a deny-list block as a denied permission", async () => {
-    const logger = { ...noopLogger, permission: vi.fn() };
+    const logger = { ...noopLogger, section: vi.fn() };
     await checkPermission(bash("sudo ls"), vi.fn(grant), logger);
-    expect(logger.permission).toHaveBeenCalledWith(
-      "bash",
-      { command: "sudo ls" },
-      expect.stringMatching(/deny list/),
-      "deny",
+    expect(logger.section).toHaveBeenCalledWith(
+      "PERMISSION",
+      expect.stringMatching(
+        /deny list[\s\S]*Tool: bash\({"command":"sudo ls"}\)[\s\S]*Decision: deny/,
+      ),
     );
   });
 
   // 规则匹配时的放行/拦截日志由 confirm 自己负责（见 makeConfirm），
   // 注入 fake confirm 的 checkPermission 不再记这条。
   it("does not log the rule path itself (confirm owns that log)", async () => {
-    const logger = { ...noopLogger, permission: vi.fn() };
+    const logger = { ...noopLogger, section: vi.fn() };
     await checkPermission(bash("rm foo"), vi.fn(refuse), logger);
-    expect(logger.permission).not.toHaveBeenCalled();
+    expect(logger.section).not.toHaveBeenCalled();
   });
 
   it("does not log when no gate fires", async () => {
-    const logger = { ...noopLogger, permission: vi.fn() };
+    const logger = { ...noopLogger, section: vi.fn() };
     await checkPermission(bash("echo hi"), vi.fn(grant), logger);
-    expect(logger.permission).not.toHaveBeenCalled();
+    expect(logger.section).not.toHaveBeenCalled();
   });
 });
 
@@ -145,26 +145,22 @@ describe("makeConfirm", () => {
     ({ question: async () => answer }) as unknown as readline.Interface;
 
   it("returns true and logs allow when the user says yes", async () => {
-    const logger = { ...noopLogger, permission: vi.fn() };
+    const logger = { ...noopLogger, section: vi.fn() };
     const confirm = makeConfirm(fakeRl("y"), logger);
     expect(await confirm(call, "danger")).toBe(true);
-    expect(logger.permission).toHaveBeenCalledWith(
-      "bash",
-      { command: "rm foo" },
-      "danger",
-      "allow",
+    expect(logger.section).toHaveBeenCalledWith(
+      "PERMISSION",
+      'danger\nTool: bash({"command":"rm foo"})\nDecision: allow',
     );
   });
 
   it("returns false and logs deny when the user says no", async () => {
-    const logger = { ...noopLogger, permission: vi.fn() };
+    const logger = { ...noopLogger, section: vi.fn() };
     const confirm = makeConfirm(fakeRl("n"), logger);
     expect(await confirm(call, "danger")).toBe(false);
-    expect(logger.permission).toHaveBeenCalledWith(
-      "bash",
-      { command: "rm foo" },
-      "danger",
-      "deny",
+    expect(logger.section).toHaveBeenCalledWith(
+      "PERMISSION",
+      'danger\nTool: bash({"command":"rm foo"})\nDecision: deny',
     );
   });
 });

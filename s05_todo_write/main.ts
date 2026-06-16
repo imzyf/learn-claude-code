@@ -21,8 +21,8 @@
  * 相比 s04 的变化：
  *   工具层：复用 s02 的 tools / TOOL_SCHEMAS + s03 的 TOOL_HANDLERS，
  *          只 append 一个 todo_write（外加 runTodoWrite 实现）。
- *   Hook 层：注册表与触发器（registerHook / triggerHooks / clearHooks）连同
- *          contextInjectHook / logHook / summaryHook 全部从 s04 原样复用。
+ *   Hook 层：hook 实例（createHooks）连同 contextInjectHook / logHook /
+ *          summaryHook 全部从 s04 原样复用。
  *   + 唠叨提醒：连续 3 轮没更新 todo 就注入 <reminder>
  *     （agentLoop 里的 roundsSinceTodo 计数器）。
  *   + SYSTEM prompt 加入「先计划再执行」的指引。
@@ -55,21 +55,14 @@ import {
   TOOL_HANDLERS as BASE_HANDLERS,
   checkDenyList,
 } from "../s03_permission/main";
-// 来自 s04：hook 系统（注册表 + 触发器）与三个通用 hook，原样复用。
+// 来自 s04：hook 系统（createHooks 实例）与三个通用 hook，原样复用。
 import {
-  clearHooks,
   contextInjectHook,
-  getHookLogger,
+  createHooks,
+  type HookSystem,
   logHook,
-  logHookRegistration,
-  registerHook,
-  setHookLogger,
   summaryHook,
-  triggerHooks,
 } from "../s04_hooks/main";
-
-// 测试需要从本模块导入这两个 hook 工具，转手 re-export s04 的实现。
-export { clearHooks, registerHook };
 
 const WORKDIR = process.cwd();
 
@@ -114,7 +107,16 @@ export function normalizeTodos(todos: unknown): {
   return { todos: parsed.data };
 }
 
-export function runTodoWrite(todosInput: unknown): string {
+// 把 todo 清单按 `[status] content` 逐行写进 transcript（纯文本、无 ANSI）。
+export function logTodos(logger: SessionLogger, todos: readonly Todo[]): void {
+  const body = todos.map((t) => `[${t.status}] ${t.content}`).join("\n");
+  logger.section("TASKS", body || "(empty)");
+}
+
+export function runTodoWrite(
+  todosInput: unknown,
+  logger: SessionLogger,
+): string {
   const { todos, error } = normalizeTodos(todosInput);
   if (error || !todos) return error ?? "Error: invalid todos";
   currentTodos = todos;
@@ -129,7 +131,7 @@ export function runTodoWrite(todosInput: unknown): string {
   }
   print(lines.join("\n"));
   // 终端看彩色清单；transcript 另存一份纯文本条目（toolResult 只有 "Updated N tasks"）。
-  getHookLogger()?.plain(currentTodos);
+  logTodos(logger, currentTodos);
   return `Updated ${currentTodos.length} tasks`;
 }
 
@@ -158,15 +160,18 @@ export const TOOL_SCHEMAS: Partial<Record<string, z.ZodObject>> = {
   todo_write: todoWriteSchema,
 };
 
-export const TOOL_HANDLERS: Partial<Record<string, (input: any) => string>> = {
+// 第二参 deps 让 todo_write 拿到 logger；基础 handler 是 (input)=>string，忽略它。
+export const TOOL_HANDLERS: Partial<
+  Record<string, (input: any, deps: { logger: SessionLogger }) => string>
+> = {
   ...BASE_HANDLERS,
-  todo_write: ({ todos }) => runTodoWrite(todos),
+  todo_write: ({ todos }, deps) => runTodoWrite(todos, deps.logger),
 };
 
 // ═══════════════════════════════════════════════════════════
 //  来自 s04（复用）：hook 系统 + 通用 hook
-//  registerHook / triggerHooks / clearHooks 与 contextInjectHook /
-//  logHook / summaryHook 都从 s04 import，s05 只补一个精简版 permissionHook。
+//  createHooks 与 contextInjectHook / logHook / summaryHook 都从 s04 import，
+//  s05 只补一个精简版 permissionHook。
 // ═══════════════════════════════════════════════════════════
 
 // PreToolUse/PostToolUse hook 收到的结构 —— 原始的 tool_use block。
@@ -174,11 +179,14 @@ type ToolCallInfo = Anthropic.ToolUseBlock;
 
 // PreToolUse：s05 只保留拒绝名单这一道关卡（s04 的 Allow? 确认关卡去掉）。
 // 检测逻辑复用 s03 的 checkDenyList，命中即拦截。
-export function permissionHook(call: ToolCallInfo): string | null {
+export function permissionHook(
+  logger: SessionLogger,
+  call: ToolCallInfo,
+): string | null {
   if (call.name === "bash") {
     const reason = checkDenyList((call.input as any).command ?? "");
     if (reason) {
-      getHookLogger()?.console(
+      logger.console(
         `[HOOK] PreToolUse(permissionHook): ⛔ Blocked: '${reason}'`,
         "red",
       );
@@ -189,19 +197,20 @@ export function permissionHook(call: ToolCallInfo): string | null {
 }
 
 // 默认 hook 注册收进函数，只在入口调用一次；import 该模块不产生副作用。
-export function registerDefaultHooks(): void {
-  registerHook("UserPromptSubmit", contextInjectHook);
-  registerHook("PreToolUse", permissionHook);
-  registerHook("PreToolUse", logHook);
-  registerHook("Stop", summaryHook);
+export function registerDefaultHooks(hooks: HookSystem): void {
+  hooks.register("UserPromptSubmit", contextInjectHook);
+  hooks.register("PreToolUse", permissionHook);
+  hooks.register("PreToolUse", logHook);
+  hooks.register("Stop", summaryHook);
   // 注册完一次性记录（和 s04 一致，复用 s04 的格式化）。
-  logHookRegistration();
+  hooks.logRegistration();
 }
 
-// 入口层 helper：注入 logger + 注册默认 hook，s05/s07/s08 入口复用。
-export function loadHooks(logger: SessionLogger): void {
-  setHookLogger(logger);
-  registerDefaultHooks();
+// 入口层 helper：建 hook 实例 + 注册默认 hook，s05/s07/s08 入口复用。
+export function loadHooks(logger: SessionLogger): HookSystem {
+  const hooks = createHooks(logger);
+  registerDefaultHooks(hooks);
+  return hooks;
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -241,9 +250,9 @@ export function nagIfStale(
 
 export async function agentLoop(
   messages: Anthropic.MessageParam[],
-  deps: { client: ModelClient; logger: SessionLogger },
+  deps: { client: ModelClient; logger: SessionLogger; hooks: HookSystem },
 ): Promise<string> {
-  const { client, logger } = deps;
+  const { client, logger, hooks } = deps;
   while (true) {
     nagIfStale(messages, logger);
 
@@ -259,7 +268,7 @@ export async function agentLoop(
     messages.push({ role: "assistant", content: response.content });
 
     if (response.stop_reason !== "tool_use") {
-      const force = await triggerHooks("Stop", messages);
+      const force = await hooks.trigger("Stop", messages);
       if (force) {
         messages.push({ role: "user", content: force });
         continue;
@@ -275,7 +284,7 @@ export async function agentLoop(
         continue;
       }
 
-      const blocked = await triggerHooks("PreToolUse", block);
+      const blocked = await hooks.trigger("PreToolUse", block);
       if (blocked) {
         results.push({
           type: "tool_result",
@@ -289,11 +298,11 @@ export async function agentLoop(
       const handler = TOOL_HANDLERS[block.name];
       const output =
         handler && schema
-          ? handler(schema.parse(block.input))
+          ? handler(schema.parse(block.input), deps)
           : `Unknown: ${block.name}`;
       logger.toolResult(block.name, output);
 
-      await triggerHooks("PostToolUse", block, output);
+      await hooks.trigger("PostToolUse", block, output);
 
       // todo_write 被调用即复位唠叨计数器。
       if (block.name === "todo_write") resetNagCounter();
@@ -316,7 +325,7 @@ if (import.meta.main) {
   const logger = createLogger(import.meta.dirname);
   logger.config({ model: MODEL_ID, system: SYSTEM, tools });
 
-  loadHooks(logger);
+  const hooks = loadHooks(logger);
 
   const rl = readline.createInterface({
     input: process.stdin,
@@ -342,9 +351,9 @@ if (import.meta.main) {
     if (q === "" || q === "q" || q === "exit") break;
 
     logger.userInput(query);
-    await triggerHooks("UserPromptSubmit", query);
+    await hooks.trigger("UserPromptSubmit", query);
     history.push({ role: "user", content: query });
-    const finalText = await agentLoop(history, { client, logger });
+    const finalText = await agentLoop(history, { client, logger, hooks });
     print(finalText, "green");
     print();
   }

@@ -65,10 +65,9 @@ export function runBash(command: string, timeoutMs = 120_000): string {
   const out = ((r.stdout ?? "") + (r.stderr ?? "")).trim();
   return out ? out.slice(0, 50_000) : "(no output)";
 }
-
 // 在执行前拦截几个明显有破坏性的 command
 export function isDangerous(command: string): boolean {
-  const dangerous = ["rm -rf /", "sudo", "shutdown", "reboot", "> /dev/"];
+  const dangerous = ["rm -rf /", "sudo", "shutdown", "reboot", "> /dev/", "osascript"];
   return dangerous.some((d) => command.includes(d));
 }
 

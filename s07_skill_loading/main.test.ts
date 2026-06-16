@@ -19,7 +19,7 @@ import {
   textBlock,
   toolUseBlock,
 } from "../lib/testing";
-import { clearHooks } from "../s04_hooks/main";
+import { createHooks } from "../s04_hooks/main";
 // s05/s06 的层沿用旧实现，各自的测试不在此重复；这里只借 resetNagCounter 做 setup。
 import { resetNagCounter } from "../s05_todo_write/main";
 import {
@@ -33,21 +33,19 @@ import {
   scanSkills,
 } from "./main";
 
-// 记录 skill() 调用的探针 logger，用来验证专属 skill 日志通道。
-type SkillLog = { name: string; found: boolean; size: number };
-function spyLogger(): { logger: SessionLogger; logged: SkillLog[] } {
-  const logged: SkillLog[] = [];
+// 探针 logger：截获 skill 写进 transcript 的 SKILL 摘要，验证专属 skill 日志通道。
+function spyLogger(): { logger: SessionLogger; logged: string[] } {
+  const logged: string[] = [];
   const logger: SessionLogger = {
     ...noopLogger,
-    skill: (name, found, size) => {
-      logged.push({ name, found, size });
+    section: (title, body) => {
+      if (title === "SKILL") logged.push(body);
     },
   };
   return { logger, logged };
 }
 
 beforeEach(() => {
-  clearHooks();
   resetNagCounter();
 });
 
@@ -192,17 +190,14 @@ describe("runLoadSkill", () => {
     const out = runLoadSkill("code-review", {
       client: fakeClient(),
       logger,
+      hooks: createHooks(noopLogger),
       skills: registry,
       system: "",
     });
 
     expect(out).toBe("FULL code-review content");
     expect(logged).toEqual([
-      {
-        name: "code-review",
-        found: true,
-        size: "FULL code-review content".length,
-      },
+      `load code-review (${"FULL code-review content".length} chars)`,
     ]);
   });
 
@@ -212,12 +207,13 @@ describe("runLoadSkill", () => {
     const out = runLoadSkill("ghost", {
       client: fakeClient(),
       logger,
+      hooks: createHooks(noopLogger),
       skills: registry,
       system: "",
     });
 
     expect(out).toBe("Skill not found: ghost");
-    expect(logged[0]).toMatchObject({ name: "ghost", found: false });
+    expect(logged[0]).toBe("not found: ghost");
   });
 });
 
@@ -238,6 +234,7 @@ describe("agentLoop", () => {
     const result = await agentLoop(messages, {
       client,
       logger: noopLogger,
+      hooks: createHooks(noopLogger),
       skills: registry,
       system: buildSystem(registry),
     });
@@ -264,6 +261,7 @@ describe("agentLoop", () => {
     const result = await agentLoop(messages, {
       client,
       logger: noopLogger,
+      hooks: createHooks(noopLogger),
       skills: {},
       system: "test",
     });
@@ -289,6 +287,7 @@ describe("agentLoop", () => {
     const result = await agentLoop(messages, {
       client,
       logger: noopLogger,
+      hooks: createHooks(noopLogger),
       skills: {},
       system: "test",
     });
