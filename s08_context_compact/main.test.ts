@@ -17,7 +17,7 @@ import {
   textBlock,
   toolUseBlock,
 } from "../lib/testing";
-import { clearHooks } from "../s04_hooks/main";
+import { createHooks } from "../s04_hooks/main";
 // s05/s06/s07 的层沿用旧实现，各自的测试不在此重复；这里只借 resetNagCounter 做 setup。
 import { resetNagCounter } from "../s05_todo_write/main";
 import type { SkillRegistry } from "../s07_skill_loading/main";
@@ -27,14 +27,13 @@ import {
   estimateSize,
   microCompact,
   persistLargeOutput,
-  setMessages,
+  replaceMessages,
   snipCompact,
   summarizeHistory,
   toolResultBudget,
 } from "./main";
 
 beforeEach(() => {
-  clearHooks();
   resetNagCounter();
 });
 
@@ -122,18 +121,18 @@ describe("persistLargeOutput", () => {
   });
 });
 
-describe("estimateSize / setMessages", () => {
+describe("estimateSize / replaceMessages", () => {
   it("estimateSize grows with content", () => {
     const small = estimateSize([{ role: "user", content: "a" }]);
     const big = estimateSize([{ role: "user", content: "a".repeat(1000) }]);
     expect(big).toBeGreaterThan(small);
   });
 
-  it("setMessages replaces contents in place (same reference)", () => {
+  it("replaceMessages replaces contents in place (same reference)", () => {
     const messages: Anthropic.MessageParam[] = [
       { role: "user", content: "old" },
     ];
-    setMessages(messages, [{ role: "user", content: "new" }]);
+    replaceMessages(messages, [{ role: "user", content: "new" }]);
     expect(messages).toEqual([{ role: "user", content: "new" }]);
   });
 });
@@ -150,6 +149,7 @@ describe("summarizeHistory", () => {
       {
         client,
         logger: noopLogger,
+        hooks: createHooks(noopLogger),
       },
     );
 
@@ -162,6 +162,7 @@ describe("summarizeHistory", () => {
     const summary = await summarizeHistory([{ role: "user", content: "x" }], {
       client,
       logger: noopLogger,
+      hooks: createHooks(noopLogger),
     });
 
     expect(summary).toBe("[no text in response]");
@@ -173,6 +174,7 @@ describe("agentLoop", () => {
   const loopDeps = {
     client: undefined as never,
     logger: noopLogger,
+    hooks: createHooks(noopLogger),
     skills: registry,
     system: "S",
   };

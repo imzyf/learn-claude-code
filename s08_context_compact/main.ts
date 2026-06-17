@@ -51,9 +51,7 @@ import { createLogger, type SessionLogger } from "../lib/logger";
 import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
 import { colorize, print } from "../lib/terminal";
 import { printProse, textOf, zodTool } from "../lib/tools";
-// 来自 s04：hook 系统（触发器 + logger 注入）。
-import { triggerHooks } from "../s04_hooks/main";
-// 来自 s05：hook 装配（loadHooks = setHookLogger + registerDefaultHooks）+ nag 机制。
+// 来自 s05：hook 装配（loadHooks = createHooks + registerDefaultHooks）+ nag 机制。
 import {
   bumpNagCounter,
   loadHooks,
@@ -87,21 +85,26 @@ const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 //  s08 新增：四层压缩流水线
 // ═══════════════════════════════════════════════════════════
 
+// L4 触发阈值：估算大小（JSON 字符数，不是 token）超过它就做 LLM 摘要。
 const CONTEXT_LIMIT = 50_000;
+// L2 保留最近 N 条工具结果不动，只压缩更早的。
 const KEEP_RECENT = 3;
+// L3 落盘阈值：单条工具结果超过该长度才值得写到磁盘。
 const PERSIST_THRESHOLD = 30_000;
 
+// 用 JSON 字符数估算上下文大小——不是 token 数，但零成本，够做阈值判断。
 export const estimateSize = (msgs: Anthropic.MessageParam[]): number =>
   JSON.stringify(msgs).length;
 
 // 原地替换数组内容——调用方持有同一个引用（对应 Python 的 `messages[:] = ...`）。
-export function setMessages(
+export function replaceMessages(
   messages: Anthropic.MessageParam[],
   next: Anthropic.MessageParam[],
 ): void {
   messages.splice(0, messages.length, ...next);
 }
 
+// 工具调用是携带 tool_use 内容块的 assistant 消息。
 const messageHasToolCall = (m: Anthropic.MessageParam): boolean =>
   m.role === "assistant" &&
   Array.isArray(m.content) &&
@@ -113,19 +116,23 @@ const isToolResultMessage = (m: Anthropic.MessageParam): boolean =>
   Array.isArray(m.content) &&
   m.content.some((b) => typeof b !== "string" && b.type === "tool_result");
 
+// 取 tool_result 的文本——content 可能是字符串或内容块数组，统一成字符串来量长度。
 const outputText = (part: Anthropic.ToolResultBlockParam): string =>
   typeof part.content === "string"
     ? part.content
     : JSON.stringify(part.content);
 
-// L1: snipCompact —— 裁剪中间消息，保留头尾
+// L1: snipCompact —— 裁剪中间消息，保留头 3 条，尾 47 条
 export function snipCompact(
   messages: Anthropic.MessageParam[],
   maxMessages = 50,
+  logger?: SessionLogger,
 ): Anthropic.MessageParam[] {
   if (messages.length <= maxMessages) return messages;
+
   const keepHead = 3;
   const keepTail = maxMessages - 3;
+
   let headEnd = keepHead;
   let tailStart = messages.length - keepTail;
   // 头尾边界都不能把「工具调用 / 工具结果」这一对拆开。
@@ -133,6 +140,7 @@ export function snipCompact(
     while (headEnd < messages.length && isToolResultMessage(messages[headEnd]))
       headEnd += 1;
   }
+
   if (
     tailStart > 0 &&
     tailStart < messages.length &&
@@ -143,6 +151,9 @@ export function snipCompact(
   }
   if (headEnd >= tailStart) return messages;
   const snipped = tailStart - headEnd;
+
+  logger?.console(`[snip compact: ${snipped} messages removed]`, "gray");
+
   return [
     ...messages.slice(0, headEnd),
     { role: "user", content: `[snipped ${snipped} messages]` },
@@ -151,6 +162,31 @@ export function snipCompact(
 }
 
 // L2: microCompact —— 把较早的工具结果换成占位符
+export function microCompact(
+  messages: Anthropic.MessageParam[],
+  logger?: SessionLogger,
+): Anthropic.MessageParam[] {
+  const toolResults = collectToolResults(messages);
+  if (toolResults.length <= KEEP_RECENT) return messages;
+
+  // 最近 KEEP_RECENT 条之外的长结果原地换成占位符（短结果不值得动）。
+  let compacted = 0;
+  for (const part of toolResults.slice(0, -KEEP_RECENT)) {
+    if (typeof part.content === "string" && part.content.length > 120) {
+      part.content = "[Earlier tool result compacted. Re-run if needed.]";
+      compacted += 1;
+    }
+  }
+
+  if (compacted > 0)
+    logger?.console(
+      `[micro compact: ${compacted} tool results replaced]`,
+      "gray",
+    );
+
+  return messages;
+}
+// 按出现顺序收集所有 tool_result 块——返回原对象引用，调用方可原地修改。
 export function collectToolResults(
   messages: Anthropic.MessageParam[],
 ): Anthropic.ToolResultBlockParam[] {
@@ -165,54 +201,81 @@ export function collectToolResults(
   return parts;
 }
 
-export function microCompact(
-  messages: Anthropic.MessageParam[],
-): Anthropic.MessageParam[] {
-  const toolResults = collectToolResults(messages);
-  if (toolResults.length <= KEEP_RECENT) return messages;
-  for (const part of toolResults.slice(0, -KEEP_RECENT)) {
-    if (typeof part.content === "string" && part.content.length > 120) {
-      part.content = "[Earlier tool result compacted. Re-run if needed.]";
-    }
-  }
-  return messages;
-}
-
 // L3: toolResultBudget —— 把大结果持久化到磁盘
-export function persistLargeOutput(toolUseId: string, output: string): string {
-  if (output.length <= PERSIST_THRESHOLD) return output;
-  fs.mkdirSync(TOOL_RESULTS_DIR, { recursive: true });
-  const filePath = path.join(TOOL_RESULTS_DIR, `${toolUseId}.txt`);
-  if (!fs.existsSync(filePath)) fs.writeFileSync(filePath, output);
-  return `<persisted-output>\nFull output: ${filePath}\nPreview:\n${output.slice(0, 2000)}\n</persisted-output>`;
-}
-
 export function toolResultBudget(
   messages: Anthropic.MessageParam[],
   maxBytes = 200_000,
+  logger?: SessionLogger,
 ): Anthropic.MessageParam[] {
   const last = messages[messages.length - 1];
+  // 只看最后一条消息——预算只管最新一轮的工具结果，更早的交给 L2。
   if (last?.role !== "user" || !Array.isArray(last.content)) return messages;
+
+  // 取出本轮全部 tool_result 块。
   const blocks = last.content.filter(
     (b): b is Anthropic.ToolResultBlockParam =>
       typeof b !== "string" && b.type === "tool_result",
   );
+  // 总量在预算内就什么都不做。
   let total = blocks.reduce((n, b) => n + outputText(b).length, 0);
   if (total <= maxBytes) return messages;
+
+  // 从最大的结果开始落盘，直到总量回到预算内。
   const ranked = [...blocks].sort(
     (a, b) => outputText(b).length - outputText(a).length,
   );
+  let persisted = 0;
   for (const block of ranked) {
     if (total <= maxBytes) break;
+
+    // 低于落盘阈值的块跳过——写盘省不了多少空间。
     const content = outputText(block);
     if (content.length <= PERSIST_THRESHOLD) continue;
+
+    // 原文写进磁盘，消息里只留文件路径 + 预览。
     block.content = persistLargeOutput(block.tool_use_id, content);
+    persisted += 1;
+    // 重新累计总量，回到预算内就停。
     total = blocks.reduce((n, b) => n + outputText(b).length, 0);
   }
+
+  if (persisted > 0)
+    logger?.console(
+      `[tool result budget: ${persisted} results persisted to disk]`,
+      "gray",
+    );
+
   return messages;
+}
+// 超长输出写到磁盘，返回「路径 + 预览」的占位文本；短输出原样返回。
+export function persistLargeOutput(toolUseId: string, output: string): string {
+  if (output.length <= PERSIST_THRESHOLD) return output;
+
+  fs.mkdirSync(TOOL_RESULTS_DIR, { recursive: true });
+  const filePath = path.join(TOOL_RESULTS_DIR, `${toolUseId}.txt`);
+  if (!fs.existsSync(filePath)) fs.writeFileSync(filePath, output);
+
+  // 模型看到路径和前 2000 字预览，需要全文时可自行读文件。
+  return `<persisted-output>\nFull output: ${filePath}\nPreview:\n${output.slice(0, 2000)}\n</persisted-output>`;
 }
 
 // L4: autoCompact —— LLM 完整摘要
+export async function compactHistory(
+  messages: Anthropic.MessageParam[],
+  deps: Deps,
+): Promise<Anthropic.MessageParam[]> {
+  const transcriptPath = writeTranscript(messages);
+  deps.logger.console(`[transcript saved: ${transcriptPath}]`, "gray");
+
+  const summary = await summarizeHistory(messages, deps);
+
+  deps.logger.console(
+    `[compact: ${messages.length} messages → summary (${summary.length} chars)]`,
+    "gray",
+  );
+  return [{ role: "user", content: `[Compacted]\n\n${summary}` }];
+}
+// 压缩前把完整历史落成 JSONL 存档——信息只是移出上下文，并未真正丢失。
 function writeTranscript(messages: Anthropic.MessageParam[]): string {
   fs.mkdirSync(TRANSCRIPT_DIR, { recursive: true });
   const filePath = path.join(
@@ -225,12 +288,15 @@ function writeTranscript(messages: Anthropic.MessageParam[]): string {
   );
   return filePath;
 }
-
+// 用一次独立的 API 调用把整段历史浓缩成结构化摘要。
 export async function summarizeHistory(
   messages: Anthropic.MessageParam[],
   deps: Deps,
 ): Promise<string> {
-  const { client, logger } = deps;
+  const { client } = deps;
+  // 摘要是独立的子请求：用 child scope 打标记（同 s06 子 agent 的做法），
+  // 日志里与主循环的 request/response 区分开，增量计数也互不干扰。
+  const logger = deps.logger.child("compact");
   const conversation = JSON.stringify(messages).slice(0, 80_000);
   const prompt =
     "Summarize this coding-agent conversation so work can continue.\n" +
@@ -238,24 +304,16 @@ export async function summarizeHistory(
     "4. remaining work, 5. user constraints.\nBe compact but concrete.\n\n" +
     conversation;
   const request: Anthropic.MessageParam[] = [{ role: "user", content: prompt }];
+
   logger.request(request);
   const response = await client.messages.create({
     model: MODEL_ID,
     max_tokens: 2000,
     messages: request,
   });
+
   logger.response(response);
   return textOf(response).trim() || "(empty summary)";
-}
-
-export async function compactHistory(
-  messages: Anthropic.MessageParam[],
-  deps: Deps,
-): Promise<Anthropic.MessageParam[]> {
-  const transcriptPath = writeTranscript(messages);
-  deps.logger.console(`[transcript saved: ${transcriptPath}]`, "gray");
-  const summary = await summarizeHistory(messages, deps);
-  return [{ role: "user", content: `[Compacted]\n\n${summary}` }];
 }
 
 // 应急：reactiveCompact —— API 仍报 prompt_too_long 时触发
@@ -263,7 +321,9 @@ export async function reactiveCompact(
   messages: Anthropic.MessageParam[],
   deps: Deps,
 ): Promise<Anthropic.MessageParam[]> {
+  // 与 L4 一样，先把完整历史落盘存档。
   writeTranscript(messages);
+  // 保留最后 5 条消息原样，只摘要之前的部分。
   let tailStart = Math.max(0, messages.length - 5);
   if (
     tailStart > 0 &&
@@ -271,9 +331,16 @@ export async function reactiveCompact(
     isToolResultMessage(messages[tailStart]) &&
     messageHasToolCall(messages[tailStart - 1])
   ) {
+    // 尾部开头是 tool_result 时，把配对的 tool_use 一起留下，避免孤立引用。
     tailStart -= 1;
   }
+  // 只对尾部之前的历史做 LLM 摘要。
   const summary = await summarizeHistory(messages.slice(0, tailStart), deps);
+
+  deps.logger.console(
+    `[reactive compact: ${tailStart} messages summarized, ${messages.length - tailStart} kept]`,
+    "gray",
+  );
   return [
     { role: "user", content: `[Reactive compact]\n\n${summary}` },
     ...messages.slice(tailStart),
@@ -310,20 +377,21 @@ export async function agentLoop(
   messages: Anthropic.MessageParam[],
   deps: LoopDeps,
 ): Promise<string> {
-  const { client, logger, system } = deps;
+  const { client, logger, system, hooks } = deps;
+  // 应急压缩（reactive）的连续使用次数，一次 API 调用成功即复位。
   let reactiveRetries = 0;
   while (true) {
     nagIfStale(messages, logger);
 
     // s08：三个预处理器（0 次 API 调用，先做便宜的）。顺序对齐 CC 源码：budget → snip → micro
-    setMessages(messages, toolResultBudget(messages)); // L3: 先把大结果落盘
-    setMessages(messages, snipCompact(messages)); // L1: 裁剪中间
-    setMessages(messages, microCompact(messages)); // L2: 旧结果换占位符
+    replaceMessages(messages, toolResultBudget(messages, 200_000, logger)); // L3: 先把大结果落盘
+    replaceMessages(messages, snipCompact(messages, 50, logger)); // L1: 裁剪中间
+    replaceMessages(messages, microCompact(messages, logger)); // L2: 旧结果换占位符
 
     // s08：仍超阈值 → LLM 摘要（1 次 API 调用）
     if (estimateSize(messages) > CONTEXT_LIMIT) {
       logger.console("[auto compact]", "yellow");
-      setMessages(messages, await compactHistory(messages, deps));
+      replaceMessages(messages, await compactHistory(messages, deps));
     }
 
     let response: Anthropic.Message;
@@ -340,12 +408,14 @@ export async function agentLoop(
       reactiveRetries = 0; // API 调用成功即复位
     } catch (e) {
       const msg = errMsg(e).toLowerCase();
+      // 只兜「上下文超长」这一类错误，且有重试上限；其他错误照常抛出。
       if (
         (msg.includes("prompt_too_long") || msg.includes("too many tokens")) &&
         reactiveRetries < MAX_REACTIVE_RETRIES
       ) {
         logger.console("[reactive compact]", "yellow");
-        setMessages(messages, await reactiveCompact(messages, deps));
+        // 摘要头部 + 保留尾部，替换历史后重试本次请求。
+        replaceMessages(messages, await reactiveCompact(messages, deps));
         reactiveRetries += 1;
         continue;
       }
@@ -355,7 +425,7 @@ export async function agentLoop(
     messages.push({ role: "assistant", content: response.content });
 
     if (response.stop_reason !== "tool_use") {
-      const force = await triggerHooks("Stop", messages);
+      const force = await hooks.trigger("Stop", messages);
       if (force) {
         messages.push({ role: "user", content: force });
         continue;
@@ -364,6 +434,7 @@ export async function agentLoop(
     }
 
     bumpNagCounter();
+    // compact 工具会重写整个 messages[]——一旦触发，本轮剩余的 tool_result 全部作废。
     let didCompact = false;
     const results: Anthropic.ToolResultBlockParam[] = [];
     for (const block of response.content) {
@@ -376,12 +447,12 @@ export async function agentLoop(
       // 所以不能再追加对应的 tool_result（会变成孤立引用，下一次请求被 API 拒绝）——
       // 直接用摘要本身继续循环。
       if (block.name === "compact") {
-        setMessages(messages, await compactHistory(messages, deps));
+        replaceMessages(messages, await compactHistory(messages, deps));
         didCompact = true;
         break; // 结束本轮，用压缩后的上下文重新开始
       }
 
-      const blocked = await triggerHooks("PreToolUse", block);
+      const blocked = await hooks.trigger("PreToolUse", block);
       if (blocked) {
         results.push({
           type: "tool_result",
@@ -400,9 +471,8 @@ export async function agentLoop(
           : `Unknown: ${block.name}`;
       logger.toolResult(block.name, output);
 
-      await triggerHooks("PostToolUse", block, output);
+      await hooks.trigger("PostToolUse", block, output);
 
-      // todo_write 被调用即复位唠叨计数器。
       if (block.name === "todo_write") resetNagCounter();
 
       results.push({
@@ -418,7 +488,7 @@ export async function agentLoop(
 }
 
 // ── 入口 ──────────────────────────────────────────
-// Prompt example: Read the file README.md, then read code.py, then read s01_agent_loop/README.md
+// Prompt example: Read the s01~s05 main.ts files README.md, then read code.py, then read s01_agent_loop/README.md
 if (import.meta.main) {
   const client: ModelClient = createClient();
   const logger: SessionLogger = createLogger(import.meta.dirname);
@@ -427,7 +497,7 @@ if (import.meta.main) {
 
   logger.config({ model: MODEL_ID, system, tools });
 
-  loadHooks(logger);
+  const hooks = loadHooks(logger);
 
   const rl = readline.createInterface({
     input: process.stdin,
@@ -453,12 +523,13 @@ if (import.meta.main) {
     if (q === "" || q === "q" || q === "exit") break;
 
     logger.userInput(query);
-    await triggerHooks("UserPromptSubmit", query);
+    await hooks.trigger("UserPromptSubmit", query);
     history.push({ role: "user", content: query });
 
     const finalText = await agentLoop(history, {
       client,
       logger,
+      hooks,
       skills,
       system,
     });
