@@ -85,18 +85,22 @@ const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 //  s08 新增：四层压缩流水线
 // ═══════════════════════════════════════════════════════════
 
-// L4 触发阈值：估算大小（JSON 字符数，不是 token）超过它就做 LLM 摘要。
-const CONTEXT_LIMIT = 50_000;
+// L1 裁剪阈值：消息数超过它就裁掉中间部分。
+const SNIP_MAX_MESSAGES = 50;
 // L2 保留最近 N 条工具结果不动，只压缩更早的。
 const KEEP_RECENT = 3;
+// L3 预算：最新一轮 tool_result 总量超过它才开始落盘。
+const TOOL_RESULT_BUDGET = 200_000;
 // L3 落盘阈值：单条工具结果超过该长度才值得写到磁盘。
 const PERSIST_THRESHOLD = 30_000;
+// L4 触发阈值：估算大小（JSON 字符数，不是 token）超过它就做 LLM 摘要。
+const CONTEXT_LIMIT = 50_000;
 
-// 用 JSON 字符数估算上下文大小——不是 token 数，但零成本，够做阈值判断。
+// 用 JSON 字符数估算上下文大小 —— 不是 token 数，但零成本，够做阈值判断。
 export const estimateSize = (msgs: Anthropic.MessageParam[]): number =>
   JSON.stringify(msgs).length;
 
-// 原地替换数组内容——调用方持有同一个引用（对应 Python 的 `messages[:] = ...`）。
+// 原地替换数组内容 —— 调用方持有同一个引用（对应 Python 的 `messages[:] = ...`）。
 export function replaceMessages(
   messages: Anthropic.MessageParam[],
   next: Anthropic.MessageParam[],
@@ -116,17 +120,17 @@ const isToolResultMessage = (m: Anthropic.MessageParam): boolean =>
   Array.isArray(m.content) &&
   m.content.some((b) => typeof b !== "string" && b.type === "tool_result");
 
-// 取 tool_result 的文本——content 可能是字符串或内容块数组，统一成字符串来量长度。
+// 取 tool_result 的文本 —— content 可能是字符串或内容块数组，统一成字符串来量长度。
 const outputText = (part: Anthropic.ToolResultBlockParam): string =>
   typeof part.content === "string"
     ? part.content
     : JSON.stringify(part.content);
 
-// L1: snipCompact —— 裁剪中间消息，保留头 3 条，尾 47 条
+// L1: snipCompact —— 裁剪中间消息，保留头 3 条，尾 (maxMessages - 3) 条
 export function snipCompact(
   messages: Anthropic.MessageParam[],
-  maxMessages = 50,
-  logger?: SessionLogger,
+  maxMessages: number,
+  logger: SessionLogger,
 ): Anthropic.MessageParam[] {
   if (messages.length <= maxMessages) return messages;
 
@@ -152,7 +156,10 @@ export function snipCompact(
   if (headEnd >= tailStart) return messages;
   const snipped = tailStart - headEnd;
 
-  logger?.console(`[snip compact: ${snipped} messages removed]`, "gray");
+  logger.console(
+    `[COMPACT L1] snip compact: ${snipped} messages removed`,
+    "gray",
+  );
 
   return [
     ...messages.slice(0, headEnd),
@@ -164,7 +171,7 @@ export function snipCompact(
 // L2: microCompact —— 把较早的工具结果换成占位符
 export function microCompact(
   messages: Anthropic.MessageParam[],
-  logger?: SessionLogger,
+  logger: SessionLogger,
 ): Anthropic.MessageParam[] {
   const toolResults = collectToolResults(messages);
   if (toolResults.length <= KEEP_RECENT) return messages;
@@ -179,8 +186,8 @@ export function microCompact(
   }
 
   if (compacted > 0)
-    logger?.console(
-      `[micro compact: ${compacted} tool results replaced]`,
+    logger.console(
+      `[COMPACT L2] micro compact: ${compacted} tool results replaced`,
       "gray",
     );
 
@@ -204,8 +211,8 @@ export function collectToolResults(
 // L3: toolResultBudget —— 把大结果持久化到磁盘
 export function toolResultBudget(
   messages: Anthropic.MessageParam[],
-  maxBytes = 200_000,
-  logger?: SessionLogger,
+  maxBytes: number,
+  logger: SessionLogger,
 ): Anthropic.MessageParam[] {
   const last = messages[messages.length - 1];
   // 只看最后一条消息——预算只管最新一轮的工具结果，更早的交给 L2。
@@ -240,8 +247,8 @@ export function toolResultBudget(
   }
 
   if (persisted > 0)
-    logger?.console(
-      `[tool result budget: ${persisted} results persisted to disk]`,
+    logger.console(
+      `[COMPACT L3] tool result budget: ${persisted} results persisted to disk`,
       "gray",
     );
 
@@ -265,12 +272,15 @@ export async function compactHistory(
   deps: Deps,
 ): Promise<Anthropic.MessageParam[]> {
   const transcriptPath = writeTranscript(messages);
-  deps.logger.console(`[transcript saved: ${transcriptPath}]`, "gray");
+  deps.logger.console(
+    `[COMPACT L4] transcript saved: ${transcriptPath}`,
+    "gray",
+  );
 
   const summary = await summarizeHistory(messages, deps);
 
   deps.logger.console(
-    `[compact: ${messages.length} messages → summary (${summary.length} chars)]`,
+    `[COMPACT L4] compact: ${messages.length} messages → summary (${summary.length} chars)`,
     "gray",
   );
   return [{ role: "user", content: `[Compacted]\n\n${summary}` }];
@@ -305,7 +315,7 @@ export async function summarizeHistory(
     conversation;
   const request: Anthropic.MessageParam[] = [{ role: "user", content: prompt }];
 
-  logger.request(request);
+  logger.request(request, true);
   const response = await client.messages.create({
     model: MODEL_ID,
     max_tokens: 2000,
@@ -338,7 +348,7 @@ export async function reactiveCompact(
   const summary = await summarizeHistory(messages.slice(0, tailStart), deps);
 
   deps.logger.console(
-    `[reactive compact: ${tailStart} messages summarized, ${messages.length - tailStart} kept]`,
+    `[COMPACT reactive] ${tailStart} messages summarized, ${messages.length - tailStart} kept`,
     "gray",
   );
   return [
@@ -384,19 +394,22 @@ export async function agentLoop(
     nagIfStale(messages, logger);
 
     // s08：三个预处理器（0 次 API 调用，先做便宜的）。顺序对齐 CC 源码：budget → snip → micro
-    replaceMessages(messages, toolResultBudget(messages, 200_000, logger)); // L3: 先把大结果落盘
-    replaceMessages(messages, snipCompact(messages, 50, logger)); // L1: 裁剪中间
+    replaceMessages(
+      messages,
+      toolResultBudget(messages, TOOL_RESULT_BUDGET, logger),
+    ); // L3: 先把大结果落盘
+    replaceMessages(messages, snipCompact(messages, SNIP_MAX_MESSAGES, logger)); // L1: 裁剪中间
     replaceMessages(messages, microCompact(messages, logger)); // L2: 旧结果换占位符
 
     // s08：仍超阈值 → LLM 摘要（1 次 API 调用）
     if (estimateSize(messages) > CONTEXT_LIMIT) {
-      logger.console("[auto compact]", "yellow");
+      logger.console("[COMPACT L4] auto compact", "yellow");
       replaceMessages(messages, await compactHistory(messages, deps));
     }
 
     let response: Anthropic.Message;
     try {
-      logger.request(messages);
+      logger.request(messages, true);
       response = await client.messages.create({
         model: MODEL_ID,
         system,
@@ -413,7 +426,7 @@ export async function agentLoop(
         (msg.includes("prompt_too_long") || msg.includes("too many tokens")) &&
         reactiveRetries < MAX_REACTIVE_RETRIES
       ) {
-        logger.console("[reactive compact]", "yellow");
+        logger.console("[COMPACT reactive] triggered", "yellow");
         // 摘要头部 + 保留尾部，替换历史后重试本次请求。
         replaceMessages(messages, await reactiveCompact(messages, deps));
         reactiveRetries += 1;

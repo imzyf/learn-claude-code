@@ -66,7 +66,7 @@ describe("snipCompact", () => {
     const messages: Anthropic.MessageParam[] = [
       { role: "user", content: "hi" },
     ];
-    expect(snipCompact(messages, 50)).toBe(messages);
+    expect(snipCompact(messages, 50, noopLogger)).toBe(messages);
   });
 
   it("trims the middle when over the limit, keeping head and tail", () => {
@@ -77,7 +77,7 @@ describe("snipCompact", () => {
         content: `m${i}`,
       }),
     );
-    const out = snipCompact(messages, 10);
+    const out = snipCompact(messages, 10, noopLogger);
     expect(out.length).toBe(11); // head(3) + 1 placeholder + tail(7)
     expect(out[0]).toBe(messages[0]); // head kept
     expect(out[out.length - 1]).toBe(messages[19]); // tail kept
@@ -93,7 +93,7 @@ describe("microCompact", () => {
       ...toolRound("t3", "recent-2"),
       ...toolRound("t4", "recent-3"),
     ];
-    microCompact(messages);
+    microCompact(messages, noopLogger);
     const results = collectToolResults(messages);
     expect(results[0].content).toBe(
       "[Earlier tool result compacted. Re-run if needed.]",
@@ -103,7 +103,7 @@ describe("microCompact", () => {
 
   it("does nothing when there are few results", () => {
     const messages: Anthropic.MessageParam[] = toolRound("t1", "y".repeat(200));
-    microCompact(messages);
+    microCompact(messages, noopLogger);
     expect(collectToolResults(messages)[0].content).toBe("y".repeat(200));
   });
 });
@@ -111,7 +111,7 @@ describe("microCompact", () => {
 describe("toolResultBudget", () => {
   it("is a no-op when the last turn is within budget", () => {
     const messages: Anthropic.MessageParam[] = toolRound("t1", "small output");
-    expect(toolResultBudget(messages, 200_000)).toBe(messages);
+    expect(toolResultBudget(messages, 200_000, noopLogger)).toBe(messages);
   });
 });
 
