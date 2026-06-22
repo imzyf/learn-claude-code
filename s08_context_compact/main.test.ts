@@ -60,6 +60,27 @@ function toolRound(id: string, output: string): Anthropic.MessageParam[] {
   ];
 }
 
+// 并行调用的一轮：一条 assistant 带多个 tool_use + 一条 user 带多个 tool_result。
+function parallelToolRound(
+  ids: string[],
+  outputOf: (id: string) => string,
+): Anthropic.MessageParam[] {
+  return [
+    {
+      role: "assistant",
+      content: ids.map((id) => toolUseBlock(id, "bash", { command: "echo" })),
+    },
+    {
+      role: "user",
+      content: ids.map((id) => ({
+        type: "tool_result" as const,
+        tool_use_id: id,
+        content: outputOf(id),
+      })),
+    },
+  ];
+}
+
 // ── compaction preprocessors (pure, no I/O) ───────────────
 describe("snipCompact", () => {
   it("leaves short histories untouched", () => {
@@ -105,6 +126,31 @@ describe("microCompact", () => {
     const messages: Anthropic.MessageParam[] = toolRound("t1", "y".repeat(200));
     microCompact(messages, noopLogger);
     expect(collectToolResults(messages)[0].content).toBe("y".repeat(200));
+  });
+
+  it("keeps the whole latest parallel round intact", () => {
+    const ids = ["p1", "p2", "p3", "p4"];
+    const messages: Anthropic.MessageParam[] = [
+      ...toolRound("t1", "x".repeat(200)), // old + long → compacted
+      ...parallelToolRound(ids, (id) => `${id}-`.padEnd(200, "z")),
+    ];
+    microCompact(messages, noopLogger);
+    const results = collectToolResults(messages);
+    expect(results[0].content).toBe(
+      "[Earlier tool result compacted. Re-run if needed.]",
+    );
+    for (const [i, id] of ids.entries())
+      expect(results[i + 1].content).toBe(`${id}-`.padEnd(200, "z"));
+  });
+
+  it("does nothing when all results belong to the latest round", () => {
+    const messages: Anthropic.MessageParam[] = parallelToolRound(
+      ["p1", "p2", "p3", "p4"],
+      () => "w".repeat(200),
+    );
+    microCompact(messages, noopLogger);
+    for (const part of collectToolResults(messages))
+      expect(part.content).toBe("w".repeat(200));
   });
 });
 

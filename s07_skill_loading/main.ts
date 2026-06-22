@@ -69,7 +69,7 @@ import {
 // 复用来的符号（spawnSubagent / 各 hook / nag）由测试各自从源头 import。
 
 const WORKDIR = process.cwd();
-const SKILLS_DIR = path.join(WORKDIR, "skills");
+export const SKILLS_DIR = path.join(WORKDIR, "skills");
 
 // ═══════════════════════════════════════════════════════════
 //  s07 新增：技能目录扫描 + 带清单的 SYSTEM

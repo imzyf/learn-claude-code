@@ -31,10 +31,10 @@
  *   Hook 层：hook 系统（触发器）复用 s04，默认 hook + nag 机制复用 s05，与 s07 一致。
  *   Subagent / Skill：spawnSubagent 复用 s06、技能层复用 s07，不再重复定义。
  *   + 压缩流水线（snip/micro/budget/auto + reactive）
- *   + compact 工具——模型可以自己请求生成摘要（由 agentLoop 拦截，不走 handler 表）
+ *   + compact 工具 —— 模型可以自己请求生成摘要（由 agentLoop 拦截，不走 handler 表）
  *
  * 一点需要注意：用压缩摘要替换历史记录后，不能再追加一个孤立的
- * tool_result（引用一个已经被摘要抹掉的 tool_use）——真实 API 会拒绝
+ * tool_result（引用一个已经被摘要抹掉的 tool_use） —— 真实 API 会拒绝
  * 这种孤立的 tool_result，所以这里只用摘要本身继续推进循环。
  *
  * 基于 s07（skill loading）构建。Usage:
@@ -66,6 +66,7 @@ import {
   buildSystem,
   type LoopDeps,
   loadSkills,
+  SKILLS_DIR,
   tools as s07Tools,
   TOOL_HANDLERS,
   TOOL_SCHEMAS,
@@ -74,10 +75,10 @@ import {
 // s08 导出自己拥有的东西：压缩流水线（L1~L4 + reactive）+ agentLoop。
 // 复用来的符号（技能层 / spawnSubagent / permissionHook / nag）由测试各自从源头 import。
 
-const WORKDIR = process.cwd();
-const SKILLS_DIR = path.join(WORKDIR, "skills");
-const TRANSCRIPT_DIR = path.join(WORKDIR, ".transcripts");
-const TOOL_RESULTS_DIR = path.join(WORKDIR, ".task_outputs", "tool-results");
+// 运行时产物落在 s08 文件夹下（同 logger 的 .log/）；SKILLS_DIR 复用 s07（仓库根目录的共享输入）。
+const MODULE_DIR = import.meta.dirname;
+const TRANSCRIPT_DIR = path.join(MODULE_DIR, ".transcripts");
+const TOOL_RESULTS_DIR = path.join(MODULE_DIR, ".task_outputs", "tool-results");
 
 const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
@@ -85,16 +86,22 @@ const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 //  s08 新增：四层压缩流水线
 // ═══════════════════════════════════════════════════════════
 
+// 五个阈值启动时可用 COMPACT_* 环境变量覆盖（默认值见 defaults.env，
+// 可复制到仓库根目录 .env，pnpm dev 会自动加载）。
 // L1 裁剪阈值：消息数超过它就裁掉中间部分。
-const SNIP_MAX_MESSAGES = 50;
-// L2 保留最近 N 条工具结果不动，只压缩更早的。
-const KEEP_RECENT = 3;
+const SNIP_MAX_MESSAGES = Number(process.env.COMPACT_SNIP_MAX_MESSAGES ?? 50);
+// L2 保留最近 N 条工具结果不动（最后一条消息整条不压），只压缩更早的。
+const KEEP_RECENT = Number(process.env.COMPACT_KEEP_RECENT ?? 3);
 // L3 预算：最新一轮 tool_result 总量超过它才开始落盘。
-const TOOL_RESULT_BUDGET = 200_000;
+const TOOL_RESULT_BUDGET = Number(
+  process.env.COMPACT_TOOL_RESULT_BUDGET ?? 200_000,
+);
 // L3 落盘阈值：单条工具结果超过该长度才值得写到磁盘。
-const PERSIST_THRESHOLD = 30_000;
+const PERSIST_THRESHOLD = Number(
+  process.env.COMPACT_PERSIST_THRESHOLD ?? 30_000,
+);
 // L4 触发阈值：估算大小（JSON 字符数，不是 token）超过它就做 LLM 摘要。
-const CONTEXT_LIMIT = 50_000;
+const CONTEXT_LIMIT = Number(process.env.COMPACT_CONTEXT_LIMIT ?? 50_000);
 
 // 用 JSON 字符数估算上下文大小 —— 不是 token 数，但零成本，够做阈值判断。
 export const estimateSize = (msgs: Anthropic.MessageParam[]): number =>
@@ -174,26 +181,40 @@ export function microCompact(
   logger: SessionLogger,
 ): Anthropic.MessageParam[] {
   const toolResults = collectToolResults(messages);
-  if (toolResults.length <= KEEP_RECENT) return messages;
+  // 最后一条消息可能是模型还没看到的最新一轮并行结果 —— 整条不压：
+  // 保留数取 KEEP_RECENT 与它的块数中的较大值。
+  const lastRound = collectToolResults(messages.slice(-1)).length;
+  const keep = Math.max(KEEP_RECENT, lastRound);
+  if (toolResults.length <= keep) return messages;
 
-  // 最近 KEEP_RECENT 条之外的长结果原地换成占位符（短结果不值得动）。
-  let compacted = 0;
-  for (const part of toolResults.slice(0, -KEEP_RECENT)) {
+  // 最近 keep 条之外的长结果原地换成占位符（短结果不值得动）。
+  const replaced: string[] = [];
+  for (const part of toolResults.slice(0, -keep)) {
     if (typeof part.content === "string" && part.content.length > 120) {
+      // tool_result 块上有啥记啥：id + 原长度 + 是否 error + 原内容开头预览。
+      const flag = part.is_error ? " (error)" : "";
+      const preview = part.content.slice(0, 80).replace(/\s+/g, " ").trim();
+      replaced.push(
+        `- ${part.tool_use_id}: ${part.content.length} chars${flag}\n    ${preview}…`,
+      );
       part.content = "[Earlier tool result compacted. Re-run if needed.]";
-      compacted += 1;
     }
   }
 
-  if (compacted > 0)
-    logger.console(
-      `[COMPACT L2] micro compact: ${compacted} tool results replaced`,
-      "gray",
+  if (replaced.length > 0) {
+    print(
+      `[COMPACT L2] micro compact: ${replaced.length} tool results replaced`,
+      "yellow",
     );
+    logger.section(
+      `[COMPACT L2] micro compact (${replaced.length} replaced)`,
+      replaced.join("\n"),
+    );
+  }
 
   return messages;
 }
-// 按出现顺序收集所有 tool_result 块——返回原对象引用，调用方可原地修改。
+// 按出现顺序收集所有 tool_result 块 —— 返回原对象引用，调用方可原地修改。
 export function collectToolResults(
   messages: Anthropic.MessageParam[],
 ): Anthropic.ToolResultBlockParam[] {
@@ -215,7 +236,7 @@ export function toolResultBudget(
   logger: SessionLogger,
 ): Anthropic.MessageParam[] {
   const last = messages[messages.length - 1];
-  // 只看最后一条消息——预算只管最新一轮的工具结果，更早的交给 L2。
+  // 只看最后一条消息 —— 预算只管最新一轮的工具结果，更早的交给 L2。
   if (last?.role !== "user" || !Array.isArray(last.content)) return messages;
 
   // 取出本轮全部 tool_result 块。
@@ -235,7 +256,7 @@ export function toolResultBudget(
   for (const block of ranked) {
     if (total <= maxBytes) break;
 
-    // 低于落盘阈值的块跳过——写盘省不了多少空间。
+    // 低于落盘阈值的块跳过 —— 写盘省不了多少空间。
     const content = outputText(block);
     if (content.length <= PERSIST_THRESHOLD) continue;
 
@@ -285,7 +306,7 @@ export async function compactHistory(
   );
   return [{ role: "user", content: `[Compacted]\n\n${summary}` }];
 }
-// 压缩前把完整历史落成 JSONL 存档——信息只是移出上下文，并未真正丢失。
+// 压缩前把完整历史落成 JSONL 存档 —— 信息只是移出上下文，并未真正丢失。
 function writeTranscript(messages: Anthropic.MessageParam[]): string {
   fs.mkdirSync(TRANSCRIPT_DIR, { recursive: true });
   const filePath = path.join(
@@ -394,12 +415,15 @@ export async function agentLoop(
     nagIfStale(messages, logger);
 
     // s08：三个预处理器（0 次 API 调用，先做便宜的）。顺序对齐 CC 源码：budget → snip → micro
+    // L3: 先把大结果落盘
     replaceMessages(
       messages,
       toolResultBudget(messages, TOOL_RESULT_BUDGET, logger),
-    ); // L3: 先把大结果落盘
-    replaceMessages(messages, snipCompact(messages, SNIP_MAX_MESSAGES, logger)); // L1: 裁剪中间
-    replaceMessages(messages, microCompact(messages, logger)); // L2: 旧结果换占位符
+    );
+    // L1: 裁剪中间
+    replaceMessages(messages, snipCompact(messages, SNIP_MAX_MESSAGES, logger));
+    // L2: 旧结果换占位符
+    replaceMessages(messages, microCompact(messages, logger));
 
     // s08：仍超阈值 → LLM 摘要（1 次 API 调用）
     if (estimateSize(messages) > CONTEXT_LIMIT) {
@@ -447,7 +471,7 @@ export async function agentLoop(
     }
 
     bumpNagCounter();
-    // compact 工具会重写整个 messages[]——一旦触发，本轮剩余的 tool_result 全部作废。
+    // compact 工具会重写整个 messages[] —— 一旦触发，本轮剩余的 tool_result 全部作废。
     let didCompact = false;
     const results: Anthropic.ToolResultBlockParam[] = [];
     for (const block of response.content) {
@@ -457,8 +481,8 @@ export async function agentLoop(
       }
 
       // s08：compact 工具用摘要重写整个历史。请求它的那次 tool_use 也会被摘要抹掉，
-      // 所以不能再追加对应的 tool_result（会变成孤立引用，下一次请求被 API 拒绝）——
-      // 直接用摘要本身继续循环。
+      // 所以不能再追加对应的 tool_result（会变成孤立引用，下一次请求被 API 拒绝）
+      // —— 直接用摘要本身继续循环。
       if (block.name === "compact") {
         replaceMessages(messages, await compactHistory(messages, deps));
         didCompact = true;

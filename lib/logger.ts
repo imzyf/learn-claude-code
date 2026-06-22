@@ -58,12 +58,9 @@ export function createLogger(sessionDir: string): SessionLogger {
 
     function writeJson(tag: string, data: unknown): void {
       json.write(
-        `${JSON.stringify(
-          { ts: new Date().toISOString(), scope, tag, data },
-          null,
-          2,
-        )}\n`,
+        `${JSON.stringify({ ts: new Date().toISOString(), scope, tag })}\n`,
       );
+      json.write(`${JSON.stringify(data, null, 2)}\n`);
     }
 
     function writeTranscript(title: string, body: string): void {
@@ -92,6 +89,7 @@ export function createLogger(sessionDir: string): SessionLogger {
       },
 
       request(messages: Anthropic.MessageParam[], full = false) {
+        json.write("\n");
         writeJson("api_request", {
           new_messages: full ? messages : messages.slice(loggedMessages),
         });
