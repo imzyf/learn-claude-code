@@ -1,4 +1,5 @@
 // lib/logger.ts - session 日志：JSON（API 收发）+ transcript（可读对话）
+import { randomBytes } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type Anthropic from "@anthropic-ai/sdk";
@@ -55,13 +56,8 @@ export function createLogger(sessionDir: string): SessionLogger {
   function make(scope: string): SessionLogger {
     // request 只记增量消息，避免日志随对话轮数平方级膨胀。
     let loggedMessages = 0;
-
-    function writeJson(tag: string, data: unknown): void {
-      json.write(
-        `${JSON.stringify({ ts: new Date().toISOString(), scope, tag })}\n`,
-      );
-      json.write(`${JSON.stringify(data, null, 2)}\n`);
-    }
+    // traceId：request 生成并写入 .json，response 复用并写进 .log，用于两份文件对照。
+    let traceId = "";
 
     function writeTranscript(title: string, body: string): void {
       const time = new Date().toTimeString().slice(0, 8);
@@ -76,11 +72,15 @@ export function createLogger(sessionDir: string): SessionLogger {
       section: writeTranscript,
 
       config(data: Record<string, unknown>) {
-        writeJson("config", data);
+        json.write(
+          `${JSON.stringify(
+            {scope, config: data },
+            null,
+            2,
+          )}\n`,
+        );
         if (typeof data.model === "string") {
-          void costMeter
-            .load(data.model)
-            .then((price) => writeJson("price", price));
+          costMeter.load(data.model);
         }
       },
 
@@ -89,18 +89,47 @@ export function createLogger(sessionDir: string): SessionLogger {
       },
 
       request(messages: Anthropic.MessageParam[], full = false) {
-        json.write("\n");
-        writeJson("api_request", {
-          new_messages: full ? messages : messages.slice(loggedMessages),
-        });
+        traceId = randomBytes(4).toString("hex");
+        const newMessages = full ? messages : messages.slice(loggedMessages);
+        const chars = JSON.stringify(messages).length;
         loggedMessages = messages.length;
+
+        json.write(
+          `${JSON.stringify(
+            {
+              ts: new Date().toISOString(),
+              traceId,
+              tag: "api_request",
+              messages: newMessages,
+            },
+            null,
+            2,
+          )}\n`,
+        );
+
+        writeTranscript(
+          `REQUEST ${traceId} ${scope}`,
+          `${messages.length} messages (${newMessages.length} new), ${chars} chars`,
+        );
       },
 
       response(res: Anthropic.Message) {
-        writeJson("api_response", res);
+        json.write(
+          `${JSON.stringify(
+            {
+              ts: new Date().toISOString(),
+              traceId,
+              tag: "api_response",
+              message: res,
+            },
+            null,
+            2,
+          )}\n`,
+        );
+
         const u = res.usage;
         writeTranscript(
-          `ASSISTANT (${u.input_tokens} in / ${u.output_tokens} out / ` +
+          `ASSISTANT ${traceId} ${scope} (${u.input_tokens} in / ${u.output_tokens} out / ` +
             `${u.cache_creation_input_tokens ?? 0} cache-w / ` +
             `${u.cache_read_input_tokens ?? 0} cache-r${costMeter.costSuffix(u)})`,
           formatBlocks(res.content),

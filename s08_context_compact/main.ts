@@ -151,6 +151,22 @@ export function snipCompact(
     while (headEnd < messages.length && isToolResultMessage(messages[headEnd]))
       headEnd += 1;
   }
+  // 取一条消息的单行内容预览 —— content 是字符串或内容块数组，压平成短文本。
+  const messagePreview = (m: Anthropic.MessageParam): string => {
+    const raw =
+      typeof m.content === "string"
+        ? m.content
+        : m.content
+            .map((b) => {
+              if (typeof b === "string") return b;
+              if (b.type === "text") return b.text;
+              if (b.type === "tool_use") return `[tool_use ${b.name}]`;
+              if (b.type === "tool_result") return "[tool_result]";
+              return `[${b.type}]`;
+            })
+            .join(" ");
+    return raw.slice(0, 80).replace(/\s+/g, " ").trim();
+  };
 
   if (
     tailStart > 0 &&
@@ -163,9 +179,15 @@ export function snipCompact(
   if (headEnd >= tailStart) return messages;
   const snipped = tailStart - headEnd;
 
-  logger.console(
-    `[COMPACT L1] snip compact: ${snipped} messages removed`,
-    "gray",
+  // 被裁掉的每条消息记一行：索引 + 角色 + 内容预览。
+  const removed = messages
+    .slice(headEnd, tailStart)
+    .map((m, i) => `- [${headEnd + i}] ${m.role}: ${messagePreview(m)}`);
+
+  print(`[COMPACT L1] snip compact: ${snipped} messages removed`, "yellow");
+  logger.section(
+    `[COMPACT L1] snip compact (${snipped} removed)`,
+    removed.join("\n"),
   );
 
   return [
@@ -220,6 +242,7 @@ export function collectToolResults(
 ): Anthropic.ToolResultBlockParam[] {
   const parts: Anthropic.ToolResultBlockParam[] = [];
   for (const m of messages) {
+    // tool_result 只会出现在 content 为数组的 user 消息里，其余直接跳过。
     if (m.role !== "user" || !Array.isArray(m.content)) continue;
     for (const part of m.content) {
       if (typeof part !== "string" && part.type === "tool_result")
@@ -252,7 +275,8 @@ export function toolResultBudget(
   const ranked = [...blocks].sort(
     (a, b) => outputText(b).length - outputText(a).length,
   );
-  let persisted = 0;
+  // 每落盘一条记一行：id + 原长度。
+  const persisted: string[] = [];
   for (const block of ranked) {
     if (total <= maxBytes) break;
 
@@ -262,16 +286,21 @@ export function toolResultBudget(
 
     // 原文写进磁盘，消息里只留文件路径 + 预览。
     block.content = persistLargeOutput(block.tool_use_id, content);
-    persisted += 1;
+    persisted.push(`- ${block.tool_use_id}: ${content.length} chars → disk`);
     // 重新累计总量，回到预算内就停。
     total = blocks.reduce((n, b) => n + outputText(b).length, 0);
   }
 
-  if (persisted > 0)
-    logger.console(
-      `[COMPACT L3] tool result budget: ${persisted} results persisted to disk`,
-      "gray",
+  if (persisted.length > 0) {
+    print(
+      `[COMPACT L3] tool result budget: ${persisted.length} results persisted to disk`,
+      "yellow",
     );
+    logger.section(
+      `[COMPACT L3] tool result budget (${persisted.length} persisted)`,
+      persisted.join("\n"),
+    );
+  }
 
   return messages;
 }
@@ -293,16 +322,15 @@ export async function compactHistory(
   deps: Deps,
 ): Promise<Anthropic.MessageParam[]> {
   const transcriptPath = writeTranscript(messages);
-  deps.logger.console(
-    `[COMPACT L4] transcript saved: ${transcriptPath}`,
-    "gray",
-  );
-
   const summary = await summarizeHistory(messages, deps);
 
-  deps.logger.console(
+  print(
     `[COMPACT L4] compact: ${messages.length} messages → summary (${summary.length} chars)`,
-    "gray",
+    "yellow",
+  );
+  deps.logger.section(
+    `[COMPACT L4] compact (${messages.length} messages → ${summary.length} chars)`,
+    `transcript archived: ${transcriptPath}`,
   );
   return [{ role: "user", content: `[Compacted]\n\n${summary}` }];
 }
