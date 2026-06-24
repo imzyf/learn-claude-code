@@ -1,4 +1,7 @@
 // lib/pricing.ts - 取价并累计调用成本：供 logger 写入，不碰终端
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import type Anthropic from "@anthropic-ai/sdk";
 
 // 从 LiteLLM model catalog 取价并累计费用。
@@ -6,6 +9,14 @@ import type Anthropic from "@anthropic-ai/sdk";
 
 // 费用按 RMB 显示，固定汇率 USD × 7
 const USD_TO_RMB = 7;
+
+// 价格变化很慢，每个 model 缓存 7 天，结果存在 lib/.cache 下的一个 JSON 文件里。
+const PRICE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const CACHE_FILE = path.join(
+  path.dirname(fileURLToPath(import.meta.url)),
+  ".cache",
+  "prices.json",
+);
 
 // LiteLLM model catalog 的价格字段，单位是每 token 美元（不是每 1M tokens）
 interface LiteLLMPrice {
@@ -15,10 +26,37 @@ interface LiteLLMPrice {
   cache_creation_input_token_cost?: number;
 }
 
+// 缓存文件是一张 { modelId: entry } 表，整存整取；文件损坏就当空表。
+interface PriceEntry {
+  price: LiteLLMPrice;
+  expires: number; // epoch ms，超过即失效
+}
+
+function readCache(): Record<string, PriceEntry> {
+  try {
+    return JSON.parse(fs.readFileSync(CACHE_FILE, "utf8"));
+  } catch {
+    return {};
+  }
+}
+
+function writeCache(cache: Record<string, PriceEntry>): void {
+  fs.mkdirSync(path.dirname(CACHE_FILE), { recursive: true });
+  fs.writeFileSync(CACHE_FILE, JSON.stringify(cache, null, 2));
+}
+
 async function fetchPrice(modelId: string): Promise<LiteLLMPrice | null> {
+  const cached = readCache()[modelId];
+  if (cached && Date.now() < cached.expires) return cached.price;
   try {
     const res = await fetch(`https://api.litellm.ai/model_catalog/${modelId}`);
-    return res.ok ? await res.json() : null;
+    if (!res.ok) return null;
+    const price: LiteLLMPrice = await res.json();
+    // 只缓存成功结果；失败不写，避免把一次网络故障缓存一整天。
+    const cache = readCache();
+    cache[modelId] = { price, expires: Date.now() + PRICE_TTL_MS };
+    writeCache(cache);
+    return price;
   } catch {
     return null;
   }

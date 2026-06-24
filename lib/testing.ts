@@ -6,24 +6,31 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type Anthropic from "@anthropic-ai/sdk";
-import { afterAll, beforeAll, vi } from "vitest";
+import { afterEach, beforeEach, vi } from "vitest";
 import type { SessionLogger } from "./logger";
 import type { ModelClient } from "./model";
 
 // 工具以 WORKDIR = process.cwd() 为根，临时目录必须建在仓库内。
-// 统一放在 .runtime/（已 gitignore）下，注册 beforeAll/afterAll 自动创建与清理。
+// 在 baseDir 自己目录下的 .tmp/（已 gitignore）建一个唯一空目录，回传绝对路径。
+// baseDir 传 import.meta.dirname；调用方负责清理。
+export function makeTempDir(baseDir: string): string {
+  const tmpRoot = path.join(baseDir, ".tmp");
+  fs.mkdirSync(tmpRoot, { recursive: true });
+  return fs.mkdtempSync(path.join(tmpRoot, "t-"));
+}
+
+// 每个用例前 beforeEach 建新目录、afterEach 清理，保证用例间隔离。
 // onReady 在目录建好后回传其绝对路径；返回值把目录内文件转成相对 WORKDIR 的路径。
 export function useTempDir(
-  prefix: string,
+  baseDir: string,
   onReady: (dir: string) => void,
 ): (name: string) => string {
   let dir = "";
-  beforeAll(() => {
-    fs.mkdirSync(path.join(process.cwd(), ".runtime"), { recursive: true });
-    dir = fs.mkdtempSync(path.join(process.cwd(), ".runtime", `${prefix}-`));
+  beforeEach(() => {
+    dir = makeTempDir(baseDir);
     onReady(dir);
   });
-  afterAll(() => {
+  afterEach(() => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
   return (name: string) => path.join(path.relative(process.cwd(), dir), name);

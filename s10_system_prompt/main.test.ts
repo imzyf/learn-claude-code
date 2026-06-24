@@ -9,13 +9,14 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type Anthropic from "@anthropic-ai/sdk";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import {
   fakeClient,
   fakeMessage,
   noopLogger,
   textBlock,
   toolUseBlock,
+  useTempDir,
 } from "../lib/testing";
 import {
   agentLoop,
@@ -92,15 +93,10 @@ describe("getSystemPrompt", () => {
 
 // ── updateContext (real state) ────────────────────────────
 describe("updateContext", () => {
-  let tmp: string;
+  let tmp = "";
 
-  beforeEach(() => {
-    fs.mkdirSync(path.join(process.cwd(), ".runtime"), { recursive: true });
-    tmp = fs.mkdtempSync(path.join(process.cwd(), ".runtime", "s10-"));
-  });
-
-  afterEach(() => {
-    fs.rmSync(tmp, { recursive: true, force: true });
+  useTempDir(import.meta.dirname, (dir) => {
+    tmp = dir;
   });
 
   it("reports the enabled tools and empty memories when no index exists", () => {
@@ -119,9 +115,8 @@ describe("updateContext", () => {
 // ── agentLoop ─────────────────────────────────────────────
 describe("agentLoop", () => {
   const memoryIndex = path.join(
-    process.cwd(),
-    ".runtime",
-    "s10-nonexistent",
+    import.meta.dirname,
+    "nonexistent",
     "MEMORY.md",
   );
 

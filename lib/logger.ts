@@ -72,13 +72,7 @@ export function createLogger(sessionDir: string): SessionLogger {
       section: writeTranscript,
 
       config(data: Record<string, unknown>) {
-        json.write(
-          `${JSON.stringify(
-            {scope, config: data },
-            null,
-            2,
-          )}\n`,
-        );
+        json.write(`${JSON.stringify({ scope, config: data }, null, 2)}\n`);
         if (typeof data.model === "string") {
           costMeter.load(data.model);
         }
@@ -97,9 +91,11 @@ export function createLogger(sessionDir: string): SessionLogger {
         json.write(
           `${JSON.stringify(
             {
-              ts: new Date().toISOString(),
-              traceId,
+              trace_id: traceId,
               tag: "api_request",
+              // 子 scope 标注来源；main 省略 scope key。
+              ...(scope !== "main" ? { scope } : {}),
+              ts: new Date().toISOString(),
               messages: newMessages,
             },
             null,
@@ -120,6 +116,8 @@ export function createLogger(sessionDir: string): SessionLogger {
               ts: new Date().toISOString(),
               traceId,
               tag: "api_response",
+              // 子 scope 标注来源；main 省略 scope key。
+              ...(scope !== "main" ? { scope } : {}),
               message: res,
             },
             null,

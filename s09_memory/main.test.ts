@@ -2,21 +2,22 @@
  * s09_memory/main.test.ts
  *
  * s09 的新增点是记忆系统。记忆函数都接受一个目录参数（analogous to s07 的
- * scanSkills(dir)），测试指向 .runtime/ 下的临时目录，读写真实文件验证往返；
+ * scanSkills(dir)），测试指向一个临时目录，读写真实文件验证往返；
  * selectRelevantMemories 用 fake client 走 LLM 挑选，client 抛错时回退关键词匹配。
  * agentLoop 指向空的临时记忆目录：loadMemories 无文件即短路，末尾 extractMemories
  * 收到 "[]" 不写盘。压缩预处理器/subagent 复用 s08。
  */
 import * as fs from "node:fs";
-import * as path from "node:path";
 import type Anthropic from "@anthropic-ai/sdk";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import {
   fakeClient,
   fakeMessage,
+  makeTempDir,
   noopLogger,
   textBlock,
   toolUseBlock,
+  useTempDir,
 } from "../lib/testing";
 import {
   agentLoop,
@@ -35,15 +36,10 @@ import {
   writeMemoryFile,
 } from "./main";
 
-let tmp: string;
+let tmp = "";
 
-beforeEach(() => {
-  fs.mkdirSync(path.join(process.cwd(), ".runtime"), { recursive: true });
-  tmp = fs.mkdtempSync(path.join(process.cwd(), ".runtime", "s09-"));
-});
-
-afterEach(() => {
-  fs.rmSync(tmp, { recursive: true, force: true });
+useTempDir(import.meta.dirname, (dir) => {
+  tmp = dir;
 });
 
 // ── parseFrontmatter / messageText (pure) ─────────────────
@@ -140,9 +136,7 @@ describe("selectRelevantMemories", () => {
 
   it("returns nothing when there are no memory files", async () => {
     const client = fakeClient();
-    const empty = fs.mkdtempSync(
-      path.join(process.cwd(), ".runtime", "s09-empty-"),
-    );
+    const empty = makeTempDir(import.meta.dirname);
 
     const selected = await selectRelevantMemories(
       empty,

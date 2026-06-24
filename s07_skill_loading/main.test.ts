@@ -10,7 +10,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type Anthropic from "@anthropic-ai/sdk";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import type { SessionLogger } from "../lib/logger";
 import {
   fakeClient,
@@ -18,6 +18,7 @@ import {
   noopLogger,
   textBlock,
   toolUseBlock,
+  useTempDir,
 } from "../lib/testing";
 import { createHooks } from "../s04_hooks/main";
 // s05/s06 的层沿用旧实现，各自的测试不在此重复；这里只借 resetNagCounter 做 setup。
@@ -106,13 +107,12 @@ describe("parseFrontmatter", () => {
   });
 });
 
-// ── scanSkills (real files under .runtime/) ───────────────
+// ── scanSkills (real files in a temp dir) ─────────────────
 describe("scanSkills", () => {
-  let dir: string;
+  let dir = "";
 
-  beforeAll(() => {
-    fs.mkdirSync(path.join(process.cwd(), ".runtime"), { recursive: true });
-    dir = fs.mkdtempSync(path.join(process.cwd(), ".runtime", "s07-"));
+  useTempDir(import.meta.dirname, (d) => {
+    dir = d;
     const skill = (name: string, body: string) => {
       fs.mkdirSync(path.join(dir, name), { recursive: true });
       fs.writeFileSync(path.join(dir, name, "SKILL.md"), body);
@@ -124,10 +124,6 @@ describe("scanSkills", () => {
     skill("pdf", "# PDF tools\n\nno frontmatter here");
     fs.mkdirSync(path.join(dir, "not-a-skill"), { recursive: true }); // no SKILL.md → skipped
     fs.writeFileSync(path.join(dir, "loose.txt"), "ignored"); // top-level file → skipped
-  });
-
-  afterAll(() => {
-    fs.rmSync(dir, { recursive: true, force: true });
   });
 
   it("returns an empty registry for a missing directory", () => {

@@ -1,7 +1,8 @@
 bin/.cache/
+lib/.cache/
 node_modules/
 .log/
-.runtime/
+.tmp/
 .transcripts/
 .task_outputs/
 .env

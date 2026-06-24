@@ -29,7 +29,7 @@ import {
 } from "./main";
 
 let tmp: string;
-const rel = useTempDir("s03", (dir) => {
+const rel = useTempDir(import.meta.dirname, (dir) => {
   tmp = dir;
 });
 
