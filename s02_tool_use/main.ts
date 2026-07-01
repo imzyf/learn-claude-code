@@ -25,9 +25,12 @@ import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
 import { client, MODEL_ID } from "../lib/model";
 import { zodTool, textOf } from "../lib/tools";
+import { createLogger } from "../lib/logger";
 
 const WORKDIR = process.cwd();
 const SYSTEM = `You are a coding agent at ${WORKDIR}. Use tools to solve tasks. Act, don't explain.`;
+
+const logger = createLogger(path.basename(import.meta.dirname));
 
 const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
@@ -133,6 +136,7 @@ const tools: Anthropic.Tool[] = [
   zodTool("edit_file", "Replace exact text in a file once.", editSchema),
   zodTool("glob", "Find files matching a glob pattern.", globSchema),
 ];
+logger.config({ model: MODEL_ID, system: SYSTEM, tools });
 
 // ═══════════════════════════════════════════════════════════
 //  NEW in s02: dispatch map (s01 hardcoded runBash, now a lookup)
@@ -162,6 +166,7 @@ const TOOL_HANDLERS: Partial<Record<string, (input: any) => string>> = {
 
 async function agentLoop(messages: Anthropic.MessageParam[]): Promise<string> {
   while (true) {
+    logger.request(messages);
     const response = await client.messages.create({
       model: MODEL_ID,
       system: SYSTEM,
@@ -169,6 +174,7 @@ async function agentLoop(messages: Anthropic.MessageParam[]): Promise<string> {
       tools,
       max_tokens: 8000,
     });
+    logger.response(response);
 
     // Append assistant turn (includes any tool-call blocks)
     messages.push({ role: "assistant", content: response.content });
@@ -187,6 +193,7 @@ async function agentLoop(messages: Anthropic.MessageParam[]): Promise<string> {
       const handler = TOOL_HANDLERS[block.name];
       const output = handler && schema ? handler(schema.parse(block.input)) : `Unknown: ${block.name}`;
       console.log(output.slice(0, 200));
+      logger.toolResult(block.name, output);
       results.push({
         type: "tool_result",
         tool_use_id: block.id,
@@ -222,6 +229,7 @@ while (true) {
   }
   const q = query.trim().toLowerCase();
   if (q === "" || q === "q" || q === "exit") break;
+  logger.userInput(query);
 
   history.push({ role: "user", content: query });
   const finalText = await agentLoop(history);

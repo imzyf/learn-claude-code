@@ -59,9 +59,12 @@ import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
 import { client, MODEL_ID } from "../lib/model";
 import { zodTool, textOf } from "../lib/tools";
+import { createLogger } from "../lib/logger";
 
 const WORKDIR = process.cwd();
 const SYSTEM = `You are a coding agent at ${WORKDIR}. Use tools to solve tasks. Act, don't explain.`;
+
+const logger = createLogger(path.basename(import.meta.dirname));
 
 const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
@@ -159,6 +162,7 @@ const tools: Anthropic.Tool[] = [
   zodTool("edit_file", "Replace exact text in a file once.", editSchema),
   zodTool("glob", "Find files matching a glob pattern.", globSchema),
 ];
+logger.config({ model: MODEL_ID, system: SYSTEM, tools });
 
 const TOOL_SCHEMAS: Partial<Record<string, z.ZodObject>> = {
   bash: bashSchema,
@@ -311,6 +315,7 @@ registerHook("Stop", summaryHook);
 
 async function agentLoop(messages: Anthropic.MessageParam[]): Promise<string> {
   while (true) {
+    logger.request(messages);
     const response = await client.messages.create({
       model: MODEL_ID,
       system: SYSTEM,
@@ -318,6 +323,7 @@ async function agentLoop(messages: Anthropic.MessageParam[]): Promise<string> {
       tools,
       max_tokens: 8000,
     });
+    logger.response(response);
     messages.push({ role: "assistant", content: response.content });
 
     if (response.stop_reason !== "tool_use") {
@@ -349,6 +355,7 @@ async function agentLoop(messages: Anthropic.MessageParam[]): Promise<string> {
       const schema = TOOL_SCHEMAS[block.name];
       const handler = TOOL_HANDLERS[block.name];
       const output = handler && schema ? handler(schema.parse(block.input)) : `Unknown: ${block.name}`;
+      logger.toolResult(block.name, output);
 
       await triggerHooks("PostToolUse", block, output); // s04: post hook
 
@@ -377,6 +384,7 @@ while (true) {
   }
   const q = query.trim().toLowerCase();
   if (q === "" || q === "q" || q === "exit") break;
+  logger.userInput(query);
 
   await triggerHooks("UserPromptSubmit", query);
   history.push({ role: "user", content: query });

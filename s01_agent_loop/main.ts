@@ -29,19 +29,24 @@
  */
 
 import { spawnSync } from "node:child_process";
+import * as path from "node:path";
 import * as readline from "node:readline/promises";
 import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
 import { client, MODEL_ID } from "../lib/model";
 import { zodTool, textOf } from "../lib/tools";
+import { createLogger } from "../lib/logger";
 
 const SYSTEM = `You are a coding agent at ${process.cwd()}. Use bash to solve tasks. Act, don't explain.`;
+
+const logger = createLogger(path.basename(import.meta.dirname));
 
 // ── Tool definition: just bash ────────────────────────────
 const bashSchema = z.object({ command: z.string() });
 const tools: Anthropic.Tool[] = [
   zodTool("bash", "Run a shell command.", bashSchema),
 ];
+logger.config({ model: MODEL_ID, system: SYSTEM, tools });
 
 // ── Tool execution ────────────────────────────────────────
 function runBash(command: string): string {
@@ -67,6 +72,7 @@ function runBash(command: string): string {
 // ── The core pattern: a while loop that calls tools until the model stops ──
 async function agentLoop(messages: Anthropic.MessageParam[]): Promise<string> {
   while (true) {
+    logger.request(messages);
     const response = await client.messages.create({
       model: MODEL_ID,
       system: SYSTEM,
@@ -74,6 +80,7 @@ async function agentLoop(messages: Anthropic.MessageParam[]): Promise<string> {
       tools,
       max_tokens: 8000,
     });
+    logger.response(response);
 
     // Append assistant turn (includes any tool-call blocks)
     messages.push({ role: "assistant", content: response.content });
@@ -91,6 +98,7 @@ async function agentLoop(messages: Anthropic.MessageParam[]): Promise<string> {
       console.log(`\x1b[33m$ ${input.command}\x1b[0m`);
       const output = runBash(input.command);
       console.log(output.slice(0, 200));
+      logger.toolResult(input.command, output);
       results.push({
         type: "tool_result",
         tool_use_id: block.id,
@@ -126,6 +134,7 @@ while (true) {
   }
   const q = query.trim().toLowerCase();
   if (q === "" || q === "q" || q === "exit") break;
+  logger.userInput(query);
 
   history.push({ role: "user", content: query });
   const finalText = await agentLoop(history);
