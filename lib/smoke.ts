@@ -1,8 +1,8 @@
 import { generateText } from "ai";
 import { model, MODEL_ID } from "./model";
 
-// Minimal end-to-end check: one prompt, one reply.
-// Run with: pnpm smoke  (needs .env with a real ANTHROPIC_API_KEY)
+// 最小化的端到端检查：一次提问，一次回复。
+// 运行方式：pnpm smoke（需要 .env 中配置真实的 ANTHROPIC_API_KEY）
 const { text, usage } = await generateText({
   model,
   prompt: "Reply with exactly: ok",
