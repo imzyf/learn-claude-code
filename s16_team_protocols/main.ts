@@ -1,32 +1,32 @@
 /**
- * s16_team_protocols/main.ts - Team Protocols
+ * s16_team_protocols/main.ts - 团队协议
  *
- * Request-response protocol + request_id + dispatch + state machine.
+ * 请求-响应协议 + request_id + 分发 + 状态机。
  *
- * Changes from s15:
- *   + ProtocolState (request_id, type, sender, target, status, payload)
- *   + pendingRequests: tracks in-flight protocol requests
- *   + handleInboxMessage: teammate routes incoming messages by type
- *   + matchResponse: Lead correlates response via request_id (+ type check)
- *   + Teammate idle loop: waits for inbox messages instead of exiting
- *   + consumeLeadInbox: unified protocol routing + injection into history
- *   + 3 new Lead tools: request_shutdown, request_plan, review_plan
- *   + 1 new teammate tool: submit_plan
- *   - s15's cron scheduler and event-queue wake are gone (upstream s16 drops
- *     them; the Lead inbox is consumed at turn boundaries like the Python REPL)
+ * 相比 s15 的变化：
+ *   + ProtocolState（request_id、type、sender、target、status、payload）
+ *   + pendingRequests：跟踪进行中的协议请求
+ *   + handleInboxMessage：队友按类型路由收到的消息
+ *   + matchResponse：Lead 通过 request_id 关联响应（并校验类型）
+ *   + 队友的空闲循环：等待收件箱消息而不是直接退出
+ *   + consumeLeadInbox：统一的协议路由 + 注入历史记录
+ *   + 3 个新的 Lead 工具：request_shutdown、request_plan、review_plan
+ *   + 1 个新的队友工具：submit_plan
+ *   - s15 的 cron 调度器和事件队列唤醒机制被移除（上游 s16 也去掉了它们；
+ *     Lead 的收件箱改在每轮边界消费，类似 Python 版的 REPL）
  *
- * ASCII flow:
+ * ASCII 流程：
  *   Lead: BUS.send("shutdown_request", {request_id}) ──────→ teammate inbox
  *   Teammate: dispatch → handler → BUS.send("shutdown_response", {request_id}) ─→ Lead inbox
  *   Lead: consumeLeadInbox → matchResponse(request_id) → pendingRequests[reqId].status = approved
  *
- * TS-specific notes:
- *   - Teammates are detached async loops (not daemon threads); the idle wait
- *     is `await sleep(1s)` so the event loop stays free
- *   - Idle resumes on any injected inbox message (Python resumed only on
- *     non-protocol messages, so plan approvals left the teammate idling)
- *   - Background notifications get their own user message; the AI SDK keeps
- *     tool results in role:"tool" messages (see s13 note)
+ * TS 特有说明：
+ *   - 队友是游离的异步循环（不是守护线程）；空闲等待用
+ *     `await sleep(1s)`，保证事件循环不被阻塞
+ *   - 收到任何注入的收件箱消息都会让空闲状态恢复（Python 版只在收到
+ *     非协议消息时恢复，导致计划审批消息会让队友一直空闲下去）
+ *   - 后台通知会单独占一条 user 消息；AI SDK 把工具结果保留在
+ *     role:"tool" 消息里（参见 s13 的说明）
  *
  * Usage:
  *     pnpm dev s16_team_protocols/main.ts

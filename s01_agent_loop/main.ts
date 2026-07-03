@@ -1,7 +1,7 @@
 /**
- * s01_agent_loop/main.ts - The Agent Loop
+ * s01_agent_loop/main.ts - Agent 循环
  *
- * The entire secret of an AI coding agent in one pattern:
+ * AI 编程 agent 的全部秘密就在这一个模式里：
  *
  *     while finishReason == "tool-calls":
  *         result = LLM(messages, tools)
@@ -17,13 +17,13 @@
  *                           +---------------+
  *                           (loop continues)
  *
- * This is the core loop: feed tool results back to the model
- * until the model decides to stop. Production agents layer
- * policy, hooks, and lifecycle controls on top.
+ * 这就是核心循环：把工具执行结果喂回给模型，
+ * 直到模型自己决定停止。生产环境中的 agent 会在此之上
+ * 叠加策略、hooks 和生命周期控制。
  *
- * The bash tool below has no `execute` function on purpose:
- * the AI SDK then returns tool calls instead of running them,
- * so this file owns the loop — that is the lesson of s01.
+ * 下面的 bash 工具故意没有 `execute` 函数：
+ * 这样 AI SDK 就只会返回 tool call 而不会自己执行，
+ * 于是循环的控制权留在这份代码里——这就是 s01 要讲的道理。
  *
  * Usage:
  *     pnpm dev s01_agent_loop/main.ts

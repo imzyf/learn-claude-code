@@ -1,7 +1,7 @@
 /**
  * s04_hooks/main.ts - Hooks
  *
- * Move extension logic out of the loop, onto hooks:
+ * 把扩展逻辑从循环里搬出来，交给 hooks 管理：
  *
  *   User types query
  *        │
@@ -35,18 +35,18 @@
  *                                                  │
  *                                          results ──▶ back to messages
  *
- * Changes from s03:
- *   + HOOKS registry (event -> list of callbacks)
+ * 相比 s03 的变化：
+ *   + HOOKS 注册表（事件 -> 回调列表）
  *   + registerHook() / triggerHooks()
- *   + contextInjectHook (UserPromptSubmit)
- *   + permissionHook, logHook (PreToolUse)
- *   + largeOutputHook (PostToolUse)
- *   + summaryHook (Stop) — may force another round via a user message
- *   - checkPermission() removed from loop body
- *     (logic moved into permissionHook, triggered via PreToolUse)
- *   - the loop's own `> toolName` / output logging removed — logHook owns it
+ *   + contextInjectHook（UserPromptSubmit）
+ *   + permissionHook、logHook（PreToolUse）
+ *   + largeOutputHook（PostToolUse）
+ *   + summaryHook（Stop）—— 可能通过一条用户消息强制再来一轮
+ *   - checkPermission() 从循环体里移除
+ *     （逻辑搬进了 permissionHook，通过 PreToolUse 触发）
+ *   - 循环自身的 `> toolName` / 输出日志被移除——改由 logHook 负责
  *
- * Builds on s03 (permission). Usage:
+ * 基于 s03（权限）构建。Usage:
  *
  *     pnpm dev s04_hooks/main.ts
  */

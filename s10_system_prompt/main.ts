@@ -1,15 +1,15 @@
 /**
  * s10_system_prompt/main.ts - System Prompt
  *
- * Runtime prompt assembly with caching.
+ * 运行时按需组装 prompt，并带缓存。
  *
- * Changes from s09:
- *   + PROMPT_SECTIONS: topic-keyed record of prompt fragments
- *   + assembleSystemPrompt(context): select + join sections by real state
- *   + getSystemPrompt(context): deterministic cache via stable JSON key
- *   + agentLoop uses getSystemPrompt(context) instead of hardcoded SYSTEM
+ * 相比 s09 的变化：
+ *   + PROMPT_SECTIONS：按主题分类的 prompt 片段集合
+ *   + assembleSystemPrompt(context)：根据真实状态挑选并拼接各片段
+ *   + getSystemPrompt(context)：用稳定的 JSON key 做确定性缓存
+ *   + agentLoop 改用 getSystemPrompt(context)，不再用写死的 SYSTEM
  *
- * Memory section loads when .memory/MEMORY.md exists (real state, not keywords).
+ * 记忆片段只在 .memory/MEMORY.md 存在时才加载（依据真实状态，而非关键词）。
  *
  * Usage:
  *     pnpm dev s10_system_prompt/main.ts

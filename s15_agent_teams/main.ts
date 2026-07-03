@@ -1,26 +1,26 @@
 /**
- * s15_agent_teams/main.ts - Agent Teams
+ * s15_agent_teams/main.ts - Agent 团队
  *
- * MessageBus + spawnTeammateThread + inbox injection.
+ * MessageBus + spawnTeammateThread + 收件箱注入。
  *
- * Changes from s14:
- *   + MessageBus class: file-based mailboxes (.mailboxes/*.jsonl)
- *   + spawnTeammateThread: creates teammate as a detached async loop
- *   + Teammate runs own simplified agent loop (bash, read, write, send_message)
- *   + Lead tools: spawn_teammate, send_message, check_inbox (3 new)
- *   + Lead inbox: teammate messages injected into history (not just printed)
- *   + Teaching version: teammates limited to 10 rounds (real CC uses idle loop)
+ * 相比 s14 的变化：
+ *   + MessageBus 类：基于文件的邮箱（.mailboxes/*.jsonl）
+ *   + spawnTeammateThread：把队友创建为一个游离的异步循环
+ *   + 队友运行自己的简化版 agent 循环（bash、read、write、send_message）
+ *   + Lead 的工具：spawn_teammate、send_message、check_inbox（3 个新增）
+ *   + Lead 的收件箱：队友的消息被注入历史记录（不只是打印出来）
+ *   + 教学版本：队友最多运行 10 轮（真实 CC 用的是空闲循环）
  *
- * ASCII flow:
+ * ASCII 流程：
  *   Lead: cronQueue → messages → prompt → LLM → TOOLS ────→ loop
  *                 ↑                     ↓                        |
  *                 └── inbox ← MessageBus ← teammate.send_message ←┘
- *   Teammate: inbox → LLM → bash/read/write/send → loop (max 10 turns)
+ *   Teammate: inbox → LLM → bash/read/write/send → loop（最多 10 轮）
  *
- * TS-specific notes:
- *   - Python's input() thread + inbox poller thread feed one event queue;
- *     here an async readline loop + a 1s interval push into the same queue
- *   - Detached promises replace daemon threads (single-threaded event loop)
+ * TS 特有说明：
+ *   - Python 用 input() 线程 + 收件箱轮询线程共同喂给一个事件队列；
+ *     这里用一个异步 readline 循环 + 1 秒间隔的推送共用同一个队列
+ *   - 游离的 Promise 代替守护线程（单线程事件循环）
  *
  * Usage:
  *     pnpm dev s15_agent_teams/main.ts

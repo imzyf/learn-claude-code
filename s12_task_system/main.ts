@@ -1,21 +1,20 @@
 /**
- * s12_task_system/main.ts - Task System
+ * s12_task_system/main.ts - 任务系统
  *
- * File-persisted task graph with blockedBy dependencies.
+ * 带 blockedBy 依赖关系、持久化到文件的任务图。
  *
- * Changes from s11:
- *   + Task type (id, subject, description, status, owner, blockedBy)
- *   + TASKS_DIR = .tasks/ for persistent JSON storage
+ * 相比 s11 的变化：
+ *   + Task 类型（id、subject、description、status、owner、blockedBy）
+ *   + TASKS_DIR = .tasks/，用于持久化 JSON 存储
  *   + createTask / saveTask / loadTask / listTasks / getTask
- *   + canStart: checks blockedBy all completed (missing deps = blocked)
- *   + claimTask: set owner + pending -> in_progress
- *   + completeTask: set completed + report unblocked downstream
- *   + 5 new tools: create_task, list_tasks, get_task, claim_task, complete_task
+ *   + canStart：检查 blockedBy 是否全部完成（依赖缺失即视为被阻塞）
+ *   + claimTask：设置 owner，pending -> in_progress
+ *   + completeTask：设置 completed，并汇报下游被解除阻塞的任务
+ *   + 5 个新工具：create_task、list_tasks、get_task、claim_task、complete_task
  *
- * Note: Teaching code keeps a basic agent loop to stay focused on the task
- * system. S11's full error recovery (RecoveryState, backoff, escalation,
- * reactive compact, fallback model) is omitted — in real CC, tasks.ts and
- * withRetry are independent layers that compose naturally.
+ * 说明：为了聚焦任务系统本身，教学代码保留了一个基础版 agent 循环。
+ * S11 完整的错误恢复机制（RecoveryState、退避、升级、应急压缩、备用模型）
+ * 在此省略——在真实的 CC 中，tasks.ts 和 withRetry 是两个可以自然组合的独立层。
  *
  * Usage:
  *     pnpm dev s12_task_system/main.ts

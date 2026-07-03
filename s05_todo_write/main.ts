@@ -1,7 +1,7 @@
 /**
  * s05_todo_write/main.ts - TodoWrite
  *
- * Add a planning tool on top of s04 hooks:
+ * 在 s04 hooks 基础上加一个规划工具：
  *
  *   +---------+      +-------+      +------------------+
  *   |  User   | ---> |  LLM  | ---> | TOOL_HANDLERS    |
@@ -18,19 +18,19 @@
  *                         if roundsSinceTodo >= 3:
  *                           inject <reminder>
  *
- * Changes from s04:
- *   + todo_write tool + runTodoWrite() implementation
- *   + Nag reminder (inject reminder after 3 rounds without todo update)
- *   + SYSTEM prompt includes "plan before execute" guidance
- *   + roundsSinceTodo counter in agentLoop
- *   - permissionHook slims down to the deny list (no more Allow? prompts)
- *   Loop unchanged: new tool auto-dispatches via TOOL_HANDLERS.
+ * 相比 s04 的变化：
+ *   + todo_write 工具 + runTodoWrite() 实现
+ *   + 唠叨提醒（连续 3 轮没更新 todo 就注入提醒）
+ *   + SYSTEM prompt 加入“先计划再执行”的指引
+ *   + agentLoop 中的 roundsSinceTodo 计数器
+ *   - permissionHook 精简为只剩拒绝名单（不再有 Allow? 提示）
+ *   循环本身没变：新工具通过 TOOL_HANDLERS 自动分发。
  *
- * One TS-specific diff: Python validates todos by hand in _normalize_todos;
- * here zod's safeParse does the item validation, normalizeTodos only unwraps
- * the occasional JSON-string form.
+ * 一处 TS 特有的差异：Python 版本在 _normalize_todos 里手动校验 todos；
+ * 这里改用 zod 的 safeParse 做条目校验，normalizeTodos 只负责
+ * 解开偶尔出现的 JSON 字符串形式。
  *
- * Builds on s04 (hooks). Usage:
+ * 基于 s04（hooks）构建。Usage:
  *
  *     pnpm dev s05_todo_write/main.ts
  */

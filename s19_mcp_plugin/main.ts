@@ -1,29 +1,29 @@
 /**
- * s19_mcp_plugin/main.ts - MCP Tools
+ * s19_mcp_plugin/main.ts - MCP 工具
  *
- * MCPClient + tool discovery + assembleToolPool.
+ * MCPClient + 工具发现 + assembleToolPool。
  *
- * Changes from s18:
- *   + MCPClient class: discovers tools, calls tools via mock handler
- *   + normalizeMcpName: normalize tool/server names
- *   + assembleToolPool: assembles builtin + MCP tools into one pool
- *   + connectMcp: connect to an MCP server, discover tools
- *   + Tool naming: mcp__{server}__{tool} with normalization
- *   + agentLoop uses a dynamic tool pool (builtin + MCP), no prompt cache
+ * 相比 s18 的变化：
+ *   + MCPClient 类：发现工具，通过 mock handler 调用工具
+ *   + normalizeMcpName：规范化工具/服务器名称
+ *   + assembleToolPool：把内置工具和 MCP 工具组装成一个工具池
+ *   + connectMcp：连接到一个 MCP 服务器，发现其工具
+ *   + 工具命名：mcp__{server}__{tool}，并做规范化处理
+ *   + agentLoop 使用动态工具池（内置 + MCP），不再使用 prompt 缓存
  *
- * ASCII flow:
- *   connect_mcp("docs") → MCPClient discovers tools →
+ * ASCII 流程：
+ *   connect_mcp("docs") → MCPClient 发现工具 →
  *   assembleToolPool → [builtin... , mcp__docs__search, mcp__docs__get_version]
- *   agentLoop uses the assembled pool
+ *   agentLoop 使用组装好的工具池
  *
- * TS-specific notes:
- *   - The AI SDK's `tool()` schema requires a Zod inputSchema; MCP tool defs
- *     arrive as raw JSON Schema, so mcpJsonSchemaToZod does a best-effort
- *     conversion (object/string/number/boolean/array of these — enough for
- *     the mock servers below)
- *   - assembleToolPool returns { tools, handlers } — the AI SDK tools map
- *     for generateText plus a plain handler lookup, mirroring Python's
- *     (list[dict], dict) tuple
+ * TS 特有说明：
+ *   - AI SDK 的 `tool()` schema 要求 Zod 格式的 inputSchema；MCP 的工具定义
+ *     是原始 JSON Schema，所以 mcpJsonSchemaToZod 做了一个尽力而为的
+ *     转换（object/string/number/boolean 及它们的数组——足以覆盖下面的
+ *     mock 服务器）
+ *   - assembleToolPool 返回 { tools, handlers }——一个给 generateText 用的
+ *     AI SDK tools map，加上一个普通的 handler 查找表，对应 Python 版的
+ *     (list[dict], dict) 元组
  *
  * Usage:
  *     pnpm dev s19_mcp_plugin/main.ts

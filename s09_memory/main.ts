@@ -1,29 +1,29 @@
 /**
- * s09_memory/main.ts - Memory System
+ * s09_memory/main.ts - 记忆系统
  *
- * Persistent, cross-session knowledge for the coding agent.
+ * 为编程 agent 提供持久化、跨会话的知识。
  *
- * Storage:
+ * 存储结构：
  *     .memory/
- *       MEMORY.md          ← index (one line per memory, ≤200 lines)
- *       feedback-tabs.md   ← individual memory files (Markdown + YAML frontmatter)
+ *       MEMORY.md          ← 索引（每条记忆一行，不超过 200 行）
+ *       feedback-tabs.md   ← 各个记忆文件（Markdown + YAML frontmatter）
  *       user-profile.md
  *       project-facts.md
  *
- * Flow in agentLoop:
- *     1. Load MEMORY.md index into SYSTEM prompt (cheap, always present)
- *     2. Select relevant memories by filename/description → inject content
- *     3. Run compaction pipeline from s08
- *     4. After each turn ends → extract new memories from original messages
- *     5. Periodically consolidate (Dream)
+ * agentLoop 中的流程：
+ *     1. 把 MEMORY.md 索引加载进 SYSTEM prompt（便宜，始终存在）
+ *     2. 按文件名/描述筛选出相关记忆 → 注入具体内容
+ *     3. 运行 s08 的压缩流水线
+ *     4. 每轮结束后 → 从原始消息中提取新记忆
+ *     5. 定期整合（Dream）
  *
- * Changes from s08 (skeleton — fewer tools to focus on memory):
- *   + memory files + MEMORY.md index, injected into SYSTEM every turn
- *   + selectRelevantMemories/loadMemories — LLM picks, keyword fallback
- *   + extractMemories after each turn, consolidateMemories at ≥10 files
- *   - skills, todo_write, and hooks dropped
+ * 相比 s08 的变化（精简版——减少工具数量，聚焦记忆本身）：
+ *   + 记忆文件 + MEMORY.md 索引，每轮都注入 SYSTEM
+ *   + selectRelevantMemories/loadMemories —— 由 LLM 挑选，关键词兜底
+ *   + 每轮后 extractMemories，文件数 ≥10 时 consolidateMemories
+ *   - 去掉了 skills、todo_write 和 hooks
  *
- * Builds on s08 (context compact). Usage:
+ * 基于 s08（context compact）构建。Usage:
  *
  *     pnpm dev s09_memory/main.ts
  */

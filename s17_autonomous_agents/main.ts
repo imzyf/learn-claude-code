@@ -1,24 +1,24 @@
 /**
- * s17_autonomous_agents/main.ts - Autonomous Agents
+ * s17_autonomous_agents/main.ts - 自治 Agent
  *
- * Idle poll + auto-claim + WORK/IDLE lifecycle.
+ * 空闲轮询 + 自动认领 + WORK/IDLE 生命周期。
  *
- * Changes from s16:
- *   + scanUnclaimedTasks: find pending, unowned tasks with deps completed
- *   + idlePoll: 60s polling loop (inbox + task board), dispatches shutdown in IDLE
- *   + claimTask: owner check + missing-deps message
- *   + Teammate lifecycle: WORK → IDLE → SHUTDOWN
- *   + Teammate tools: + list_tasks, claim_task, complete_task (5→8)
- *   + Identity re-injection when the teammate history is still short
- *   - Background tasks dropped (upstream s17 simplifies the agent loop)
+ * 相比 s16 的变化：
+ *   + scanUnclaimedTasks：查找依赖已完成、待处理且无人认领的任务
+ *   + idlePoll：60 秒轮询循环（收件箱 + 任务看板），IDLE 状态下分发关机
+ *   + claimTask：owner 校验 + 依赖缺失提示
+ *   + 队友生命周期：WORK → IDLE → SHUTDOWN
+ *   + 队友工具：新增 list_tasks、claim_task、complete_task（5→8 个）
+ *   + 队友历史记录仍然很短时重新注入身份信息
+ *   - 后台任务被移除（上游 s17 简化了 agent 循环）
  *
- * ASCII lifecycle:
+ * ASCII 生命周期：
  *   WORK: inbox → LLM → tools → (tool-calls? loop) → (done? → IDLE)
  *   IDLE: 5s poll → inbox? → WORK / unclaimed? → claim → WORK / 60s? → SHUTDOWN
  *
- * TS-specific notes:
- *   - Teammates are detached async loops; idlePoll uses `await sleep(5s)`
- *   - WORK phase caps at 10 LLM rounds per cycle like the Python version
+ * TS 特有说明：
+ *   - 队友是游离的异步循环；idlePoll 使用 `await sleep(5s)`
+ *   - WORK 阶段每个周期最多 10 轮 LLM 调用，和 Python 版本一致
  *
  * Usage:
  *     pnpm dev s17_autonomous_agents/main.ts

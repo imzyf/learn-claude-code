@@ -1,19 +1,19 @@
 /**
- * s11_error_recovery/main.ts - Error Recovery
+ * s11_error_recovery/main.ts - 错误恢复
  *
- * Three recovery paths + exponential backoff.
+ * 三条恢复路径 + 指数退避。
  *
- * Changes from s10:
- *   + LLM call wrapped in try/catch with three recovery paths
- *   + Path 1: max_tokens -> escalate 8K->64K (no append on first escalation),
- *             then continuation prompt (max 3)
- *   + Path 2: prompt_too_long -> reactive compact -> retry (once)
- *   + Path 3: 429/529 -> exponential backoff with jitter (max 10),
- *             fallback model on consecutive 529
- *   + withRetry wrapper for transient errors
- *   + RecoveryState tracks escalation / compact / 529 / model
+ * 相比 s10 的变化：
+ *   + LLM 调用被 try/catch 包裹，带三条恢复路径
+ *   + 路径 1：max_tokens -> 升级 8K->64K（第一次升级不追加内容），
+ *             再不行就用续写 prompt（最多 3 次）
+ *   + 路径 2：prompt_too_long -> 应急压缩 -> 重试（一次）
+ *   + 路径 3：429/529 -> 带抖动的指数退避（最多 10 次），
+ *             连续 529 时切换到备用模型
+ *   + withRetry 包装器处理瞬时错误
+ *   + RecoveryState 跟踪升级 / 压缩 / 529 / 模型状态
  *
- * ASCII flow:
+ * ASCII 流程：
  *   messages -> prompt assembly -> [try] LLM [catch] -> tools -> loop
  *                                    |          |
  *                              finishReason   error type
@@ -21,11 +21,11 @@
  *                              escalate /     429/529? -> backoff
  *                              continue       other? -> log + exit
  *
- * TS-specific notes:
- *   - Anthropic's stop_reason "max_tokens" surfaces as finishReason "length"
- *   - generateText retries 429/529 itself by default; maxRetries: 0 keeps
- *     this teaching retry layer the only one
- *   - FALLBACK_MODEL_ID env selects the 529 fallback model
+ * TS 特有说明：
+ *   - Anthropic 的 stop_reason "max_tokens" 在这里表现为 finishReason "length"
+ *   - generateText 默认会自己重试 429/529；设置 maxRetries: 0 是为了让
+ *     本文件教学用的重试层成为唯一一层
+ *   - FALLBACK_MODEL_ID 环境变量用来选择 529 时的备用模型
  *
  * Usage:
  *     pnpm dev s11_error_recovery/main.ts

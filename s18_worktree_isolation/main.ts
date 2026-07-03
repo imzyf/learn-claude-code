@@ -1,29 +1,29 @@
 /**
- * s18_worktree_isolation/main.ts - Worktree Isolation
+ * s18_worktree_isolation/main.ts - Worktree 隔离
  *
- * git worktree + task-directory binding + event log.
+ * git worktree + 任务-目录绑定 + 事件日志。
  *
- * Changes from s17:
- *   + Task type gains worktree field (string | null)
- *   + validateWorktreeName: reject path traversal and illegal chars
- *   + createWorktree: validate name, git worktree add, optional task binding
- *   + bindTaskToWorktree: write worktree field only, keep task pending
- *   + removeWorktree: safety check before force, no auto-complete
- *   + runGit returns [ok, output], events only on success
- *   + Teammate tools run in worktree cwd when a bound task is claimed
- *   + 3 new Lead tools: create_worktree, remove_worktree, keep_worktree
+ * 相比 s17 的变化：
+ *   + Task 类型新增 worktree 字段（string | null）
+ *   + validateWorktreeName：拒绝路径穿越和非法字符
+ *   + createWorktree：校验名称、执行 git worktree add、可选绑定任务
+ *   + bindTaskToWorktree：只写 worktree 字段，任务状态仍保持 pending
+ *   + removeWorktree：强制删除前先做安全检查，不自动完成任务
+ *   + runGit 返回 [ok, output]，只有成功时才记录事件
+ *   + 当已绑定任务被认领时，队友工具会在 worktree 的 cwd 下运行
+ *   + 3 个新的 Lead 工具：create_worktree、remove_worktree、keep_worktree
  *
- * ASCII topology:
+ * ASCII 拓扑：
  *   Main repo (/)
  *     ├── .worktrees/auth/  (branch: wt/auth)  ← Task #1
  *     ├── .worktrees/ui/    (branch: wt/ui)    ← Task #2
  *     ├── .tasks/task_xxx.json (worktree: "auth")
  *     └── .worktrees/events.jsonl
  *
- * TS-specific notes:
- *   - runGit uses spawnSync("git", args) — argument array, no shell
- *   - The teammate's worktree cwd lives in a closure object (wtCtx), the
- *     same trick as Python's dict-in-closure
+ * TS 特有说明：
+ *   - runGit 使用 spawnSync("git", args) —— 参数数组形式，不经过 shell
+ *   - 队友的 worktree cwd 保存在一个闭包对象里（wtCtx），
+ *     和 Python 版 dict-in-closure 的技巧一样
  *
  * Usage:
  *     pnpm dev s18_worktree_isolation/main.ts

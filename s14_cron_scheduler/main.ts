@@ -1,29 +1,29 @@
 /**
- * s14_cron_scheduler/main.ts - Cron Scheduler
+ * s14_cron_scheduler/main.ts - Cron 调度器
  *
- * Independent interval timer + queue processor.
+ * 独立的定时器 + 队列处理器。
  *
- * Changes from s13:
- *   + CronJob type (id, cron, prompt, recurring, durable)
- *   + cronMatches: 5-field cron expression matching with DOM/DOW OR semantics
- *   + scheduleJob / cancelJob: register/remove cron jobs (with validation)
- *   + cron scheduler: 1s interval timer, fires matching jobs into cronQueue
- *   + queue processor: 200ms interval, delivers queued work when agent idle
- *   + Durable storage: .scheduled_tasks.json (survives restart)
- *   + 3 new tools: schedule_cron, list_crons, cancel_cron
+ * 相比 s13 的变化：
+ *   + CronJob 类型（id、cron、prompt、recurring、durable）
+ *   + cronMatches：五段式 cron 表达式匹配，DOM/DOW 采用 OR 语义
+ *   + scheduleJob / cancelJob：注册/移除 cron 任务（带校验）
+ *   + cron 调度器：1 秒间隔的定时器，把匹配的任务触发进 cronQueue
+ *   + 队列处理器：200 毫秒间隔，在 agent 空闲时投递排队中的任务
+ *   + 持久化存储：.scheduled_tasks.json（重启后仍保留）
+ *   + 3 个新工具：schedule_cron、list_crons、cancel_cron
  *
- * Four layers:
- *   1. Scheduler: interval timer checks time -> fires matching jobs
- *   2. Queue: cronQueue decouples scheduler from agent loop
- *   3. Queue processor: wakes the agent when queued work exists and it is idle
- *   4. Consumer: agentLoop consumes queued jobs and injects them into messages
+ * 四个层次：
+ *   1. 调度器：定时器检查时间 -> 触发匹配的任务
+ *   2. 队列：cronQueue 把调度器和 agent 循环解耦
+ *   3. 队列处理器：当有排队任务且 agent 空闲时唤醒 agent
+ *   4. 消费者：agentLoop 消费排队任务，把它们注入 messages
  *
- * TS-specific notes:
- *   - Python daemon threads -> setInterval(...).unref() timers
- *   - Python's agent_lock -> agentBusy boolean (single-threaded event loop):
- *     user input waits for it, the queue processor skips when it is held
- *     (the analog of acquire(blocking=False))
- *   - JS Date.getDay() already uses cron's Sunday=0 (Python needed conversion)
+ * TS 特有说明：
+ *   - Python 的守护线程 -> setInterval(...).unref() 定时器
+ *   - Python 的 agent_lock -> agentBusy 布尔值（单线程事件循环）：
+ *     用户输入要等它释放，队列处理器在它被占用时会跳过
+ *     （相当于 acquire(blocking=False) 的效果）
+ *   - JS 的 Date.getDay() 本身就用 cron 的 Sunday=0 约定（Python 那边需要转换）
  *
  * Usage:
  *     pnpm dev s14_cron_scheduler/main.ts

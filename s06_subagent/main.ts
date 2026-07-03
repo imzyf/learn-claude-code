@@ -1,7 +1,7 @@
 /**
  * s06_subagent/main.ts - Subagent
  *
- * Spawn sub-agents with a fresh messages[] for context isolation:
+ * 用全新的 messages[] 派生子 agent，实现上下文隔离：
  *
  *   Parent Agent                           Subagent
  *   +------------------+                  +------------------+
@@ -16,19 +16,19 @@
  *         |      intermediate results DISCARDED  |
  *         +--------------------------------------+
  *
- *   Subagent tools: bash, read, write, edit, glob (NO task — no recursion)
+ *   子 agent 的工具：bash、read、write、edit、glob（没有 task——不能递归）
  *
- * Changes from s05:
- *   + task tool + spawnSubagent() with fresh messages[]
- *   + Safety limit: max 30 turns per subagent
- *   Subagent cannot spawn sub-subagents (no task tool in subTools).
- *   Main loop nearly unchanged: task auto-dispatches via TOOL_HANDLERS —
- *   only diff is `await handler(...)`, because spawnSubagent is async.
+ * 相比 s05 的变化：
+ *   + task 工具 + 带全新 messages[] 的 spawnSubagent()
+ *   + 安全限制：每个子 agent 最多 30 轮
+ *   子 agent 不能再派生子子 agent（subTools 里没有 task 工具）。
+ *   主循环几乎没变：task 通过 TOOL_HANDLERS 自动分发——
+ *   唯一区别是 `await handler(...)`，因为 spawnSubagent 是异步的。
  *
- * One TS-specific diff: Python's extract_text() walks content blocks; the
- * AI SDK exposes result.text directly, so a lastText variable replaces it.
+ * 一处 TS 特有的差异：Python 的 extract_text() 要遍历 content blocks；
+ * AI SDK 直接暴露 result.text，所以这里用一个 lastText 变量代替。
  *
- * Builds on s05 (todo_write). Usage:
+ * 基于 s05（todo_write）构建。Usage:
  *
  *     pnpm dev s06_subagent/main.ts
  */

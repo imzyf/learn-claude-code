@@ -1,14 +1,14 @@
 /**
- * s08_context_compact/main.ts - Context Compact
+ * s08_context_compact/main.ts - 上下文压缩
  *
- * Four-layer compaction pipeline inserted before LLM calls:
+ * 在调用 LLM 之前插入四层压缩流水线：
  *
- *     L1: snipCompact       — trim middle messages when count > 50
- *     L2: microCompact      — replace old tool results with placeholders
- *     L3: toolResultBudget  — persist large results to disk
- *     L4: compactHistory    — LLM full summary (1 API call)
+ *     L1: snipCompact       —— 消息数 > 50 时裁剪中间部分
+ *     L2: microCompact      —— 用占位符替换较早的工具结果
+ *     L3: toolResultBudget  —— 把大结果持久化到磁盘
+ *     L4: compactHistory    —— LLM 完整摘要（1 次 API 调用）
  *
- *     Emergency: reactiveCompact — when API still returns prompt_too_long
+ *     应急：reactiveCompact —— API 仍返回 prompt_too_long 时触发
  *
  *     ┌─────────────────────────────────────────────────────────────┐
  *     │  messages[]                                                 │
@@ -22,22 +22,22 @@
  *     │                                      └─ Yes → reactive      │
  *     └─────────────────────────────────────────────────────────────┘
  *
- * Core principle: cheap first, expensive last.
- * Execution order matches CC source: budget → snip → micro → auto.
+ * 核心原则：先做便宜的，最后才做昂贵的。
+ * 执行顺序与 CC 源码一致：budget → snip → micro → auto。
  *
- * Changes from s07:
- *   + compaction pipeline (snip/micro/budget/auto + reactive)
- *   + compact tool — the model can ask for a summary itself
- *   - nag reminder and UserPromptSubmit/Stop hooks dropped (focus on compaction)
+ * 相比 s07 的变化：
+ *   + 压缩流水线（snip/micro/budget/auto + reactive）
+ *   + compact 工具——模型可以自己请求生成摘要
+ *   - 去掉了唠叨提醒和 UserPromptSubmit/Stop hooks（专注于压缩本身）
  *
- * TS-specific diffs:
- *   - Python detects tool results as user messages with tool_result blocks;
- *     the AI SDK gives them their own `role: "tool"` messages instead.
- *   - Python appends a tool_result AFTER replacing history with the compact
- *     summary — against the real API that orphan tool_result is rejected, so
- *     here the summary alone continues the loop.
+ * TS 特有的差异：
+ *   - Python 把工具结果识别为带 tool_result blocks 的 user 消息；
+ *     AI SDK 则给它们单独的 `role: "tool"` 消息。
+ *   - Python 版本是在用压缩摘要替换历史记录之后再追加一个 tool_result——
+ *     但真实 API 会拒绝这种孤立的 tool_result，所以这里只用摘要本身
+ *     继续推进循环。
  *
- * Builds on s07 (skill loading). Usage:
+ * 基于 s07（skill loading）构建。Usage:
  *
  *     pnpm dev s08_context_compact/main.ts
  */

@@ -1,38 +1,37 @@
 /**
- * s20_comprehensive/main.ts - Comprehensive Agent
+ * s20_comprehensive/main.ts - 综合版 Agent
  *
- * All teaching components in one loop.
+ * 把所有教学组件汇聚到同一个循环里。
  *
- * This final chapter intentionally puts the earlier teaching mechanisms back
- * together: dispatch, permission, hooks, todo, subagent, skills, compaction,
- * memory, prompt assembly, error recovery, task graph, background tasks, cron,
- * teams, protocols, autonomous agents, worktrees, and MCP.
+ * 这最后一章有意把此前讲过的所有教学机制重新组合到一起：分发、权限、
+ * hooks、todo、subagent、skills、压缩、记忆、prompt 组装、错误恢复、
+ * 任务图、后台任务、cron、团队、协议、自治 agent、worktree 和 MCP。
  *
- * ASCII flow:
+ * ASCII 流程：
  *   user / cron / background / inbox
  *        ↓
- *   prepareContext (budget → snip → micro → auto compact)
+ *   prepareContext（budget → snip → micro → auto compact）
  *        ↓
- *   assembleSystemPrompt (identity + tools + skills + memory + MCP)
+ *   assembleSystemPrompt（身份 + 工具 + skills + 记忆 + MCP）
  *        ↓
- *   callLLM (withRetry: 429/529 backoff, fallback model)
- *        ↓                    ↘ length → escalate / continuation
- *   hooks (PreToolUse) → dispatch (foreground | background | compact)
+ *   callLLM（withRetry：429/529 退避、备用模型）
+ *        ↓                    ↘ length → 升级 / 续写
+ *   hooks（PreToolUse）→ dispatch（前台 | 后台 | 压缩）
  *        ↓
- *   tool results + task_notifications → loop
+ *   工具结果 + task_notifications → 循环
  *
- * TS-specific notes:
- *   - Frontmatter uses the minimal `key: value` line parser from s07 instead
- *     of PyYAML
- *   - Python daemon threads → setInterval(...).unref() timers; agent_lock →
- *     agentBusy boolean (single-threaded event loop, see s14)
- *   - Tool results are `role: "tool"` messages in the AI SDK, so completed
- *     background notifications go into a separate user message instead of
- *     being merged into the tool_result content (see s13/s14)
- *   - Python ignores tool_use blocks after submit_plan and lets the missing
- *     tool_result slide; the AI SDK validates pairing, so skipped calls get a
- *     "[Ignored: waiting for plan approval]" placeholder result
- *   - terminal_print's readline.get_line_buffer() → rl.line redraw
+ * TS 特有说明：
+ *   - Frontmatter 沿用 s07 里那个极简的 `key: value` 逐行解析器，
+ *     而不是 PyYAML
+ *   - Python 守护线程 → setInterval(...).unref() 定时器；agent_lock →
+ *     agentBusy 布尔值（单线程事件循环，参见 s14）
+ *   - 在 AI SDK 里工具结果是 `role: "tool"` 消息，所以已完成的后台通知
+ *     会单独放进一条 user 消息，而不是合并进 tool_result 内容里
+ *     （参见 s13/s14）
+ *   - Python 版本会忽略 submit_plan 之后的 tool_use blocks，容许缺失的
+ *     tool_result；AI SDK 会校验配对关系，所以被跳过的调用会得到一个
+ *     "[Ignored: waiting for plan approval]" 占位结果
+ *   - terminal_print 的 readline.get_line_buffer() → rl.line 重绘
  *
  * Usage:
  *     pnpm dev s20_comprehensive/main.ts

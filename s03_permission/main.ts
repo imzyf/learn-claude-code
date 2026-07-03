@@ -1,11 +1,11 @@
 /**
- * s03_permission/main.ts - Permission System
+ * s03_permission/main.ts - 权限系统
  *
- * Three gates inserted before tool execution:
+ * 在工具执行前插入三道关卡：
  *
- *     Gate 1: Hard deny list (rm -rf /, sudo, ...)
- *     Gate 2: Rule matching (write outside workspace? destructive cmd?)
- *     Gate 3: User approval (pause and wait for confirmation)
+ *     关卡 1：硬性拒绝名单（rm -rf /、sudo 等）
+ *     关卡 2：规则匹配（是否写到工作区外？是否是破坏性命令？）
+ *     关卡 3：用户批准（暂停并等待确认）
  *
  *     +-------+    +--------+    +--------+    +--------+    +------+
  *     | Tool  | -> | Gate 1 | -> | Gate 2 | -> | Gate 3 | -> | Exec |
@@ -15,15 +15,15 @@
  *          v            v             v             v
  *       (normal)     (blocked)    (ask user)   (user says no?)
  *
- * Only one line added to the agent loop:
+ * agent 循环里只加了一行：
  *
  *     if (!(await checkPermission(call))) continue;
  *
- * Two other diffs from s02:
- *   - runBash lost its inline dangerous-command check — Gate 1 owns it now
- *   - the readline interface moved up: Gate 3 (askUser) shares it with the REPL
+ * 相比 s02 还有两处改动：
+ *   - runBash 内联的危险命令检查被移除——现在归关卡 1 管
+ *   - readline 接口上移：关卡 3（askUser）和 REPL 共用同一个接口
  *
- * Builds on s02 (multi-tool). Usage:
+ * 基于 s02（多工具）构建。Usage:
  *
  *     pnpm dev s03_permission/main.ts
  */

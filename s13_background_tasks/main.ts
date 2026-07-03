@@ -1,28 +1,28 @@
 /**
- * s13_background_tasks/main.ts - Background Tasks
+ * s13_background_tasks/main.ts - 后台任务
  *
- * Async background execution + notification injection.
+ * 异步后台执行 + 通知注入。
  *
- * Changes from s12:
- *   + backgroundTasks / backgroundResults for lifecycle tracking
- *   + shouldRunBackground: model explicit request via run_in_background param
- *   + isSlowOperation: fallback heuristic when model doesn't specify
- *   + startBackgroundTask: dispatch to a detached async worker, return bg id
- *   + collectBackgroundResults: gather completed, return as notifications
- *   + agentLoop: slow ops -> background + placeholder, inject notifications
- *   + Notifications use <task_notification> format, not reused tool call id
+ * 相比 s12 的变化：
+ *   + backgroundTasks / backgroundResults 用于跟踪生命周期
+ *   + shouldRunBackground：模型通过 run_in_background 参数显式请求
+ *   + isSlowOperation：模型未指定时的兜底启发式判断
+ *   + startBackgroundTask：分发给一个游离的异步 worker，返回后台任务 id
+ *   + collectBackgroundResults：收集已完成的任务，以通知形式返回
+ *   + agentLoop：慢操作 -> 后台执行 + 占位符，再注入通知
+ *   + 通知使用 <task_notification> 格式，不复用原来的 tool call id
  *
- * TS-specific notes:
- *   - Python uses threading.Thread + Lock; Node's event loop is single-threaded,
- *     so a detached promise replaces the daemon thread and no lock is needed
- *   - Background bash uses async exec (separate child process) so the event
- *     loop stays free while the command runs
- *   - Python merges tool_result + text notifications into one user message;
- *     the AI SDK separates roles, so notifications go in a follow-up user message
+ * TS 特有说明：
+ *   - Python 用 threading.Thread + Lock；Node 的事件循环是单线程的，
+ *     所以这里用一个游离的 Promise 代替守护线程，也不需要锁
+ *   - 后台 bash 使用异步 exec（独立子进程），保证命令运行期间事件循环
+ *     不被阻塞
+ *   - Python 把 tool_result 和文本通知合并进同一条 user 消息；
+ *     AI SDK 会区分角色，所以通知会放进单独的一条后续 user 消息里
  *
- * Note: Teaching code keeps a basic agent loop to stay focused on background
- * tasks. S11's full error recovery (RecoveryState, backoff, escalation,
- * reactive compact, fallback model) is omitted.
+ * 说明：为了聚焦后台任务本身，教学代码保留了一个基础版 agent 循环。
+ * S11 完整的错误恢复机制（RecoveryState、退避、升级、应急压缩、备用模型）
+ * 在此省略。
  *
  * Usage:
  *     pnpm dev s13_background_tasks/main.ts

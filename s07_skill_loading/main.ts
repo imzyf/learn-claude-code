@@ -1,15 +1,15 @@
 /**
- * s07_skill_loading/main.ts - Skill Loading
+ * s07_skill_loading/main.ts - Skill 加载
  *
- * Two-level on-demand knowledge injection:
+ * 两级按需知识注入：
  *
- *   Layer 1 (cheap, always present):
- *     SYSTEM prompt includes skill names + one-line descriptions (~100 tokens/skill)
+ *   第一层（便宜，始终存在）：
+ *     SYSTEM prompt 里包含 skill 名称 + 一行描述（约 100 tokens/skill）
  *     "Skills available: agent-builder, code-review, mcp-builder, pdf"
  *
- *   Layer 2 (expensive, on demand):
- *     Agent calls load_skill("code-review") → full SKILL.md content
- *     injected via tool_result (~2000 tokens/skill)
+ *   第二层（昂贵，按需）：
+ *     Agent 调用 load_skill("code-review") → 完整 SKILL.md 内容
+ *     通过 tool_result 注入（约 2000 tokens/skill）
  *
  *   skills/
  *     agent-builder/SKILL.md
@@ -17,16 +17,16 @@
  *     mcp-builder/SKILL.md
  *     pdf/SKILL.md
  *
- * Changes from s06:
- *   + buildSystem() — scan skills/ dir at startup, inject catalog into SYSTEM
- *   + loadSkill(name) — return full SKILL.md content via tool_result
- *   + SKILLS_DIR config
- *   Loop unchanged: load_skill auto-dispatches via TOOL_HANDLERS.
+ * 相比 s06 的变化：
+ *   + buildSystem() —— 启动时扫描 skills/ 目录，把清单注入 SYSTEM
+ *   + loadSkill(name) —— 通过 tool_result 返回完整 SKILL.md 内容
+ *   + SKILLS_DIR 配置
+ *   循环没变：load_skill 通过 TOOL_HANDLERS 自动分发。
  *
- * One TS-specific diff: Python parses frontmatter with PyYAML; here a minimal
- * `key: value` line parser avoids the dependency (s08's Python does the same).
+ * 一处 TS 特有的差异：Python 用 PyYAML 解析 frontmatter；这里用一个
+ * 简单的 `key: value` 逐行解析器来避免这个依赖（s08 的 Python 版本也是这样做的）。
  *
- * Builds on s06 (subagent). Usage:
+ * 基于 s06（subagent）构建。Usage:
  *
  *     pnpm dev s07_skill_loading/main.ts
  */

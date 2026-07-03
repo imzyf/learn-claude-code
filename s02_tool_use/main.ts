@@ -1,18 +1,17 @@
 /**
- * s02_tool_use/main.ts - Tool Use
+ * s02_tool_use/main.ts - 工具使用
  *
- * s01's loop, plus:
- *   + runRead / runWrite / runEdit / runGlob — four new tool implementations
- *   + TOOL_HANDLERS dispatch map (replaces s01's hardcoded runBash call)
- *   + safePath workspace-escape check
+ * 在 s01 的循环基础上新增：
+ *   + runRead / runWrite / runEdit / runGlob —— 四个新的工具实现
+ *   + TOOL_HANDLERS 分发表（取代 s01 里写死的 runBash 调用）
+ *   + safePath 工作区越界检查
  *
- * The loop itself (agentLoop) is identical to s01. The only line that
- * changed inside it:
+ * 循环本身（agentLoop）和 s01 完全一样，内部唯一改变的一行是：
  *   s01: output = runBash(call.input.command)
  *   s02: output = TOOL_HANDLERS[call.toolName](call.input)
  *
- * Tools still have no `execute` function: the AI SDK hands the calls
- * back to us, so this file owns the loop.
+ * 工具依然没有 `execute` 函数：AI SDK 只会把 tool call 交还给我们，
+ * 所以循环的控制权还在这份代码里。
  *
  * Usage:
  *     pnpm dev s02_tool_use/main.ts
