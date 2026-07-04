@@ -11,7 +11,7 @@
  *   └────────┬─────────┘
  *            ▼
  *   ┌────────────┐     ┌──────────────────────────────┐
- *   │  messages  │────▶│ LLM (finishReason=tool-calls?)│
+ *   │  messages  │────▶│ LLM (stop_reason=tool_use?)   │
  *   └────────────┘     │   No ──▶ Stop hooks ──▶ exit  │
  *                      │   Yes ──▶ tool call ────────┐ │
  *                      └─────────────────────────────┘ │
@@ -55,10 +55,10 @@ import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as readline from "node:readline/promises";
-import { generateText, tool } from "ai";
-import type { ModelMessage, ToolResultPart } from "ai";
+import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
-import { model } from "../lib/model";
+import { client, MODEL_ID } from "../lib/model";
+import { zodTool, textOf } from "../lib/tools";
 
 const WORKDIR = process.cwd();
 const SYSTEM = `You are a coding agent at ${WORKDIR}. Use tools to solve tasks. Act, don't explain.`;
@@ -146,32 +146,31 @@ function runGlob(pattern: string): string {
 //  FROM s02-s03 (unchanged): Tool Definitions & Dispatch
 // ═══════════════════════════════════════════════════════════
 
-const tools = {
-  bash: tool({
-    description: "Run a shell command.",
-    inputSchema: z.object({ command: z.string() }),
-  }),
-  read_file: tool({
-    description: "Read file contents.",
-    inputSchema: z.object({ path: z.string(), limit: z.number().int().optional() }),
-  }),
-  write_file: tool({
-    description: "Write content to a file.",
-    inputSchema: z.object({ path: z.string(), content: z.string() }),
-  }),
-  edit_file: tool({
-    description: "Replace exact text in a file once.",
-    inputSchema: z.object({ path: z.string(), old_text: z.string(), new_text: z.string() }),
-  }),
-  glob: tool({
-    description: "Find files matching a glob pattern.",
-    inputSchema: z.object({ pattern: z.string() }),
-  }),
+const bashSchema = z.object({ command: z.string() });
+const readSchema = z.object({ path: z.string(), limit: z.number().int().optional() });
+const writeSchema = z.object({ path: z.string(), content: z.string() });
+const editSchema = z.object({ path: z.string(), old_text: z.string(), new_text: z.string() });
+const globSchema = z.object({ pattern: z.string() });
+
+const tools: Anthropic.Tool[] = [
+  zodTool("bash", "Run a shell command.", bashSchema),
+  zodTool("read_file", "Read file contents.", readSchema),
+  zodTool("write_file", "Write content to a file.", writeSchema),
+  zodTool("edit_file", "Replace exact text in a file once.", editSchema),
+  zodTool("glob", "Find files matching a glob pattern.", globSchema),
+];
+
+const TOOL_SCHEMAS: Partial<Record<string, z.ZodObject>> = {
+  bash: bashSchema,
+  read_file: readSchema,
+  write_file: writeSchema,
+  edit_file: editSchema,
+  glob: globSchema,
 };
 
 // `input: any` mirrors Python's `handler(**block.input)` — each handler
-// destructures the shape its inputSchema guarantees.
-const TOOL_HANDLERS: Record<string, (input: any) => string> = {
+// destructures the shape its schema guarantees after `.parse()`.
+const TOOL_HANDLERS: Partial<Record<string, (input: any) => string>> = {
   bash: ({ command }) => runBash(command),
   read_file: ({ path, limit }) => runRead(path, limit),
   write_file: ({ path, content }) => runWrite(path, content),
@@ -207,9 +206,9 @@ async function triggerHooks(event: string, ...args: any[]): Promise<string | nul
   return null;
 }
 
-// The shape PreToolUse/PostToolUse hooks receive — the AI SDK's tool
-// call (Python hooks receive the raw `tool_use` block instead).
-type ToolCallInfo = { toolName: string; input: any };
+// The shape PreToolUse/PostToolUse hooks receive — the raw tool_use block
+// (matches what Python hooks receive too).
+type ToolCallInfo = Anthropic.ToolUseBlock;
 
 // Shared readline: hooks (Allow? prompt) and the REPL both use it.
 const rl = readline.createInterface({
@@ -223,7 +222,7 @@ rl.on("SIGINT", () => {
 
 async function confirmWithUser(call: ToolCallInfo, warning: string): Promise<boolean> {
   console.log(`\n\x1b[33m⚠  ${warning}\x1b[0m`);
-  console.log(`   Tool: ${call.toolName}(${JSON.stringify(call.input)})`);
+  console.log(`   Tool: ${call.name}(${JSON.stringify(call.input)})`);
   let choice: string;
   try {
     choice = (await rl.question("   Allow? [y/N] ")).trim().toLowerCase();
@@ -239,8 +238,9 @@ const DESTRUCTIVE = ["rm ", "> /etc/", "chmod 777"];
 
 // PreToolUse: s03 checkPermission() logic moved here.
 async function permissionHook(call: ToolCallInfo): Promise<string | null> {
-  if (call.toolName === "bash") {
-    const command: string = call.input.command ?? "";
+  const input = call.input as any;
+  if (call.name === "bash") {
+    const command: string = input.command ?? "";
     for (const pattern of DENY_LIST) {
       if (command.includes(pattern)) {
         console.log(`\n\x1b[31m⛔ Blocked: '${pattern}'\x1b[0m`);
@@ -253,8 +253,8 @@ async function permissionHook(call: ToolCallInfo): Promise<string | null> {
       }
     }
   }
-  if (call.toolName === "write_file" || call.toolName === "edit_file") {
-    const resolved = path.resolve(WORKDIR, call.input.path ?? "");
+  if (call.name === "write_file" || call.name === "edit_file") {
+    const resolved = path.resolve(WORKDIR, input.path ?? "");
     if (resolved !== WORKDIR && !resolved.startsWith(WORKDIR + path.sep)) {
       if (!(await confirmWithUser(call, "Writing outside workspace"))) {
         return "Permission denied by user";
@@ -266,15 +266,15 @@ async function permissionHook(call: ToolCallInfo): Promise<string | null> {
 
 // PreToolUse: log every tool call.
 function logHook(call: ToolCallInfo): null {
-  const argsPreview = JSON.stringify(Object.values(call.input ?? {}).slice(0, 2)).slice(0, 60);
-  console.log(`\x1b[90m[HOOK] ${call.toolName}(${argsPreview})\x1b[0m`);
+  const argsPreview = JSON.stringify(Object.values((call.input as any) ?? {}).slice(0, 2)).slice(0, 60);
+  console.log(`\x1b[90m[HOOK] ${call.name}(${argsPreview})\x1b[0m`);
   return null;
 }
 
 // PostToolUse: warn on large output.
 function largeOutputHook(call: ToolCallInfo, output: string): null {
   if (output.length > 100_000) {
-    console.log(`\x1b[33m[HOOK] ⚠ Large output from ${call.toolName}: ${output.length} chars\x1b[0m`);
+    console.log(`\x1b[33m[HOOK] ⚠ Large output from ${call.name}: ${output.length} chars\x1b[0m`);
   }
   return null;
 }
@@ -286,10 +286,11 @@ function contextInjectHook(_query: string): null {
 }
 
 // Stop hook: print summary when loop is about to exit
-function summaryHook(messages: ModelMessage[]): null {
+function summaryHook(messages: Anthropic.MessageParam[]): null {
   const toolCount = messages.reduce(
     (n, m) =>
-      n + (Array.isArray(m.content) ? m.content.filter((b) => b.type === "tool-result").length : 0),
+      n +
+      (Array.isArray(m.content) ? m.content.filter((b) => b.type === "tool_result").length : 0),
     0,
   );
   console.log(`\x1b[90m[HOOK] Stop: session used ${toolCount} tool calls\x1b[0m`);
@@ -308,18 +309,18 @@ registerHook("Stop", summaryHook);
 //  s04: if (await triggerHooks("PreToolUse", call)) ...
 // ═══════════════════════════════════════════════════════════
 
-async function agentLoop(messages: ModelMessage[]): Promise<string> {
+async function agentLoop(messages: Anthropic.MessageParam[]): Promise<string> {
   while (true) {
-    const result = await generateText({
-      model,
+    const response = await client.messages.create({
+      model: MODEL_ID,
       system: SYSTEM,
       messages,
       tools,
-      maxOutputTokens: 8000,
+      max_tokens: 8000,
     });
-    messages.push(...result.response.messages);
+    messages.push({ role: "assistant", content: response.content });
 
-    if (result.finishReason !== "tool-calls") {
+    if (response.stop_reason !== "tool_use") {
       // A Stop hook may force another round: its return value becomes
       // a user message and the loop continues instead of exiting.
       const force = await triggerHooks("Stop", messages);
@@ -327,39 +328,38 @@ async function agentLoop(messages: ModelMessage[]): Promise<string> {
         messages.push({ role: "user", content: force });
         continue;
       }
-      return result.text;
+      return textOf(response);
     }
 
-    const results: ToolResultPart[] = [];
-    for (const call of result.toolCalls) {
-      if (call.dynamic) continue;
+    const results: Anthropic.ToolResultBlockParam[] = [];
+    for (const block of response.content) {
+      if (block.type !== "tool_use") continue;
 
       // s04 change: hook replaces hard-coded checkPermission()
-      const blocked = await triggerHooks("PreToolUse", call);
+      const blocked = await triggerHooks("PreToolUse", block);
       if (blocked) {
         results.push({
-          type: "tool-result",
-          toolCallId: call.toolCallId,
-          toolName: call.toolName,
-          output: { type: "text", value: blocked },
+          type: "tool_result",
+          tool_use_id: block.id,
+          content: blocked,
         });
         continue;
       }
 
-      const handler = TOOL_HANDLERS[call.toolName];
-      const output = handler ? handler(call.input) : `Unknown: ${call.toolName}`;
+      const schema = TOOL_SCHEMAS[block.name];
+      const handler = TOOL_HANDLERS[block.name];
+      const output = handler && schema ? handler(schema.parse(block.input)) : `Unknown: ${block.name}`;
 
-      await triggerHooks("PostToolUse", call, output); // s04: post hook
+      await triggerHooks("PostToolUse", block, output); // s04: post hook
 
       results.push({
-        type: "tool-result",
-        toolCallId: call.toolCallId,
-        toolName: call.toolName,
-        output: { type: "text", value: output },
+        type: "tool_result",
+        tool_use_id: block.id,
+        content: output,
       });
     }
 
-    messages.push({ role: "tool", content: results });
+    messages.push({ role: "user", content: results });
   }
 }
 
@@ -367,7 +367,7 @@ async function agentLoop(messages: ModelMessage[]): Promise<string> {
 console.log("s04: Hooks — extension logic on hooks, loop stays clean");
 console.log("输入问题，回车发送。输入 q 退出。\n");
 
-const history: ModelMessage[] = [];
+const history: Anthropic.MessageParam[] = [];
 while (true) {
   let query: string;
   try {

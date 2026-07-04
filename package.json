@@ -3,15 +3,14 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "TypeScript port of learn-claude-code, built on the Vercel AI SDK",
+  "description": "TypeScript port of learn-claude-code, built on @anthropic-ai/sdk",
   "scripts": {
-    "dev": "tsx --env-file-if-exists=.env",
-    "smoke": "tsx --env-file-if-exists=.env lib/smoke.ts",
+    "dev": "env -u ANTHROPIC_AUTH_TOKEN tsx --env-file-if-exists=.env",
+    "smoke": "env -u ANTHROPIC_AUTH_TOKEN tsx --env-file-if-exists=.env lib/smoke.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@ai-sdk/anthropic": "^4.0.8",
-    "ai": "^7.0.15",
+    "@anthropic-ai/sdk": "^0.110.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {

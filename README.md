@@ -8,9 +8,9 @@ A **TypeScript port** of [shareAI-lab/learn-claude-code](https://github.com/shar
 
 Dependencies are managed with **pnpm** at the repo root; scripts live in the session directories (`s01_agent_loop/`, `s02_tool_use/`, ... `s20_comprehensive/`) and are run with **tsx**.
 
-LLM calls go through the **Vercel AI SDK** (`ai` + `@ai-sdk/anthropic`).
+LLM calls go through the official **`@anthropic-ai/sdk`**.
 
-Shared helpers live in `lib/` — `lib/model.ts` builds the AI SDK model from `.env` (supports the Anthropic-compatible providers listed in `.env.upstream`).
+Shared helpers live in `lib/` — `lib/model.ts` builds the Anthropic client from `.env` (supports the Anthropic-compatible providers listed in `.env.upstream`).
 
 ```sh
 make setup      # pnpm install + create .env from .env.upstream

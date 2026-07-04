@@ -3,7 +3,7 @@
  *
  * AI 编程 agent 的全部秘密就在这一个模式里：
  *
- *     while finishReason == "tool-calls":
+ *     while stop_reason == "tool_use":
  *         result = LLM(messages, tools)
  *         execute tools
  *         append results
@@ -21,9 +21,8 @@
  * 直到模型自己决定停止。生产环境中的 agent 会在此之上
  * 叠加策略、hooks 和生命周期控制。
  *
- * 下面的 bash 工具故意没有 `execute` 函数：
- * 这样 AI SDK 就只会返回 tool call 而不会自己执行，
- * 于是循环的控制权留在这份代码里——这就是 s01 要讲的道理。
+ * Anthropic SDK 的 messages.create 本来就只返回 tool_use 块、不执行工具，
+ * 循环控制权天然在这份代码里——这就是 s01 要讲的道理。
  *
  * Usage:
  *     pnpm dev s01_agent_loop/main.ts
@@ -31,21 +30,18 @@
 
 import { spawnSync } from "node:child_process";
 import * as readline from "node:readline/promises";
-import { generateText, tool } from "ai";
-import type { ModelMessage, ToolResultPart } from "ai";
+import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
-import { model } from "../lib/model";
+import { client, MODEL_ID } from "../lib/model";
+import { zodTool, textOf } from "../lib/tools";
 
 const SYSTEM = `You are a coding agent at ${process.cwd()}. Use bash to solve tasks. Act, don't explain.`;
 
 // ── Tool definition: just bash ────────────────────────────
-const tools = {
-  bash: tool({
-    description: "Run a shell command.",
-    inputSchema: z.object({ command: z.string() }),
-    // no execute → the SDK hands the call back to us
-  }),
-};
+const bashSchema = z.object({ command: z.string() });
+const tools: Anthropic.Tool[] = [
+  zodTool("bash", "Run a shell command.", bashSchema),
+];
 
 // ── Tool execution ────────────────────────────────────────
 function runBash(command: string): string {
@@ -69,41 +65,41 @@ function runBash(command: string): string {
 }
 
 // ── The core pattern: a while loop that calls tools until the model stops ──
-async function agentLoop(messages: ModelMessage[]): Promise<string> {
+async function agentLoop(messages: Anthropic.MessageParam[]): Promise<string> {
   while (true) {
-    const result = await generateText({
-      model,
+    const response = await client.messages.create({
+      model: MODEL_ID,
       system: SYSTEM,
       messages,
       tools,
-      maxOutputTokens: 8000,
+      max_tokens: 8000,
     });
 
     // Append assistant turn (includes any tool-call blocks)
-    messages.push(...result.response.messages);
+    messages.push({ role: "assistant", content: response.content });
 
     // If the model didn't call a tool, we're done
-    if (result.finishReason !== "tool-calls") {
-      return result.text;
+    if (response.stop_reason !== "tool_use") {
+      return textOf(response);
     }
 
     // Execute each tool call, collect results
-    const results: ToolResultPart[] = [];
-    for (const call of result.toolCalls) {
-      if (call.dynamic) continue;
-      console.log(`\x1b[33m$ ${call.input.command}\x1b[0m`);
-      const output = runBash(call.input.command);
+    const results: Anthropic.ToolResultBlockParam[] = [];
+    for (const block of response.content) {
+      if (block.type !== "tool_use") continue;
+      const input = bashSchema.parse(block.input);
+      console.log(`\x1b[33m$ ${input.command}\x1b[0m`);
+      const output = runBash(input.command);
       console.log(output.slice(0, 200));
       results.push({
-        type: "tool-result",
-        toolCallId: call.toolCallId,
-        toolName: call.toolName,
-        output: { type: "text", value: output },
+        type: "tool_result",
+        tool_use_id: block.id,
+        content: output,
       });
     }
 
     // Feed tool results back, loop continues
-    messages.push({ role: "tool", content: results });
+    messages.push({ role: "user", content: results });
   }
 }
 
@@ -120,7 +116,7 @@ rl.on("SIGINT", () => {
   process.exit(0);
 });
 
-const history: ModelMessage[] = [];
+const history: Anthropic.MessageParam[] = [];
 while (true) {
   let query: string;
   try {

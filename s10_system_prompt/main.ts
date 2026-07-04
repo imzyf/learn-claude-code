@@ -19,10 +19,10 @@ import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as readline from "node:readline/promises";
-import { generateText, tool } from "ai";
-import type { ModelMessage, ToolResultPart } from "ai";
+import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
-import { model } from "../lib/model";
+import { client, MODEL_ID } from "../lib/model";
+import { zodTool, textOf } from "../lib/tools";
 
 const WORKDIR = process.cwd();
 const MEMORY_DIR = path.join(WORKDIR, ".memory");
@@ -147,22 +147,23 @@ function runWrite(p: string, content: string): string {
   }
 }
 
-const tools = {
-  bash: tool({
-    description: "Run a shell command.",
-    inputSchema: z.object({ command: z.string() }),
-  }),
-  read_file: tool({
-    description: "Read file contents.",
-    inputSchema: z.object({ path: z.string(), limit: z.number().int().optional() }),
-  }),
-  write_file: tool({
-    description: "Write content to a file.",
-    inputSchema: z.object({ path: z.string(), content: z.string() }),
-  }),
+const bashSchema = z.object({ command: z.string() });
+const readSchema = z.object({ path: z.string(), limit: z.number().int().optional() });
+const writeSchema = z.object({ path: z.string(), content: z.string() });
+
+const tools: Anthropic.Tool[] = [
+  zodTool("bash", "Run a shell command.", bashSchema),
+  zodTool("read_file", "Read file contents.", readSchema),
+  zodTool("write_file", "Write content to a file.", writeSchema),
+];
+
+const TOOL_SCHEMAS: Partial<Record<string, z.ZodObject>> = {
+  bash: bashSchema,
+  read_file: readSchema,
+  write_file: writeSchema,
 };
 
-const TOOL_HANDLERS: Record<string, (input: any) => string> = {
+const TOOL_HANDLERS: Partial<Record<string, (input: any) => string>> = {
   bash: ({ command }) => runBash(command),
   read_file: ({ path, limit }) => runRead(path, limit),
   write_file: ({ path, content }) => runWrite(path, content),
@@ -189,36 +190,36 @@ function updateContext(): Context {
 //  agentLoop — uses assembled system prompt instead of hardcoded SYSTEM
 // ═══════════════════════════════════════════════════════════
 
-async function agentLoop(messages: ModelMessage[], context: Context): Promise<string> {
+async function agentLoop(messages: Anthropic.MessageParam[], context: Context): Promise<string> {
   let system = getSystemPrompt(context);
   while (true) {
-    const result = await generateText({
-      model,
+    const response = await client.messages.create({
+      model: MODEL_ID,
       system,
       messages,
       tools,
-      maxOutputTokens: 8000,
+      max_tokens: 8000,
     });
-    messages.push(...result.response.messages);
-    if (result.finishReason !== "tool-calls") {
-      return result.text;
+    messages.push({ role: "assistant", content: response.content });
+    if (response.stop_reason !== "tool_use") {
+      return textOf(response);
     }
 
-    const results: ToolResultPart[] = [];
-    for (const call of result.toolCalls) {
-      if (call.dynamic) continue;
-      console.log(`\x1b[36m> ${call.toolName}\x1b[0m`);
-      const handler = TOOL_HANDLERS[call.toolName];
-      const output = handler ? handler(call.input) : `Unknown: ${call.toolName}`;
+    const results: Anthropic.ToolResultBlockParam[] = [];
+    for (const block of response.content) {
+      if (block.type !== "tool_use") continue;
+      console.log(`\x1b[36m> ${block.name}\x1b[0m`);
+      const schema = TOOL_SCHEMAS[block.name];
+      const handler = TOOL_HANDLERS[block.name];
+      const output = handler && schema ? handler(schema.parse(block.input)) : `Unknown: ${block.name}`;
       console.log(output.slice(0, 200));
       results.push({
-        type: "tool-result",
-        toolCallId: call.toolCallId,
-        toolName: call.toolName,
-        output: { type: "text", value: output },
+        type: "tool_result",
+        tool_use_id: block.id,
+        content: output,
       });
     }
-    messages.push({ role: "tool", content: results });
+    messages.push({ role: "user", content: results });
 
     // Re-evaluate context and prompt after each tool round
     context = updateContext();
@@ -239,7 +240,7 @@ rl.on("SIGINT", () => {
   process.exit(0);
 });
 
-const history: ModelMessage[] = [];
+const history: Anthropic.MessageParam[] = [];
 let context = updateContext();
 while (true) {
   let query: string;

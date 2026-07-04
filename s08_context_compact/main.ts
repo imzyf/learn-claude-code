@@ -30,12 +30,9 @@
  *   + compact 工具——模型可以自己请求生成摘要
  *   - 去掉了唠叨提醒和 UserPromptSubmit/Stop hooks（专注于压缩本身）
  *
- * TS 特有的差异：
- *   - Python 把工具结果识别为带 tool_result blocks 的 user 消息；
- *     AI SDK 则给它们单独的 `role: "tool"` 消息。
- *   - Python 版本是在用压缩摘要替换历史记录之后再追加一个 tool_result——
- *     但真实 API 会拒绝这种孤立的 tool_result，所以这里只用摘要本身
- *     继续推进循环。
+ * 一点需要注意：用压缩摘要替换历史记录后，不能再追加一个孤立的
+ * tool_result（引用一个已经被摘要抹掉的 tool_use）——真实 API 会拒绝
+ * 这种孤立的 tool_result，所以这里只用摘要本身继续推进循环。
  *
  * 基于 s07（skill loading）构建。Usage:
  *
@@ -46,10 +43,10 @@ import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as readline from "node:readline/promises";
-import { generateText, tool } from "ai";
-import type { ModelMessage, ToolResultPart } from "ai";
+import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
-import { model } from "../lib/model";
+import { client, MODEL_ID } from "../lib/model";
+import { zodTool, textOf } from "../lib/tools";
 
 const WORKDIR = process.cwd();
 const SKILLS_DIR = path.join(WORKDIR, "skills");
@@ -256,26 +253,28 @@ const CONTEXT_LIMIT = 50_000;
 const KEEP_RECENT = 3;
 const PERSIST_THRESHOLD = 30_000;
 
-const estimateSize = (msgs: ModelMessage[]): number => JSON.stringify(msgs).length;
+const estimateSize = (msgs: Anthropic.MessageParam[]): number => JSON.stringify(msgs).length;
 
 // Replace an array's contents in place — callers hold the same reference
 // (mirrors Python's `messages[:] = ...`).
-function setMessages(messages: ModelMessage[], next: ModelMessage[]): void {
+function setMessages(messages: Anthropic.MessageParam[], next: Anthropic.MessageParam[]): void {
   messages.splice(0, messages.length, ...next);
 }
 
-const messageHasToolCall = (m: ModelMessage): boolean =>
-  m.role === "assistant" && Array.isArray(m.content) && m.content.some((b) => b.type === "tool-call");
+const messageHasToolCall = (m: Anthropic.MessageParam): boolean =>
+  m.role === "assistant" && Array.isArray(m.content) && m.content.some((b) => b.type === "tool_use");
 
-// AI SDK diff: tool results are `role: "tool"` messages, not user messages
-// carrying tool_result blocks as in the Anthropic SDK.
-const isToolResultMessage = (m: ModelMessage): boolean => m.role === "tool";
+// Tool results are user messages carrying tool_result content blocks.
+const isToolResultMessage = (m: Anthropic.MessageParam): boolean =>
+  m.role === "user" &&
+  Array.isArray(m.content) &&
+  m.content.some((b) => typeof b !== "string" && b.type === "tool_result");
 
-const outputText = (part: ToolResultPart): string =>
-  part.output.type === "text" ? part.output.value : JSON.stringify(part.output);
+const outputText = (part: Anthropic.ToolResultBlockParam): string =>
+  typeof part.content === "string" ? part.content : JSON.stringify(part.content);
 
 // L1: snipCompact — trim middle messages
-function snipCompact(messages: ModelMessage[], maxMessages = 50): ModelMessage[] {
+function snipCompact(messages: Anthropic.MessageParam[], maxMessages = 50): Anthropic.MessageParam[] {
   if (messages.length <= maxMessages) return messages;
   const keepHead = 3;
   const keepTail = maxMessages - 3;
@@ -303,41 +302,46 @@ function snipCompact(messages: ModelMessage[], maxMessages = 50): ModelMessage[]
 }
 
 // L2: microCompact — old result placeholders
-function collectToolResults(messages: ModelMessage[]): ToolResultPart[] {
-  const parts: ToolResultPart[] = [];
+function collectToolResults(messages: Anthropic.MessageParam[]): Anthropic.ToolResultBlockParam[] {
+  const parts: Anthropic.ToolResultBlockParam[] = [];
   for (const m of messages) {
-    if (m.role !== "tool") continue;
+    if (m.role !== "user" || !Array.isArray(m.content)) continue;
     for (const part of m.content) {
-      if (part.type === "tool-result") parts.push(part);
+      if (typeof part !== "string" && part.type === "tool_result") parts.push(part);
     }
   }
   return parts;
 }
 
-function microCompact(messages: ModelMessage[]): ModelMessage[] {
+function microCompact(messages: Anthropic.MessageParam[]): Anthropic.MessageParam[] {
   const toolResults = collectToolResults(messages);
   if (toolResults.length <= KEEP_RECENT) return messages;
   for (const part of toolResults.slice(0, -KEEP_RECENT)) {
-    if (part.output.type === "text" && part.output.value.length > 120) {
-      part.output = { type: "text", value: "[Earlier tool result compacted. Re-run if needed.]" };
+    if (typeof part.content === "string" && part.content.length > 120) {
+      part.content = "[Earlier tool result compacted. Re-run if needed.]";
     }
   }
   return messages;
 }
 
 // L3: toolResultBudget — persist large results to disk
-function persistLargeOutput(toolCallId: string, output: string): string {
+function persistLargeOutput(toolUseId: string, output: string): string {
   if (output.length <= PERSIST_THRESHOLD) return output;
   fs.mkdirSync(TOOL_RESULTS_DIR, { recursive: true });
-  const filePath = path.join(TOOL_RESULTS_DIR, `${toolCallId}.txt`);
+  const filePath = path.join(TOOL_RESULTS_DIR, `${toolUseId}.txt`);
   if (!fs.existsSync(filePath)) fs.writeFileSync(filePath, output);
   return `<persisted-output>\nFull output: ${filePath}\nPreview:\n${output.slice(0, 2000)}\n</persisted-output>`;
 }
 
-function toolResultBudget(messages: ModelMessage[], maxBytes = 200_000): ModelMessage[] {
+function toolResultBudget(
+  messages: Anthropic.MessageParam[],
+  maxBytes = 200_000,
+): Anthropic.MessageParam[] {
   const last = messages[messages.length - 1];
-  if (!last || last.role !== "tool") return messages;
-  const blocks = last.content.filter((b): b is ToolResultPart => b.type === "tool-result");
+  if (!last || last.role !== "user" || !Array.isArray(last.content)) return messages;
+  const blocks = last.content.filter(
+    (b): b is Anthropic.ToolResultBlockParam => typeof b !== "string" && b.type === "tool_result",
+  );
   let total = blocks.reduce((n, b) => n + outputText(b).length, 0);
   if (total <= maxBytes) return messages;
   const ranked = [...blocks].sort((a, b) => outputText(b).length - outputText(a).length);
@@ -345,32 +349,38 @@ function toolResultBudget(messages: ModelMessage[], maxBytes = 200_000): ModelMe
     if (total <= maxBytes) break;
     const content = outputText(block);
     if (content.length <= PERSIST_THRESHOLD) continue;
-    block.output = { type: "text", value: persistLargeOutput(block.toolCallId, content) };
+    block.content = persistLargeOutput(block.tool_use_id, content);
     total = blocks.reduce((n, b) => n + outputText(b).length, 0);
   }
   return messages;
 }
 
 // L4: autoCompact — LLM full summary
-function writeTranscript(messages: ModelMessage[]): string {
+function writeTranscript(messages: Anthropic.MessageParam[]): string {
   fs.mkdirSync(TRANSCRIPT_DIR, { recursive: true });
   const filePath = path.join(TRANSCRIPT_DIR, `transcript_${Math.floor(Date.now() / 1000)}.jsonl`);
   fs.writeFileSync(filePath, messages.map((m) => JSON.stringify(m)).join("\n") + "\n");
   return filePath;
 }
 
-async function summarizeHistory(messages: ModelMessage[]): Promise<string> {
+async function summarizeHistory(messages: Anthropic.MessageParam[]): Promise<string> {
   const conversation = JSON.stringify(messages).slice(0, 80_000);
   const prompt =
     "Summarize this coding-agent conversation so work can continue.\n" +
     "Preserve: 1. current goal, 2. key findings/decisions, 3. files read/changed, " +
     "4. remaining work, 5. user constraints.\nBe compact but concrete.\n\n" +
     conversation;
-  const { text } = await generateText({ model, prompt, maxOutputTokens: 2000 });
-  return text.trim() || "(empty summary)";
+  const response = await client.messages.create({
+    model: MODEL_ID,
+    max_tokens: 2000,
+    messages: [{ role: "user", content: prompt }],
+  });
+  return textOf(response).trim() || "(empty summary)";
 }
 
-async function compactHistory(messages: ModelMessage[]): Promise<ModelMessage[]> {
+async function compactHistory(
+  messages: Anthropic.MessageParam[],
+): Promise<Anthropic.MessageParam[]> {
   const transcriptPath = writeTranscript(messages);
   console.log(`[transcript saved: ${transcriptPath}]`);
   const summary = await summarizeHistory(messages);
@@ -378,7 +388,9 @@ async function compactHistory(messages: ModelMessage[]): Promise<ModelMessage[]>
 }
 
 // Emergency: reactiveCompact — on API error
-async function reactiveCompact(messages: ModelMessage[]): Promise<ModelMessage[]> {
+async function reactiveCompact(
+  messages: Anthropic.MessageParam[],
+): Promise<Anthropic.MessageParam[]> {
   writeTranscript(messages);
   let tailStart = Math.max(0, messages.length - 5);
   if (
@@ -397,56 +409,62 @@ async function reactiveCompact(messages: ModelMessage[]): Promise<ModelMessage[]
 //  FROM s07: Tool Definitions
 // ═══════════════════════════════════════════════════════════
 
+const bashSchema = z.object({ command: z.string() });
+const readSchema = z.object({ path: z.string(), limit: z.number().int().optional() });
+const writeSchema = z.object({ path: z.string(), content: z.string() });
+const editSchema = z.object({ path: z.string(), old_text: z.string(), new_text: z.string() });
+const globSchema = z.object({ pattern: z.string() });
+const todoWriteSchema = z.object({ todos: z.union([z.array(todoItem), z.string()]) });
+const taskSchema = z.object({ description: z.string() });
+const loadSkillSchema = z.object({ name: z.string() });
+const compactSchema = z.object({ focus: z.string().optional() });
+
 // Shared by parent and subagent (Python re-declares SUB_TOOLS by hand)
-const fileTools = {
-  bash: tool({
-    description: "Run a shell command.",
-    inputSchema: z.object({ command: z.string() }),
-  }),
-  read_file: tool({
-    description: "Read file contents.",
-    inputSchema: z.object({ path: z.string(), limit: z.number().int().optional() }),
-  }),
-  write_file: tool({
-    description: "Write content to a file.",
-    inputSchema: z.object({ path: z.string(), content: z.string() }),
-  }),
-  edit_file: tool({
-    description: "Replace exact text in a file once.",
-    inputSchema: z.object({ path: z.string(), old_text: z.string(), new_text: z.string() }),
-  }),
-  glob: tool({
-    description: "Find files matching a glob pattern.",
-    inputSchema: z.object({ pattern: z.string() }),
-  }),
+const fileTools: Anthropic.Tool[] = [
+  zodTool("bash", "Run a shell command.", bashSchema),
+  zodTool("read_file", "Read file contents.", readSchema),
+  zodTool("write_file", "Write content to a file.", writeSchema),
+  zodTool("edit_file", "Replace exact text in a file once.", editSchema),
+  zodTool("glob", "Find files matching a glob pattern.", globSchema),
+];
+
+const FILE_SCHEMAS: Partial<Record<string, z.ZodObject>> = {
+  bash: bashSchema,
+  read_file: readSchema,
+  write_file: writeSchema,
+  edit_file: editSchema,
+  glob: globSchema,
 };
 
-const tools = {
+const tools: Anthropic.Tool[] = [
   ...fileTools,
-  todo_write: tool({
-    description: "Create and manage a task list for your current coding session.",
-    inputSchema: z.object({ todos: z.union([z.array(todoItem), z.string()]) }),
-  }),
-  task: tool({
-    description:
-      "Launch a subagent to handle a complex subtask. Returns only the final conclusion.",
-    inputSchema: z.object({ description: z.string() }),
-  }),
-  load_skill: tool({
-    description: "Load the full content of a skill by name.",
-    inputSchema: z.object({ name: z.string() }),
-  }),
+  zodTool(
+    "todo_write",
+    "Create and manage a task list for your current coding session.",
+    todoWriteSchema,
+  ),
+  zodTool(
+    "task",
+    "Launch a subagent to handle a complex subtask. Returns only the final conclusion.",
+    taskSchema,
+  ),
+  zodTool("load_skill", "Load the full content of a skill by name.", loadSkillSchema),
   // s08 change: new compact tool — triggers compactHistory, not a no-op
-  compact: tool({
-    description: "Summarize earlier conversation to free context space.",
-    inputSchema: z.object({ focus: z.string().optional() }),
-  }),
+  zodTool("compact", "Summarize earlier conversation to free context space.", compactSchema),
+];
+
+const TOOL_SCHEMAS: Partial<Record<string, z.ZodObject>> = {
+  ...FILE_SCHEMAS,
+  todo_write: todoWriteSchema,
+  task: taskSchema,
+  load_skill: loadSkillSchema,
+  compact: compactSchema,
 };
 
 // NO "task" tool — prevent recursive spawning
 const subTools = fileTools;
 
-const SUB_HANDLERS: Record<string, (input: any) => string> = {
+const SUB_HANDLERS: Partial<Record<string, (input: any) => string>> = {
   bash: ({ command }) => runBash(command),
   read_file: ({ path, limit }) => runRead(path, limit),
   write_file: ({ path, content }) => runWrite(path, content),
@@ -455,7 +473,7 @@ const SUB_HANDLERS: Record<string, (input: any) => string> = {
 };
 
 // compact is NOT here — the loop intercepts it (it rewrites messages[])
-const TOOL_HANDLERS: Record<string, (input: any) => string | Promise<string>> = {
+const TOOL_HANDLERS: Partial<Record<string, (input: any) => string | Promise<string>>> = {
   ...SUB_HANDLERS,
   todo_write: ({ todos }) => runTodoWrite(todos),
   task: ({ description }) => spawnSubagent(description),
@@ -468,49 +486,49 @@ const TOOL_HANDLERS: Record<string, (input: any) => string | Promise<string>> = 
 
 async function spawnSubagent(description: string): Promise<string> {
   console.log(`\n\x1b[35m[Subagent spawned]\x1b[0m`);
-  const messages: ModelMessage[] = [{ role: "user", content: description }]; // fresh context
+  const messages: Anthropic.MessageParam[] = [{ role: "user", content: description }]; // fresh context
   let lastText = "";
 
   for (let turn = 0; turn < 30; turn++) {
     // safety limit
-    const result = await generateText({
-      model,
+    const response = await client.messages.create({
+      model: MODEL_ID,
       system: SUB_SYSTEM,
       messages,
       tools: subTools,
-      maxOutputTokens: 8000,
+      max_tokens: 8000,
     });
-    messages.push(...result.response.messages);
-    if (result.text) lastText = result.text;
-    if (result.finishReason !== "tool-calls") break;
+    messages.push({ role: "assistant", content: response.content });
+    const text = textOf(response);
+    if (text) lastText = text;
+    if (response.stop_reason !== "tool_use") break;
 
-    const results: ToolResultPart[] = [];
-    for (const call of result.toolCalls) {
-      if (call.dynamic) continue;
+    const results: Anthropic.ToolResultBlockParam[] = [];
+    for (const block of response.content) {
+      if (block.type !== "tool_use") continue;
 
-      const blocked = triggerHooks("PreToolUse", call);
+      const blocked = triggerHooks("PreToolUse", block);
       if (blocked) {
         results.push({
-          type: "tool-result",
-          toolCallId: call.toolCallId,
-          toolName: call.toolName,
-          output: { type: "text", value: blocked },
+          type: "tool_result",
+          tool_use_id: block.id,
+          content: blocked,
         });
         continue;
       }
 
-      const handler = SUB_HANDLERS[call.toolName];
-      const output = handler ? handler(call.input) : `Unknown: ${call.toolName}`;
-      triggerHooks("PostToolUse", call, output);
-      console.log(`  \x1b[90m[sub] ${call.toolName}: ${output.slice(0, 100)}\x1b[0m`);
+      const schema = FILE_SCHEMAS[block.name];
+      const handler = SUB_HANDLERS[block.name];
+      const output = handler && schema ? handler(schema.parse(block.input)) : `Unknown: ${block.name}`;
+      triggerHooks("PostToolUse", block, output);
+      console.log(`  \x1b[90m[sub] ${block.name}: ${output.slice(0, 100)}\x1b[0m`);
       results.push({
-        type: "tool-result",
-        toolCallId: call.toolCallId,
-        toolName: call.toolName,
-        output: { type: "text", value: output },
+        type: "tool_result",
+        tool_use_id: block.id,
+        content: output,
       });
     }
-    messages.push({ role: "tool", content: results });
+    messages.push({ role: "user", content: results });
   }
 
   console.log(`\x1b[35m[Subagent done]\x1b[0m`);
@@ -523,7 +541,7 @@ async function spawnSubagent(description: string): Promise<string> {
 // ═══════════════════════════════════════════════════════════
 
 type Hook = (...args: any[]) => string | null;
-type ToolCallInfo = { toolName: string; input: any };
+type ToolCallInfo = Anthropic.ToolUseBlock;
 
 const HOOKS: Record<string, Hook[]> = { PreToolUse: [], PostToolUse: [] };
 
@@ -538,16 +556,16 @@ function triggerHooks(event: string, ...args: any[]): string | null {
 const DENY_LIST = ["rm -rf /", "sudo", "shutdown"];
 
 function permissionHook(call: ToolCallInfo): string | null {
-  if (call.toolName === "bash") {
+  if (call.name === "bash") {
     for (const pattern of DENY_LIST) {
-      if ((call.input.command ?? "").includes(pattern)) return "Permission denied";
+      if (((call.input as any).command ?? "").includes(pattern)) return "Permission denied";
     }
   }
   return null;
 }
 
 function logHook(call: ToolCallInfo): null {
-  console.log(`\x1b[90m[HOOK] ${call.toolName}\x1b[0m`);
+  console.log(`\x1b[90m[HOOK] ${call.name}\x1b[0m`);
   return null;
 }
 
@@ -559,7 +577,7 @@ HOOKS.PreToolUse.push(permissionHook, logHook);
 
 const MAX_REACTIVE_RETRIES = 1; // retry limit for reactive compact
 
-async function agentLoop(messages: ModelMessage[]): Promise<string> {
+async function agentLoop(messages: Anthropic.MessageParam[]): Promise<string> {
   let reactiveRetries = 0;
   while (true) {
     // s08 change: three preprocessors (0 API calls, cheap first)
@@ -574,14 +592,14 @@ async function agentLoop(messages: ModelMessage[]): Promise<string> {
       setMessages(messages, await compactHistory(messages));
     }
 
-    let result;
+    let response;
     try {
-      result = await generateText({
-        model,
+      response = await client.messages.create({
+        model: MODEL_ID,
         system: SYSTEM,
         messages,
         tools,
-        maxOutputTokens: 8000,
+        max_tokens: 8000,
       });
       reactiveRetries = 0; // reset on successful API call
     } catch (e) {
@@ -598,50 +616,50 @@ async function agentLoop(messages: ModelMessage[]): Promise<string> {
       throw e;
     }
 
-    messages.push(...result.response.messages);
-    if (result.finishReason !== "tool-calls") return result.text;
+    messages.push({ role: "assistant", content: response.content });
+    if (response.stop_reason !== "tool_use") return textOf(response);
 
     let didCompact = false;
-    const results: ToolResultPart[] = [];
-    for (const call of result.toolCalls) {
-      if (call.dynamic) continue;
-      console.log(`\x1b[36m> ${call.toolName}\x1b[0m`);
+    const results: Anthropic.ToolResultBlockParam[] = [];
+    for (const block of response.content) {
+      if (block.type !== "tool_use") continue;
+      console.log(`\x1b[36m> ${block.name}\x1b[0m`);
 
       // s08: compact tool rewrites the whole history with a summary. The
       // tool-call that asked for it is summarized away too, so appending its
       // tool result (as the Python does) would orphan it and the API would
       // reject the next request — the summary alone continues the loop.
-      if (call.toolName === "compact") {
+      if (block.name === "compact") {
         setMessages(messages, await compactHistory(messages));
         didCompact = true;
         break; // end current turn, start fresh with compacted context
       }
 
-      const blocked = triggerHooks("PreToolUse", call);
+      const blocked = triggerHooks("PreToolUse", block);
       if (blocked) {
         results.push({
-          type: "tool-result",
-          toolCallId: call.toolCallId,
-          toolName: call.toolName,
-          output: { type: "text", value: blocked },
+          type: "tool_result",
+          tool_use_id: block.id,
+          content: blocked,
         });
         continue;
       }
 
-      const handler = TOOL_HANDLERS[call.toolName];
-      const output = handler ? await handler(call.input) : `Unknown: ${call.toolName}`;
-      triggerHooks("PostToolUse", call, output);
+      const schema = TOOL_SCHEMAS[block.name];
+      const handler = TOOL_HANDLERS[block.name];
+      const output =
+        handler && schema ? await handler(schema.parse(block.input)) : `Unknown: ${block.name}`;
+      triggerHooks("PostToolUse", block, output);
       console.log(output.slice(0, 200));
       results.push({
-        type: "tool-result",
-        toolCallId: call.toolCallId,
-        toolName: call.toolName,
-        output: { type: "text", value: output },
+        type: "tool_result",
+        tool_use_id: block.id,
+        content: output,
       });
     }
 
     if (didCompact) continue;
-    messages.push({ role: "tool", content: results });
+    messages.push({ role: "user", content: results });
   }
 }
 
@@ -658,7 +676,7 @@ rl.on("SIGINT", () => {
 console.log("s08: Context Compact — four-layer compaction pipeline");
 console.log("输入问题，回车发送。输入 q 退出。\n");
 
-const history: ModelMessage[] = [];
+const history: Anthropic.MessageParam[] = [];
 while (true) {
   let query: string;
   try {

@@ -16,15 +16,14 @@
  * ASCII 流程：
  *   messages -> prompt assembly -> [try] LLM [catch] -> tools -> loop
  *                                    |          |
- *                              finishReason   error type
- *                              "length"?      prompt_too_long? -> compact
+ *                              stop_reason    error type
+ *                              "max_tokens"?  prompt_too_long? -> compact
  *                              escalate /     429/529? -> backoff
  *                              continue       other? -> log + exit
  *
  * TS 特有说明：
- *   - Anthropic 的 stop_reason "max_tokens" 在这里表现为 finishReason "length"
- *   - generateText 默认会自己重试 429/529；设置 maxRetries: 0 是为了让
- *     本文件教学用的重试层成为唯一一层
+ *   - client.messages.create 默认会自己重试 429/529；per-request
+ *     `maxRetries: 0` 是为了让本文件教学用的重试层成为唯一一层
  *   - FALLBACK_MODEL_ID 环境变量用来选择 529 时的备用模型
  *
  * Usage:
@@ -35,10 +34,10 @@ import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as readline from "node:readline/promises";
-import { generateText, tool } from "ai";
-import type { ModelMessage, ToolResultPart } from "ai";
+import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
-import { anthropic, MODEL_ID } from "../lib/model";
+import { client, MODEL_ID } from "../lib/model";
+import { zodTool, textOf } from "../lib/tools";
 
 const WORKDIR = process.cwd();
 const MEMORY_DIR = path.join(WORKDIR, ".memory");
@@ -158,22 +157,23 @@ function runWrite(p: string, content: string): string {
   }
 }
 
-const tools = {
-  bash: tool({
-    description: "Run a shell command.",
-    inputSchema: z.object({ command: z.string() }),
-  }),
-  read_file: tool({
-    description: "Read file contents.",
-    inputSchema: z.object({ path: z.string(), limit: z.number().int().optional() }),
-  }),
-  write_file: tool({
-    description: "Write content to a file.",
-    inputSchema: z.object({ path: z.string(), content: z.string() }),
-  }),
+const bashSchema = z.object({ command: z.string() });
+const readSchema = z.object({ path: z.string(), limit: z.number().int().optional() });
+const writeSchema = z.object({ path: z.string(), content: z.string() });
+
+const tools: Anthropic.Tool[] = [
+  zodTool("bash", "Run a shell command.", bashSchema),
+  zodTool("read_file", "Read file contents.", readSchema),
+  zodTool("write_file", "Write content to a file.", writeSchema),
+];
+
+const TOOL_SCHEMAS: Partial<Record<string, z.ZodObject>> = {
+  bash: bashSchema,
+  read_file: readSchema,
+  write_file: writeSchema,
 };
 
-const TOOL_HANDLERS: Record<string, (input: any) => string> = {
+const TOOL_HANDLERS: Partial<Record<string, (input: any) => string>> = {
   bash: ({ command }) => runBash(command),
   read_file: ({ path, limit }) => runRead(path, limit),
   write_file: ({ path, content }) => runWrite(path, content),
@@ -200,10 +200,10 @@ function retryDelay(attempt: number, retryAfter?: number): number {
   return base + jitter;
 }
 
-// AI SDK APICallError carries statusCode; fall back to message text below.
+// Anthropic SDK's APIError carries `status`; fall back to message text below.
 function errorStatus(e: unknown): number | undefined {
-  if (typeof e === "object" && e !== null && "statusCode" in e) {
-    const s = (e as { statusCode?: unknown }).statusCode;
+  if (typeof e === "object" && e !== null && "status" in e) {
+    const s = (e as { status?: unknown }).status;
     if (typeof s === "number") return s;
   }
   return undefined;
@@ -286,7 +286,7 @@ function isPromptTooLongError(e: unknown): boolean {
  * the compacted message list. Teaching version simplifies to tail
  * retention since s08/s09 already cover LLM-based compact.
  */
-function reactiveCompact(messages: ModelMessage[]): ModelMessage[] {
+function reactiveCompact(messages: Anthropic.MessageParam[]): Anthropic.MessageParam[] {
   console.log("  \x1b[31m[reactive compact] trimming to last 5 messages\x1b[0m");
   const tail = messages.slice(-5);
   return [
@@ -318,7 +318,7 @@ function updateContext(): Context {
 //  agentLoop — error recovery wrapping LLM calls
 // ═══════════════════════════════════════════════════════════
 
-async function agentLoop(messages: ModelMessage[], context: Context): Promise<string> {
+async function agentLoop(messages: Anthropic.MessageParam[], context: Context): Promise<string> {
   let system = getSystemPrompt(context);
   const state = new RecoveryState();
   let maxTokens = DEFAULT_MAX_TOKENS;
@@ -326,14 +326,16 @@ async function agentLoop(messages: ModelMessage[], context: Context): Promise<st
   while (true) {
     // ── LLM call: withRetry handles 429/529, outer handles rest ──
     const callLLM = () =>
-      generateText({
-        model: anthropic(state.currentModel),
-        system,
-        messages,
-        tools,
-        maxOutputTokens: maxTokens,
-        maxRetries: 0, // withRetry above owns backoff, not the SDK
-      });
+      client.messages.create(
+        {
+          model: state.currentModel,
+          system,
+          messages,
+          tools,
+          max_tokens: maxTokens,
+        },
+        { maxRetries: 0 }, // withRetry above owns backoff, not the SDK
+      );
     let result: Awaited<ReturnType<typeof callLLM>>;
     try {
       result = await withRetry(callLLM, state);
@@ -359,8 +361,8 @@ async function agentLoop(messages: ModelMessage[], context: Context): Promise<st
       return errText;
     }
 
-    // ── Path 1: max_tokens (finishReason "length") -> escalate or continue ──
-    if (result.finishReason === "length") {
+    // ── Path 1: max_tokens (stop_reason "max_tokens") -> escalate or continue ──
+    if (result.stop_reason === "max_tokens") {
       // First escalation: don't append truncated output, retry same request
       if (!state.hasEscalated) {
         maxTokens = ESCALATED_MAX_TOKENS;
@@ -371,7 +373,7 @@ async function agentLoop(messages: ModelMessage[], context: Context): Promise<st
         continue;
       }
       // 64K still truncated: save truncated output + continuation prompt
-      messages.push(...result.response.messages);
+      messages.push({ role: "assistant", content: result.content });
       if (state.recoveryCount < MAX_RECOVERY_RETRIES) {
         messages.push({ role: "user", content: CONTINUATION_PROMPT });
         state.recoveryCount += 1;
@@ -381,31 +383,31 @@ async function agentLoop(messages: ModelMessage[], context: Context): Promise<st
         continue;
       }
       console.log("  \x1b[31m[max_tokens] recovery limit reached\x1b[0m");
-      return result.text;
+      return textOf(result);
     }
 
     // Normal completion: append assistant response
-    messages.push(...result.response.messages);
-    if (result.finishReason !== "tool-calls") {
-      return result.text;
+    messages.push({ role: "assistant", content: result.content });
+    if (result.stop_reason !== "tool_use") {
+      return textOf(result);
     }
 
     // ── Tool execution ──
-    const results: ToolResultPart[] = [];
-    for (const call of result.toolCalls) {
-      if (call.dynamic) continue;
-      console.log(`\x1b[36m> ${call.toolName}\x1b[0m`);
-      const handler = TOOL_HANDLERS[call.toolName];
-      const output = handler ? handler(call.input) : `Unknown: ${call.toolName}`;
+    const results: Anthropic.ToolResultBlockParam[] = [];
+    for (const block of result.content) {
+      if (block.type !== "tool_use") continue;
+      console.log(`\x1b[36m> ${block.name}\x1b[0m`);
+      const schema = TOOL_SCHEMAS[block.name];
+      const handler = TOOL_HANDLERS[block.name];
+      const output = handler && schema ? handler(schema.parse(block.input)) : `Unknown: ${block.name}`;
       console.log(output.slice(0, 200));
       results.push({
-        type: "tool-result",
-        toolCallId: call.toolCallId,
-        toolName: call.toolName,
-        output: { type: "text", value: output },
+        type: "tool_result",
+        tool_use_id: block.id,
+        content: output,
       });
     }
-    messages.push({ role: "tool", content: results });
+    messages.push({ role: "user", content: results });
 
     context = updateContext();
     system = getSystemPrompt(context);
@@ -425,7 +427,7 @@ rl.on("SIGINT", () => {
   process.exit(0);
 });
 
-const history: ModelMessage[] = [];
+const history: Anthropic.MessageParam[] = [];
 let context = updateContext();
 while (true) {
   let query: string;

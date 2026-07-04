@@ -35,10 +35,10 @@ import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as readline from "node:readline/promises";
-import { generateText, tool } from "ai";
-import type { ModelMessage, ToolResultPart } from "ai";
+import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
-import { model } from "../lib/model";
+import { client, MODEL_ID } from "../lib/model";
+import { zodTool, textOf } from "../lib/tools";
 
 const WORKDIR = process.cwd();
 const SKILLS_DIR = path.join(WORKDIR, "skills");
@@ -249,52 +249,59 @@ function runTodoWrite(todosInput: unknown): string {
 //  Tool Definitions — parent gets everything, subagent a subset
 // ═══════════════════════════════════════════════════════════
 
+const bashSchema = z.object({ command: z.string() });
+const readSchema = z.object({ path: z.string(), limit: z.number().int().optional() });
+const writeSchema = z.object({ path: z.string(), content: z.string() });
+const editSchema = z.object({ path: z.string(), old_text: z.string(), new_text: z.string() });
+const globSchema = z.object({ pattern: z.string() });
+const todoWriteSchema = z.object({ todos: z.union([z.array(todoItem), z.string()]) });
+const taskSchema = z.object({ description: z.string() });
+const loadSkillSchema = z.object({ name: z.string() });
+
 // Shared by parent and subagent (Python re-declares SUB_TOOLS by hand)
-const fileTools = {
-  bash: tool({
-    description: "Run a shell command.",
-    inputSchema: z.object({ command: z.string() }),
-  }),
-  read_file: tool({
-    description: "Read file contents.",
-    inputSchema: z.object({ path: z.string(), limit: z.number().int().optional() }),
-  }),
-  write_file: tool({
-    description: "Write content to a file.",
-    inputSchema: z.object({ path: z.string(), content: z.string() }),
-  }),
-  edit_file: tool({
-    description: "Replace exact text in a file once.",
-    inputSchema: z.object({ path: z.string(), old_text: z.string(), new_text: z.string() }),
-  }),
-  glob: tool({
-    description: "Find files matching a glob pattern.",
-    inputSchema: z.object({ pattern: z.string() }),
-  }),
+const fileTools: Anthropic.Tool[] = [
+  zodTool("bash", "Run a shell command.", bashSchema),
+  zodTool("read_file", "Read file contents.", readSchema),
+  zodTool("write_file", "Write content to a file.", writeSchema),
+  zodTool("edit_file", "Replace exact text in a file once.", editSchema),
+  zodTool("glob", "Find files matching a glob pattern.", globSchema),
+];
+
+const FILE_SCHEMAS: Partial<Record<string, z.ZodObject>> = {
+  bash: bashSchema,
+  read_file: readSchema,
+  write_file: writeSchema,
+  edit_file: editSchema,
+  glob: globSchema,
 };
 
-const tools = {
+const tools: Anthropic.Tool[] = [
   ...fileTools,
-  todo_write: tool({
-    description: "Create and manage a task list for your current coding session.",
-    inputSchema: z.object({ todos: z.union([z.array(todoItem), z.string()]) }),
-  }),
-  task: tool({
-    description:
-      "Launch a subagent to handle a complex subtask. Returns only the final conclusion.",
-    inputSchema: z.object({ description: z.string() }),
-  }),
+  zodTool(
+    "todo_write",
+    "Create and manage a task list for your current coding session.",
+    todoWriteSchema,
+  ),
+  zodTool(
+    "task",
+    "Launch a subagent to handle a complex subtask. Returns only the final conclusion.",
+    taskSchema,
+  ),
   // s07: skill tool (catalog is already in SYSTEM prompt, this loads full content)
-  load_skill: tool({
-    description: "Load the full content of a skill by name.",
-    inputSchema: z.object({ name: z.string() }),
-  }),
+  zodTool("load_skill", "Load the full content of a skill by name.", loadSkillSchema),
+];
+
+const TOOL_SCHEMAS: Partial<Record<string, z.ZodObject>> = {
+  ...FILE_SCHEMAS,
+  todo_write: todoWriteSchema,
+  task: taskSchema,
+  load_skill: loadSkillSchema,
 };
 
 // NO "task" tool — prevent recursive spawning
 const subTools = fileTools;
 
-const SUB_HANDLERS: Record<string, (input: any) => string> = {
+const SUB_HANDLERS: Partial<Record<string, (input: any) => string>> = {
   bash: ({ command }) => runBash(command),
   read_file: ({ path, limit }) => runRead(path, limit),
   write_file: ({ path, content }) => runWrite(path, content),
@@ -303,7 +310,7 @@ const SUB_HANDLERS: Record<string, (input: any) => string> = {
 };
 
 // Handlers may be async: task -> spawnSubagent returns a Promise
-const TOOL_HANDLERS: Record<string, (input: any) => string | Promise<string>> = {
+const TOOL_HANDLERS: Partial<Record<string, (input: any) => string | Promise<string>>> = {
   ...SUB_HANDLERS,
   todo_write: ({ todos }) => runTodoWrite(todos),
   task: ({ description }) => spawnSubagent(description),
@@ -316,50 +323,50 @@ const TOOL_HANDLERS: Record<string, (input: any) => string | Promise<string>> = 
 
 async function spawnSubagent(description: string): Promise<string> {
   console.log(`\n\x1b[35m[Subagent spawned]\x1b[0m`);
-  const messages: ModelMessage[] = [{ role: "user", content: description }]; // fresh context
+  const messages: Anthropic.MessageParam[] = [{ role: "user", content: description }]; // fresh context
   let lastText = "";
 
   for (let turn = 0; turn < 30; turn++) {
     // safety limit
-    const result = await generateText({
-      model,
+    const response = await client.messages.create({
+      model: MODEL_ID,
       system: SUB_SYSTEM,
       messages,
       tools: subTools,
-      maxOutputTokens: 8000,
+      max_tokens: 8000,
     });
-    messages.push(...result.response.messages);
-    if (result.text) lastText = result.text;
-    if (result.finishReason !== "tool-calls") break;
+    messages.push({ role: "assistant", content: response.content });
+    const text = textOf(response);
+    if (text) lastText = text;
+    if (response.stop_reason !== "tool_use") break;
 
-    const results: ToolResultPart[] = [];
-    for (const call of result.toolCalls) {
-      if (call.dynamic) continue;
+    const results: Anthropic.ToolResultBlockParam[] = [];
+    for (const block of response.content) {
+      if (block.type !== "tool_use") continue;
 
       // subagent also runs hooks (permissions apply)
-      const blocked = await triggerHooks("PreToolUse", call);
+      const blocked = await triggerHooks("PreToolUse", block);
       if (blocked) {
         results.push({
-          type: "tool-result",
-          toolCallId: call.toolCallId,
-          toolName: call.toolName,
-          output: { type: "text", value: blocked },
+          type: "tool_result",
+          tool_use_id: block.id,
+          content: blocked,
         });
         continue;
       }
 
-      const handler = SUB_HANDLERS[call.toolName];
-      const output = handler ? handler(call.input) : `Unknown: ${call.toolName}`;
-      await triggerHooks("PostToolUse", call, output);
-      console.log(`  \x1b[90m[sub] ${call.toolName}: ${output.slice(0, 100)}\x1b[0m`);
+      const schema = FILE_SCHEMAS[block.name];
+      const handler = SUB_HANDLERS[block.name];
+      const output = handler && schema ? handler(schema.parse(block.input)) : `Unknown: ${block.name}`;
+      await triggerHooks("PostToolUse", block, output);
+      console.log(`  \x1b[90m[sub] ${block.name}: ${output.slice(0, 100)}\x1b[0m`);
       results.push({
-        type: "tool-result",
-        toolCallId: call.toolCallId,
-        toolName: call.toolName,
-        output: { type: "text", value: output },
+        type: "tool_result",
+        tool_use_id: block.id,
+        content: output,
       });
     }
-    messages.push({ role: "tool", content: results });
+    messages.push({ role: "user", content: results });
   }
 
   console.log(`\x1b[35m[Subagent done]\x1b[0m`);
@@ -393,15 +400,15 @@ async function triggerHooks(event: string, ...args: any[]): Promise<string | nul
   return null;
 }
 
-type ToolCallInfo = { toolName: string; input: any };
+type ToolCallInfo = Anthropic.ToolUseBlock;
 
 const DENY_LIST = ["rm -rf /", "sudo", "shutdown", "reboot", "mkfs", "dd if="];
 
 // PreToolUse: deny list check.
 function permissionHook(call: ToolCallInfo): string | null {
-  if (call.toolName === "bash") {
+  if (call.name === "bash") {
     for (const pattern of DENY_LIST) {
-      if ((call.input.command ?? "").includes(pattern)) {
+      if (((call.input as any).command ?? "").includes(pattern)) {
         console.log(`\n\x1b[31m⛔ Blocked: '${pattern}'\x1b[0m`);
         return "Permission denied";
       }
@@ -412,7 +419,7 @@ function permissionHook(call: ToolCallInfo): string | null {
 
 // PreToolUse: log tool calls.
 function logHook(call: ToolCallInfo): null {
-  console.log(`\x1b[90m[HOOK] ${call.toolName}\x1b[0m`);
+  console.log(`\x1b[90m[HOOK] ${call.name}\x1b[0m`);
   return null;
 }
 
@@ -423,10 +430,11 @@ function contextInjectHook(_query: string): null {
 }
 
 // Stop: print tool call count.
-function summaryHook(messages: ModelMessage[]): null {
+function summaryHook(messages: Anthropic.MessageParam[]): null {
   const toolCount = messages.reduce(
     (n, m) =>
-      n + (Array.isArray(m.content) ? m.content.filter((b) => b.type === "tool-result").length : 0),
+      n +
+      (Array.isArray(m.content) ? m.content.filter((b) => b.type === "tool_result").length : 0),
     0,
   );
   console.log(`\x1b[90m[HOOK] Stop: session used ${toolCount} tool calls\x1b[0m`);
@@ -444,7 +452,7 @@ registerHook("Stop", summaryHook);
 
 let roundsSinceTodo = 0;
 
-async function agentLoop(messages: ModelMessage[]): Promise<string> {
+async function agentLoop(messages: Anthropic.MessageParam[]): Promise<string> {
   while (true) {
     // s05: nag reminder
     if (roundsSinceTodo >= 3 && messages.length) {
@@ -452,56 +460,56 @@ async function agentLoop(messages: ModelMessage[]): Promise<string> {
       roundsSinceTodo = 0;
     }
 
-    const result = await generateText({
-      model,
+    const response = await client.messages.create({
+      model: MODEL_ID,
       system: SYSTEM,
       messages,
       tools,
-      maxOutputTokens: 8000,
+      max_tokens: 8000,
     });
-    messages.push(...result.response.messages);
+    messages.push({ role: "assistant", content: response.content });
 
-    if (result.finishReason !== "tool-calls") {
+    if (response.stop_reason !== "tool_use") {
       const force = await triggerHooks("Stop", messages);
       if (force) {
         messages.push({ role: "user", content: force });
         continue;
       }
-      return result.text;
+      return textOf(response);
     }
 
     roundsSinceTodo += 1;
-    const results: ToolResultPart[] = [];
-    for (const call of result.toolCalls) {
-      if (call.dynamic) continue;
+    const results: Anthropic.ToolResultBlockParam[] = [];
+    for (const block of response.content) {
+      if (block.type !== "tool_use") continue;
 
-      const blocked = await triggerHooks("PreToolUse", call);
+      const blocked = await triggerHooks("PreToolUse", block);
       if (blocked) {
         results.push({
-          type: "tool-result",
-          toolCallId: call.toolCallId,
-          toolName: call.toolName,
-          output: { type: "text", value: blocked },
+          type: "tool_result",
+          tool_use_id: block.id,
+          content: blocked,
         });
         continue;
       }
 
-      const handler = TOOL_HANDLERS[call.toolName];
-      const output = handler ? await handler(call.input) : `Unknown: ${call.toolName}`;
+      const schema = TOOL_SCHEMAS[block.name];
+      const handler = TOOL_HANDLERS[block.name];
+      const output =
+        handler && schema ? await handler(schema.parse(block.input)) : `Unknown: ${block.name}`;
 
-      await triggerHooks("PostToolUse", call, output);
+      await triggerHooks("PostToolUse", block, output);
 
-      if (call.toolName === "todo_write") roundsSinceTodo = 0;
+      if (block.name === "todo_write") roundsSinceTodo = 0;
 
       results.push({
-        type: "tool-result",
-        toolCallId: call.toolCallId,
-        toolName: call.toolName,
-        output: { type: "text", value: output },
+        type: "tool_result",
+        tool_use_id: block.id,
+        content: output,
       });
     }
 
-    messages.push({ role: "tool", content: results });
+    messages.push({ role: "user", content: results });
   }
 }
 
@@ -518,7 +526,7 @@ rl.on("SIGINT", () => {
 console.log("s07: Skill Loading — catalog in SYSTEM, content on demand");
 console.log("Type a question, press Enter. Type q to quit.\n");
 
-const history: ModelMessage[] = [];
+const history: Anthropic.MessageParam[] = [];
 while (true) {
   let query: string;
   try {
