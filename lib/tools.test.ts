@@ -35,6 +35,6 @@ describe("textOf", () => {
 
   it("returns empty string when there is no text block", () => {
     const response = { content: [] } as unknown as Anthropic.Message;
-    expect(textOf(response)).toBe("");
+    expect(textOf(response)).toBe("[no text in response]");
   });
 });

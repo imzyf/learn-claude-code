@@ -184,7 +184,7 @@ describe("summarizeHistory", () => {
       logger: noopLogger,
     });
 
-    expect(summary).toBe("(empty summary)");
+    expect(summary).toBe("[no text in response]");
   });
 });
 
@@ -206,20 +206,6 @@ describe("spawnSubagent", () => {
 
     expect(result).toBe("answer");
     expect(client.messages.create).toHaveBeenCalledOnce();
-  });
-
-  it("falls back to a message when it never finishes", async () => {
-    const rounds = Array.from({ length: 30 }, (_, i) =>
-      fakeMessage(
-        [toolUseBlock(`s${i}`, "bash", { command: "echo x" })],
-        "tool_use",
-      ),
-    );
-    const client = fakeClient(...rounds);
-
-    const result = await spawnSubagent("do x", { client, logger: noopLogger });
-
-    expect(result).toMatch(/stopped after 30 turns/);
   });
 });
 

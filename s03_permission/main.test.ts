@@ -163,7 +163,7 @@ describe("agentLoop", () => {
     expect(result).toBe("stopped");
     expect(ask).not.toHaveBeenCalled();
     const toolResults = messages[2].content as Anthropic.ToolResultBlockParam[];
-    expect(toolResults[0].content).toBe("Permission denied.");
+    expect(toolResults[0].content).toBe("Permission denied by rule or user.");
   });
 
   it("denies a rule-matched call when the user says no", async () => {
@@ -188,7 +188,7 @@ describe("agentLoop", () => {
 
     expect(ask).toHaveBeenCalledOnce();
     const toolResults = messages[2].content as Anthropic.ToolResultBlockParam[];
-    expect(toolResults[0].content).toBe("Permission denied.");
+    expect(toolResults[0].content).toBe("Permission denied by rule or user.");
     // 越界写入被拦下，文件没有真的创建
     expect(fs.existsSync(path.join(process.cwd(), "escape.txt"))).toBe(false);
   });

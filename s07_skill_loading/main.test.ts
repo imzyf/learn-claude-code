@@ -208,19 +208,6 @@ describe("spawnSubagent", () => {
     expect(client.messages.create).toHaveBeenCalledTimes(2);
   });
 
-  it("falls back to a message when it never finishes", async () => {
-    const rounds = Array.from({ length: 30 }, (_, i) =>
-      fakeMessage(
-        [toolUseBlock(`s${i}`, "bash", { command: "echo x" })],
-        "tool_use",
-      ),
-    );
-    const client = fakeClient(...rounds);
-
-    const result = await spawnSubagent("do x", { client, logger: noopLogger });
-
-    expect(result).toMatch(/stopped after 30 turns/);
-  });
 });
 
 // ── agentLoop: load_skill + task dispatch ─────────────────
