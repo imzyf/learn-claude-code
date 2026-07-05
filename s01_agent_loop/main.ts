@@ -45,9 +45,14 @@ const tools: Anthropic.Tool[] = [
 ];
 
 // ── Tool execution ────────────────────────────────────────
-export function runBash(command: string, timeoutMs = 120_000): string {
+/** @internal 仅测试用，非公开 API */
+export function isDangerous(command: string): boolean {
   const dangerous = ["rm -rf /", "sudo", "shutdown", "reboot", "> /dev/"];
-  if (dangerous.some((d) => command.includes(d))) {
+  return dangerous.some((d) => command.includes(d));
+}
+
+export function runBash(command: string, timeoutMs = 120_000): string {
+  if (isDangerous(command)) {
     return "Error: Dangerous command blocked";
   }
   const r = spawnSync(command, {

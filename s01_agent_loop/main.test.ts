@@ -14,15 +14,28 @@ import {
   textBlock,
   toolUseBlock,
 } from "../lib/testing";
-import { agentLoop, runBash } from "./main";
+import { agentLoop, isDangerous, runBash } from "./main";
+
+// ── isDangerous ───────────────────────────────────────────
+// 危险字符串只喂给纯函数，永远不会到达真实 shell。
+describe("isDangerous", () => {
+  it("flags destructive commands", () => {
+    expect(isDangerous("rm -rf / --no-preserve-root")).toBe(true);
+    expect(isDangerous("sudo ls")).toBe(true);
+    expect(isDangerous("shutdown now")).toBe(true);
+  });
+
+  it("allows harmless commands", () => {
+    expect(isDangerous("echo hi")).toBe(false);
+    expect(isDangerous("ls -la")).toBe(false);
+  });
+});
 
 // ── runBash ───────────────────────────────────────────────
 describe("runBash", () => {
-  it("blocks dangerous commands", () => {
+  it("blocks before executing", () => {
+    // 用无害的哨兵命令验证拦截路径，不把 rm -rf / 交给真实 shell。
     expect(runBash("sudo ls")).toBe("Error: Dangerous command blocked");
-    expect(runBash("rm -rf / --no-preserve-root")).toBe(
-      "Error: Dangerous command blocked",
-    );
   });
 
   it("returns stdout of a normal command", () => {
