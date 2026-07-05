@@ -2,6 +2,8 @@ bin/.cache/
 node_modules/
 .log/
 .tmp/
+.transcripts/
+.task_outputs/
 .env
 .memory/
 .claude/memory.json

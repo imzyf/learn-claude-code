@@ -45,10 +45,9 @@ import * as path from "node:path";
 import * as readline from "node:readline/promises";
 import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
-import { createClient, MODEL_ID } from "../lib/model";
+import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
 import { zodTool, textOf } from "../lib/tools";
-
-const client = createClient();
+import { createLogger, type AgentLogger } from "../lib/logger";
 
 const WORKDIR = process.cwd();
 const SKILLS_DIR = path.join(WORKDIR, "skills");
@@ -57,13 +56,17 @@ const TOOL_RESULTS_DIR = path.join(WORKDIR, ".task_outputs", "tool-results");
 
 const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
+// client 与 logger 通过参数注入到 agentLoop / spawnSubagent。
+export type Deps = { client: ModelClient; logger: AgentLogger };
+
 // ═══════════════════════════════════════════════════════════
 //  FROM s07 (unchanged): Skill catalog + SYSTEM
 // ═══════════════════════════════════════════════════════════
 
-type Skill = { name: string; description: string; content: string };
+export type Skill = { name: string; description: string; content: string };
+export type SkillRegistry = Record<string, Skill>;
 
-function parseFrontmatter(text: string): { meta: Record<string, string>; body: string } {
+export function parseFrontmatter(text: string): { meta: Record<string, string>; body: string } {
   if (!text.startsWith("---")) return { meta: {}, body: text };
   const end = text.indexOf("---", 3);
   if (end === -1) return { meta: {}, body: text };
@@ -79,48 +82,45 @@ function parseFrontmatter(text: string): { meta: Record<string, string>; body: s
   return { meta, body: text.slice(end + 3).trim() };
 }
 
-const SKILL_REGISTRY: Record<string, Skill> = {};
-
-function scanSkills(): void {
-  if (!fs.existsSync(SKILLS_DIR)) return;
+// Scan a skills/ dir into a registry (pure: takes dir, returns registry).
+export function scanSkills(dir: string): SkillRegistry {
+  const registry: SkillRegistry = {};
+  if (!fs.existsSync(dir)) return registry;
   const entries = fs
-    .readdirSync(SKILLS_DIR, { withFileTypes: true })
+    .readdirSync(dir, { withFileTypes: true })
     .sort((a, b) => a.name.localeCompare(b.name));
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
-    const manifest = path.join(SKILLS_DIR, entry.name, "SKILL.md");
+    const manifest = path.join(dir, entry.name, "SKILL.md");
     if (!fs.existsSync(manifest)) continue;
     const raw = fs.readFileSync(manifest, "utf8");
     const { meta } = parseFrontmatter(raw);
     const name = meta.name ?? entry.name;
     const description = meta.description ?? (raw.split("\n")[0] ?? "").replace(/^#+/, "").trim();
-    SKILL_REGISTRY[name] = { name, description, content: raw };
+    registry[name] = { name, description, content: raw };
   }
+  return registry;
 }
 
-scanSkills();
-
-function listSkills(): string {
-  const skills = Object.values(SKILL_REGISTRY);
+export function listSkills(registry: SkillRegistry): string {
+  const skills = Object.values(registry);
   if (!skills.length) return "(no skills found)";
   return skills.map((s) => `- **${s.name}**: ${s.description}`).join("\n");
 }
 
-function loadSkill(name: string): string {
-  const skill = SKILL_REGISTRY[name];
+export function loadSkill(registry: SkillRegistry, name: string): string {
+  const skill = registry[name];
   if (!skill) return `Skill not found: ${name}`;
   return skill.content;
 }
 
-function buildSystem(): string {
+export function buildSystem(registry: SkillRegistry): string {
   return (
     `You are a coding agent at ${WORKDIR}. ` +
-    `Skills available:\n${listSkills()}\n` +
+    `Skills available:\n${listSkills(registry)}\n` +
     "Use load_skill to get full details when needed."
   );
 }
-
-const SYSTEM = buildSystem();
 
 // s08: subagent gets its own system prompt — no compact, no skill loading
 const SUB_SYSTEM =
@@ -132,7 +132,7 @@ const SUB_SYSTEM =
 //  FROM s02-s07 (unchanged): Basic Tools
 // ═══════════════════════════════════════════════════════════
 
-function runBash(command: string): string {
+export function runBash(command: string): string {
   const r = spawnSync(command, {
     shell: true,
     cwd: WORKDIR,
@@ -148,7 +148,7 @@ function runBash(command: string): string {
   return out ? out.slice(0, 50_000) : "(no output)";
 }
 
-function safePath(p: string): string {
+export function safePath(p: string): string {
   const resolved = path.resolve(WORKDIR, p);
   if (resolved !== WORKDIR && !resolved.startsWith(WORKDIR + path.sep)) {
     throw new Error(`Path escapes workspace: ${p}`);
@@ -156,7 +156,7 @@ function safePath(p: string): string {
   return resolved;
 }
 
-function runRead(p: string, limit?: number): string {
+export function runRead(p: string, limit?: number): string {
   try {
     let lines = fs.readFileSync(safePath(p), "utf8").split("\n");
     if (limit && limit < lines.length) {
@@ -168,7 +168,7 @@ function runRead(p: string, limit?: number): string {
   }
 }
 
-function runWrite(p: string, content: string): string {
+export function runWrite(p: string, content: string): string {
   try {
     const filePath = safePath(p);
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -179,7 +179,7 @@ function runWrite(p: string, content: string): string {
   }
 }
 
-function runEdit(p: string, oldText: string, newText: string): string {
+export function runEdit(p: string, oldText: string, newText: string): string {
   try {
     const filePath = safePath(p);
     const text = fs.readFileSync(filePath, "utf8");
@@ -194,7 +194,7 @@ function runEdit(p: string, oldText: string, newText: string): string {
   }
 }
 
-function runGlob(pattern: string): string {
+export function runGlob(pattern: string): string {
   try {
     const results = fs
       .globSync(pattern, { cwd: WORKDIR })
@@ -215,7 +215,7 @@ type Todo = z.infer<typeof todoItem>;
 
 let currentTodos: Todo[] = [];
 
-function normalizeTodos(todos: unknown): { todos?: Todo[]; error?: string } {
+export function normalizeTodos(todos: unknown): { todos?: Todo[]; error?: string } {
   if (typeof todos === "string") {
     try {
       todos = JSON.parse(todos);
@@ -230,7 +230,7 @@ function normalizeTodos(todos: unknown): { todos?: Todo[]; error?: string } {
   return { todos: parsed.data };
 }
 
-function runTodoWrite(todosInput: unknown): string {
+export function runTodoWrite(todosInput: unknown): string {
   const { todos, error } = normalizeTodos(todosInput);
   if (error || !todos) return error ?? "Error: invalid todos";
   currentTodos = todos;
@@ -255,11 +255,11 @@ const CONTEXT_LIMIT = 50_000;
 const KEEP_RECENT = 3;
 const PERSIST_THRESHOLD = 30_000;
 
-const estimateSize = (msgs: Anthropic.MessageParam[]): number => JSON.stringify(msgs).length;
+export const estimateSize = (msgs: Anthropic.MessageParam[]): number => JSON.stringify(msgs).length;
 
 // Replace an array's contents in place — callers hold the same reference
 // (mirrors Python's `messages[:] = ...`).
-function setMessages(messages: Anthropic.MessageParam[], next: Anthropic.MessageParam[]): void {
+export function setMessages(messages: Anthropic.MessageParam[], next: Anthropic.MessageParam[]): void {
   messages.splice(0, messages.length, ...next);
 }
 
@@ -276,7 +276,10 @@ const outputText = (part: Anthropic.ToolResultBlockParam): string =>
   typeof part.content === "string" ? part.content : JSON.stringify(part.content);
 
 // L1: snipCompact — trim middle messages
-function snipCompact(messages: Anthropic.MessageParam[], maxMessages = 50): Anthropic.MessageParam[] {
+export function snipCompact(
+  messages: Anthropic.MessageParam[],
+  maxMessages = 50,
+): Anthropic.MessageParam[] {
   if (messages.length <= maxMessages) return messages;
   const keepHead = 3;
   const keepTail = maxMessages - 3;
@@ -304,7 +307,9 @@ function snipCompact(messages: Anthropic.MessageParam[], maxMessages = 50): Anth
 }
 
 // L2: microCompact — old result placeholders
-function collectToolResults(messages: Anthropic.MessageParam[]): Anthropic.ToolResultBlockParam[] {
+export function collectToolResults(
+  messages: Anthropic.MessageParam[],
+): Anthropic.ToolResultBlockParam[] {
   const parts: Anthropic.ToolResultBlockParam[] = [];
   for (const m of messages) {
     if (m.role !== "user" || !Array.isArray(m.content)) continue;
@@ -315,7 +320,7 @@ function collectToolResults(messages: Anthropic.MessageParam[]): Anthropic.ToolR
   return parts;
 }
 
-function microCompact(messages: Anthropic.MessageParam[]): Anthropic.MessageParam[] {
+export function microCompact(messages: Anthropic.MessageParam[]): Anthropic.MessageParam[] {
   const toolResults = collectToolResults(messages);
   if (toolResults.length <= KEEP_RECENT) return messages;
   for (const part of toolResults.slice(0, -KEEP_RECENT)) {
@@ -327,7 +332,7 @@ function microCompact(messages: Anthropic.MessageParam[]): Anthropic.MessagePara
 }
 
 // L3: toolResultBudget — persist large results to disk
-function persistLargeOutput(toolUseId: string, output: string): string {
+export function persistLargeOutput(toolUseId: string, output: string): string {
   if (output.length <= PERSIST_THRESHOLD) return output;
   fs.mkdirSync(TOOL_RESULTS_DIR, { recursive: true });
   const filePath = path.join(TOOL_RESULTS_DIR, `${toolUseId}.txt`);
@@ -335,7 +340,7 @@ function persistLargeOutput(toolUseId: string, output: string): string {
   return `<persisted-output>\nFull output: ${filePath}\nPreview:\n${output.slice(0, 2000)}\n</persisted-output>`;
 }
 
-function toolResultBudget(
+export function toolResultBudget(
   messages: Anthropic.MessageParam[],
   maxBytes = 200_000,
 ): Anthropic.MessageParam[] {
@@ -365,33 +370,42 @@ function writeTranscript(messages: Anthropic.MessageParam[]): string {
   return filePath;
 }
 
-async function summarizeHistory(messages: Anthropic.MessageParam[]): Promise<string> {
+export async function summarizeHistory(
+  messages: Anthropic.MessageParam[],
+  deps: Deps,
+): Promise<string> {
+  const { client, logger } = deps;
   const conversation = JSON.stringify(messages).slice(0, 80_000);
   const prompt =
     "Summarize this coding-agent conversation so work can continue.\n" +
     "Preserve: 1. current goal, 2. key findings/decisions, 3. files read/changed, " +
     "4. remaining work, 5. user constraints.\nBe compact but concrete.\n\n" +
     conversation;
+  const request: Anthropic.MessageParam[] = [{ role: "user", content: prompt }];
+  logger.request(request);
   const response = await client.messages.create({
     model: MODEL_ID,
     max_tokens: 2000,
-    messages: [{ role: "user", content: prompt }],
+    messages: request,
   });
+  logger.response(response);
   return textOf(response).trim() || "(empty summary)";
 }
 
-async function compactHistory(
+export async function compactHistory(
   messages: Anthropic.MessageParam[],
+  deps: Deps,
 ): Promise<Anthropic.MessageParam[]> {
   const transcriptPath = writeTranscript(messages);
   console.log(`[transcript saved: ${transcriptPath}]`);
-  const summary = await summarizeHistory(messages);
+  const summary = await summarizeHistory(messages, deps);
   return [{ role: "user", content: `[Compacted]\n\n${summary}` }];
 }
 
 // Emergency: reactiveCompact — on API error
-async function reactiveCompact(
+export async function reactiveCompact(
   messages: Anthropic.MessageParam[],
+  deps: Deps,
 ): Promise<Anthropic.MessageParam[]> {
   writeTranscript(messages);
   let tailStart = Math.max(0, messages.length - 5);
@@ -403,7 +417,7 @@ async function reactiveCompact(
   ) {
     tailStart -= 1;
   }
-  const summary = await summarizeHistory(messages.slice(0, tailStart));
+  const summary = await summarizeHistory(messages.slice(0, tailStart), deps);
   return [{ role: "user", content: `[Reactive compact]\n\n${summary}` }, ...messages.slice(tailStart)];
 }
 
@@ -474,25 +488,32 @@ const SUB_HANDLERS: Partial<Record<string, (input: any) => string>> = {
   glob: ({ pattern }) => runGlob(pattern),
 };
 
+// agentLoop 需要的完整依赖：基础 Deps + 技能表 + 本轮 system prompt。
+export type LoopDeps = Deps & { skills: SkillRegistry; system: string };
+
 // compact is NOT here — the loop intercepts it (it rewrites messages[])
-const TOOL_HANDLERS: Partial<Record<string, (input: any) => string | Promise<string>>> = {
+const TOOL_HANDLERS: Partial<
+  Record<string, (input: any, deps: LoopDeps) => string | Promise<string>>
+> = {
   ...SUB_HANDLERS,
   todo_write: ({ todos }) => runTodoWrite(todos),
-  task: ({ description }) => spawnSubagent(description),
-  load_skill: ({ name }) => loadSkill(name),
+  task: ({ description }, deps) => spawnSubagent(description, deps),
+  load_skill: ({ name }, deps) => loadSkill(deps.skills, name),
 };
 
 // ═══════════════════════════════════════════════════════════
 //  FROM s06-s07 (unchanged): Subagent
 // ═══════════════════════════════════════════════════════════
 
-async function spawnSubagent(description: string): Promise<string> {
+export async function spawnSubagent(description: string, deps: Deps): Promise<string> {
+  const { client, logger } = deps;
   console.log(`\n\x1b[35m[Subagent spawned]\x1b[0m`);
   const messages: Anthropic.MessageParam[] = [{ role: "user", content: description }]; // fresh context
   let lastText = "";
 
   for (let turn = 0; turn < 30; turn++) {
     // safety limit
+    logger.request(messages);
     const response = await client.messages.create({
       model: MODEL_ID,
       system: SUB_SYSTEM,
@@ -500,6 +521,7 @@ async function spawnSubagent(description: string): Promise<string> {
       tools: subTools,
       max_tokens: 8000,
     });
+    logger.response(response);
     messages.push({ role: "assistant", content: response.content });
     const text = textOf(response);
     if (text) lastText = text;
@@ -509,7 +531,7 @@ async function spawnSubagent(description: string): Promise<string> {
     for (const block of response.content) {
       if (block.type !== "tool_use") continue;
 
-      const blocked = triggerHooks("PreToolUse", block);
+      const blocked = await triggerHooks("PreToolUse", block);
       if (blocked) {
         results.push({
           type: "tool_result",
@@ -522,7 +544,8 @@ async function spawnSubagent(description: string): Promise<string> {
       const schema = FILE_SCHEMAS[block.name];
       const handler = SUB_HANDLERS[block.name];
       const output = handler && schema ? handler(schema.parse(block.input)) : `Unknown: ${block.name}`;
-      triggerHooks("PostToolUse", block, output);
+      logger.toolResult(block.name, output);
+      await triggerHooks("PostToolUse", block, output);
       console.log(`  \x1b[90m[sub] ${block.name}: ${output.slice(0, 100)}\x1b[0m`);
       results.push({
         type: "tool_result",
@@ -542,22 +565,32 @@ async function spawnSubagent(description: string): Promise<string> {
 //  FROM s04 (reduced): Hooks — s08 keeps only PreToolUse/PostToolUse
 // ═══════════════════════════════════════════════════════════
 
-type Hook = (...args: any[]) => string | null;
+// `...args: any[]` mirrors Python's `callback(*args)`.
+type Hook = (...args: any[]) => string | null | Promise<string | null>;
 type ToolCallInfo = Anthropic.ToolUseBlock;
 
 const HOOKS: Record<string, Hook[]> = { PreToolUse: [], PostToolUse: [] };
 
-function triggerHooks(event: string, ...args: any[]): string | null {
+export function registerHook(event: string, callback: Hook): void {
+  HOOKS[event].push(callback);
+}
+
+export async function triggerHooks(event: string, ...args: any[]): Promise<string | null> {
   for (const callback of HOOKS[event]) {
-    const result = callback(...args);
+    const result = await callback(...args);
     if (result != null) return result;
   }
   return null;
 }
 
+// 测试用：清空注册表，隔离用例（入口通过 registerDefaultHooks 注册）。
+export function clearHooks(): void {
+  for (const event of Object.keys(HOOKS)) HOOKS[event] = [];
+}
+
 const DENY_LIST = ["rm -rf /", "sudo", "shutdown"];
 
-function permissionHook(call: ToolCallInfo): string | null {
+export function permissionHook(call: ToolCallInfo): string | null {
   if (call.name === "bash") {
     for (const pattern of DENY_LIST) {
       if (((call.input as any).command ?? "").includes(pattern)) return "Permission denied";
@@ -566,12 +599,15 @@ function permissionHook(call: ToolCallInfo): string | null {
   return null;
 }
 
-function logHook(call: ToolCallInfo): null {
+export function logHook(call: ToolCallInfo): null {
   console.log(`\x1b[90m[HOOK] ${call.name}\x1b[0m`);
   return null;
 }
 
-HOOKS.PreToolUse.push(permissionHook, logHook);
+export function registerDefaultHooks(): void {
+  registerHook("PreToolUse", permissionHook);
+  registerHook("PreToolUse", logHook);
+}
 
 // ═══════════════════════════════════════════════════════════
 //  agentLoop — s08 core: run compaction pipeline before LLM
@@ -579,7 +615,11 @@ HOOKS.PreToolUse.push(permissionHook, logHook);
 
 const MAX_REACTIVE_RETRIES = 1; // retry limit for reactive compact
 
-async function agentLoop(messages: Anthropic.MessageParam[]): Promise<string> {
+export async function agentLoop(
+  messages: Anthropic.MessageParam[],
+  deps: LoopDeps,
+): Promise<string> {
+  const { client, logger, system } = deps;
   let reactiveRetries = 0;
   while (true) {
     // s08 change: three preprocessors (0 API calls, cheap first)
@@ -591,18 +631,20 @@ async function agentLoop(messages: Anthropic.MessageParam[]): Promise<string> {
     // s08 change: size still over threshold → LLM summary (1 API call)
     if (estimateSize(messages) > CONTEXT_LIMIT) {
       console.log("[auto compact]");
-      setMessages(messages, await compactHistory(messages));
+      setMessages(messages, await compactHistory(messages, deps));
     }
 
     let response;
     try {
+      logger.request(messages);
       response = await client.messages.create({
         model: MODEL_ID,
-        system: SYSTEM,
+        system,
         messages,
         tools,
         max_tokens: 8000,
       });
+      logger.response(response);
       reactiveRetries = 0; // reset on successful API call
     } catch (e) {
       const msg = errMsg(e).toLowerCase();
@@ -611,7 +653,7 @@ async function agentLoop(messages: Anthropic.MessageParam[]): Promise<string> {
         reactiveRetries < MAX_REACTIVE_RETRIES
       ) {
         console.log("[reactive compact]");
-        setMessages(messages, await reactiveCompact(messages));
+        setMessages(messages, await reactiveCompact(messages, deps));
         reactiveRetries += 1;
         continue;
       }
@@ -632,12 +674,12 @@ async function agentLoop(messages: Anthropic.MessageParam[]): Promise<string> {
       // tool result (as the Python does) would orphan it and the API would
       // reject the next request — the summary alone continues the loop.
       if (block.name === "compact") {
-        setMessages(messages, await compactHistory(messages));
+        setMessages(messages, await compactHistory(messages, deps));
         didCompact = true;
         break; // end current turn, start fresh with compacted context
       }
 
-      const blocked = triggerHooks("PreToolUse", block);
+      const blocked = await triggerHooks("PreToolUse", block);
       if (blocked) {
         results.push({
           type: "tool_result",
@@ -650,8 +692,9 @@ async function agentLoop(messages: Anthropic.MessageParam[]): Promise<string> {
       const schema = TOOL_SCHEMAS[block.name];
       const handler = TOOL_HANDLERS[block.name];
       const output =
-        handler && schema ? await handler(schema.parse(block.input)) : `Unknown: ${block.name}`;
-      triggerHooks("PostToolUse", block, output);
+        handler && schema ? await handler(schema.parse(block.input), deps) : `Unknown: ${block.name}`;
+      logger.toolResult(block.name, output);
+      await triggerHooks("PostToolUse", block, output);
       console.log(output.slice(0, 200));
       results.push({
         type: "tool_result",
@@ -666,32 +709,43 @@ async function agentLoop(messages: Anthropic.MessageParam[]): Promise<string> {
 }
 
 // ── Entry point ──────────────────────────────────────────
-const rl = readline.createInterface({
-  input: process.stdin,
-  output: process.stdout,
-});
-rl.on("SIGINT", () => {
-  rl.close();
-  process.exit(0);
-});
+// import.meta.main 只在文件被直接运行时为 true。
+if (import.meta.main) {
+  const client = createClient();
+  const logger = createLogger(import.meta.dirname);
+  const skills = scanSkills(SKILLS_DIR);
+  const system = buildSystem(skills);
+  logger.config({ model: MODEL_ID, system, tools });
+  registerDefaultHooks();
 
-console.log("s08: Context Compact — four-layer compaction pipeline");
-console.log("输入问题，回车发送。输入 q 退出。\n");
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+  rl.on("SIGINT", () => {
+    rl.close();
+    process.exit(0);
+  });
 
-const history: Anthropic.MessageParam[] = [];
-while (true) {
-  let query: string;
-  try {
-    query = await rl.question("\x1b[36ms08 >> \x1b[0m");
-  } catch {
-    break; // stdin closed (Ctrl+D)
+  console.log("s08: Context Compact — four-layer compaction pipeline");
+  console.log("输入问题，回车发送。输入 q 退出。\n");
+
+  const history: Anthropic.MessageParam[] = [];
+  while (true) {
+    let query: string;
+    try {
+      query = await rl.question("\x1b[36ms08 >> \x1b[0m");
+    } catch {
+      break; // stdin closed (Ctrl+D)
+    }
+    const q = query.trim().toLowerCase();
+    if (q === "" || q === "q" || q === "exit") break;
+
+    logger.userInput(query);
+    history.push({ role: "user", content: query });
+    const finalText = await agentLoop(history, { client, logger, skills, system });
+    console.log(finalText);
+    console.log();
   }
-  const q = query.trim().toLowerCase();
-  if (q === "" || q === "q" || q === "exit") break;
-
-  history.push({ role: "user", content: query });
-  const finalText = await agentLoop(history);
-  console.log(finalText);
-  console.log();
+  rl.close();
 }
-rl.close();
