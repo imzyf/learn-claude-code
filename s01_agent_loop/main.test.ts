@@ -5,8 +5,9 @@
  * agentLoop：用 fake client 按序返回脚本化响应，
  *            验证「text 即停止、tool_use 即执行并回灌」这个核心循环。
  */
-import { describe, expect, it, vi } from "vitest";
+
 import type Anthropic from "@anthropic-ai/sdk";
+import { describe, expect, it, vi } from "vitest";
 import {
   fakeClient,
   fakeMessage,
@@ -97,15 +98,15 @@ describe("agentLoop", () => {
 
     // 历史：user → assistant(tool_use) → user(tool_result) → assistant(text)
     expect(messages).toHaveLength(4);
-    const toolResults = messages[2]
-      .content as Anthropic.ToolResultBlockParam[];
+    const toolResults = messages[2].content as Anthropic.ToolResultBlockParam[];
     expect(messages[2].role).toBe("user");
     expect(toolResults).toHaveLength(1);
     expect(toolResults[0].tool_use_id).toBe("tu_1");
     expect(toolResults[0].content).toBe("hello"); // 命令被真实执行
 
     // 第二次 API 调用带上了 tool_result
-    const secondCall = vi.mocked(client.messages.create).mock.calls.length === 2;
+    const secondCall =
+      vi.mocked(client.messages.create).mock.calls.length === 2;
     expect(secondCall).toBe(true);
   });
 
@@ -128,8 +129,7 @@ describe("agentLoop", () => {
 
     // 历史：user → assistant(tool_use ×2) → user(tool_result ×2) → assistant(text)
     // 同一次回复的多个工具，结果合并进 messages[2] 这一条 user 消息，按调用顺序排列
-    const toolResults = messages[2]
-      .content as Anthropic.ToolResultBlockParam[];
+    const toolResults = messages[2].content as Anthropic.ToolResultBlockParam[];
     expect(toolResults.map((r) => r.tool_use_id)).toEqual(["tu_a", "tu_b"]);
     expect(toolResults.map((r) => r.content)).toEqual(["first", "second"]);
   });
@@ -144,7 +144,10 @@ describe("agentLoop", () => {
     );
 
     await expect(
-      agentLoop([{ role: "user", content: "x" }], { client, logger: noopLogger }),
+      agentLoop([{ role: "user", content: "x" }], {
+        client,
+        logger: noopLogger,
+      }),
     ).rejects.toThrow();
   });
 });

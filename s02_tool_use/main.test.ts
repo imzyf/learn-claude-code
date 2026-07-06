@@ -7,8 +7,8 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { describe, expect, it } from "vitest";
 import type Anthropic from "@anthropic-ai/sdk";
+import { describe, expect, it } from "vitest";
 import {
   fakeClient,
   fakeMessage,
@@ -117,7 +117,9 @@ describe("runEdit", () => {
 
   it("returns an error when the text is not found", () => {
     fs.writeFileSync(path.join(tmp, "miss.txt"), "abc");
-    expect(runEdit(rel("miss.txt"), "zzz", "x")).toMatch(/^Error: text not found/);
+    expect(runEdit(rel("miss.txt"), "zzz", "x")).toMatch(
+      /^Error: text not found/,
+    );
   });
 
   it("returns an error for a missing file", () => {
@@ -168,7 +170,10 @@ describe("agentLoop", () => {
       fakeMessage(
         [
           toolUseBlock("tu_a", "bash", { command: "echo hi" }),
-          toolUseBlock("tu_b", "write_file", { path: rel("mix.txt"), content: "ok" }),
+          toolUseBlock("tu_b", "write_file", {
+            path: rel("mix.txt"),
+            content: "ok",
+          }),
         ],
         "tool_use",
       ),
@@ -192,9 +197,7 @@ describe("agentLoop", () => {
       fakeMessage([toolUseBlock("tu_x", "no_such_tool", {})], "tool_use"),
       fakeMessage([textBlock("recovered")], "end_turn"),
     );
-    const messages: Anthropic.MessageParam[] = [
-      { role: "user", content: "x" },
-    ];
+    const messages: Anthropic.MessageParam[] = [{ role: "user", content: "x" }];
 
     const result = await agentLoop(messages, { client, logger: noopLogger });
 
@@ -212,7 +215,10 @@ describe("agentLoop", () => {
     );
 
     await expect(
-      agentLoop([{ role: "user", content: "x" }], { client, logger: noopLogger }),
+      agentLoop([{ role: "user", content: "x" }], {
+        client,
+        logger: noopLogger,
+      }),
     ).rejects.toThrow();
   });
 });

@@ -31,7 +31,7 @@ import * as readline from "node:readline/promises";
 import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
 import { createClient, MODEL_ID } from "../lib/model";
-import { zodTool, textOf } from "../lib/tools";
+import { textOf, zodTool } from "../lib/tools";
 
 const client = createClient();
 
@@ -62,7 +62,11 @@ type Task = {
 
 const taskPath = (taskId: string) => path.join(TASKS_DIR, `${taskId}.json`);
 
-function createTask(subject: string, description = "", blockedBy: string[] = []): Task {
+function createTask(
+  subject: string,
+  description = "",
+  blockedBy: string[] = [],
+): Task {
   const task: Task = {
     id: `task_${Math.floor(Date.now() / 1000)}_${String(Math.floor(Math.random() * 10_000)).padStart(4, "0")}`,
     subject,
@@ -88,7 +92,10 @@ function listTasks(): Task[] {
     .readdirSync(TASKS_DIR)
     .filter((f) => f.startsWith("task_") && f.endsWith(".json"))
     .sort()
-    .map((f) => JSON.parse(fs.readFileSync(path.join(TASKS_DIR, f), "utf8")) as Task);
+    .map(
+      (f) =>
+        JSON.parse(fs.readFileSync(path.join(TASKS_DIR, f), "utf8")) as Task,
+    );
 }
 
 function getTask(taskId: string): string {
@@ -121,7 +128,7 @@ function claimTask(taskId: string, owner = "agent"): string {
     const parts: string[] = [];
     if (deps.length) parts.push(`blocked by: [${deps.join(", ")}]`);
     if (missing.length) parts.push(`missing deps: [${missing.join(", ")}]`);
-    return "Cannot start — " + parts.join(", ");
+    return `Cannot start — ${parts.join(", ")}`;
   }
   task.owner = owner;
   task.status = "in_progress";
@@ -138,7 +145,9 @@ function completeTask(taskId: string): string {
   task.status = "completed";
   saveTask(task);
   const unblocked = listTasks()
-    .filter((t) => t.status === "pending" && t.blockedBy.length > 0 && canStart(t.id))
+    .filter(
+      (t) => t.status === "pending" && t.blockedBy.length > 0 && canStart(t.id),
+    )
     .map((t) => t.subject);
   console.log(`  \x1b[32m[complete] ${task.subject} ✓\x1b[0m`);
   let msg = `Completed ${task.id} (${task.subject})`;
@@ -166,7 +175,11 @@ const PROMPT_SECTIONS = {
 type Context = { memories: string };
 
 function assembleSystemPrompt(context: Context): string {
-  const sections = [PROMPT_SECTIONS.identity, PROMPT_SECTIONS.tools, PROMPT_SECTIONS.workspace];
+  const sections = [
+    PROMPT_SECTIONS.identity,
+    PROMPT_SECTIONS.tools,
+    PROMPT_SECTIONS.workspace,
+  ];
   if (context.memories) {
     sections.push(`Relevant memories:\n${context.memories}`);
   }
@@ -218,7 +231,10 @@ function runRead(p: string, limit?: number): string {
   try {
     let lines = fs.readFileSync(safePath(p), "utf8").split("\n");
     if (limit && limit < lines.length) {
-      lines = [...lines.slice(0, limit), `... (${lines.length - limit} more lines)`];
+      lines = [
+        ...lines.slice(0, limit),
+        `... (${lines.length - limit} more lines)`,
+      ];
     }
     return lines.join("\n");
   } catch (e) {
@@ -269,7 +285,10 @@ class MessageBus {
       ts: Date.now() / 1000,
       metadata,
     };
-    fs.appendFileSync(path.join(MAILBOX_DIR, `${toAgent}.jsonl`), JSON.stringify(msg) + "\n");
+    fs.appendFileSync(
+      path.join(MAILBOX_DIR, `${toAgent}.jsonl`),
+      `${JSON.stringify(msg)}\n`,
+    );
     console.log(
       `  \x1b[33m[bus] ${fromAgent} → ${toAgent}: (${msgType}) ${content.slice(0, 50)}\x1b[0m`,
     );
@@ -311,7 +330,11 @@ const newRequestId = () =>
   `req_${String(Math.floor(Math.random() * 1_000_000)).padStart(6, "0")}`;
 
 // Correlate a response to the original request via request_id.
-function matchResponse(responseType: string, requestId: string, approve: boolean): void {
+function matchResponse(
+  responseType: string,
+  requestId: string,
+  approve: boolean,
+): void {
   const state = pendingRequests.get(requestId);
   if (!state) {
     console.log(`  \x1b[31m[protocol] unknown request_id: ${requestId}\x1b[0m`);
@@ -323,7 +346,10 @@ function matchResponse(responseType: string, requestId: string, approve: boolean
     );
     return;
   }
-  if (state.type === "plan_approval" && responseType !== "plan_approval_response") {
+  if (
+    state.type === "plan_approval" &&
+    responseType !== "plan_approval_response"
+  ) {
     console.log(
       `  \x1b[31m[protocol] type mismatch: expected plan_approval_response, got ${responseType}\x1b[0m`,
     );
@@ -380,17 +406,28 @@ async function idlePoll(
       for (const msg of inbox) {
         if (msg.type === "shutdown_request") {
           const reqId = String(msg.metadata?.request_id ?? "");
-          BUS.send(name, "lead", "Shutting down gracefully.", "shutdown_response", {
-            request_id: reqId,
-            approve: true,
-          });
-          console.log(`  \x1b[35m[protocol] ${name} approved shutdown in idle (${reqId})\x1b[0m`);
+          BUS.send(
+            name,
+            "lead",
+            "Shutting down gracefully.",
+            "shutdown_response",
+            {
+              request_id: reqId,
+              approve: true,
+            },
+          );
+          console.log(
+            `  \x1b[35m[protocol] ${name} approved shutdown in idle (${reqId})\x1b[0m`,
+          );
           return "shutdown";
         }
       }
 
       // Non-protocol inbox: inject and resume work
-      messages.push({ role: "user", content: `<inbox>${JSON.stringify(inbox)}</inbox>` });
+      messages.push({
+        role: "user",
+        content: `<inbox>${JSON.stringify(inbox)}</inbox>`,
+      });
       console.log(`  \x1b[36m[idle] ${name} found inbox messages\x1b[0m`);
       return "work";
     }
@@ -405,7 +442,9 @@ async function idlePoll(
           role: "user",
           content: `<auto-claimed>Task ${task.id}: ${task.subject}</auto-claimed>`,
         });
-        console.log(`  \x1b[32m[idle] ${name} auto-claimed: ${task.subject}\x1b[0m`);
+        console.log(
+          `  \x1b[32m[idle] ${name} auto-claimed: ${task.subject}\x1b[0m`,
+        );
         return "work";
       }
       console.log(`  \x1b[33m[idle] ${name} claim failed: ${result}\x1b[0m`);
@@ -420,7 +459,11 @@ async function idlePoll(
 //  Teammate (s15 + s16 + s17)
 // ═══════════════════════════════════════════════════════════
 
-function spawnTeammateThread(name: string, role: string, prompt: string): string {
+function spawnTeammateThread(
+  name: string,
+  role: string,
+  prompt: string,
+): string {
   if (activeTeammates.has(name)) {
     return `Teammate '${name}' already exists`;
   }
@@ -431,7 +474,10 @@ function spawnTeammateThread(name: string, role: string, prompt: string): string
     `Check inbox for protocol messages.`;
 
   // Dispatch incoming protocol messages by type. Returns true to stop.
-  const handleInboxMessage = (msg: BusMessage, messages: Anthropic.MessageParam[]): boolean => {
+  const handleInboxMessage = (
+    msg: BusMessage,
+    messages: Anthropic.MessageParam[],
+  ): boolean => {
     const reqId = String(msg.metadata?.request_id ?? "");
 
     if (msg.type === "shutdown_request") {
@@ -439,7 +485,9 @@ function spawnTeammateThread(name: string, role: string, prompt: string): string
         request_id: reqId,
         approve: true,
       });
-      console.log(`  \x1b[35m[protocol] ${name} approved shutdown (${reqId})\x1b[0m`);
+      console.log(
+        `  \x1b[35m[protocol] ${name} approved shutdown (${reqId})\x1b[0m`,
+      );
       return true;
     }
 
@@ -458,7 +506,10 @@ function spawnTeammateThread(name: string, role: string, prompt: string): string
   const subBashSchema = z.object({ command: z.string() });
   const subReadSchema = z.object({ path: z.string() });
   const subWriteSchema = z.object({ path: z.string(), content: z.string() });
-  const subSendMessageSchema = z.object({ to: z.string(), content: z.string() });
+  const subSendMessageSchema = z.object({
+    to: z.string(),
+    content: z.string(),
+  });
   const subSubmitPlanSchema = z.object({ plan: z.string() });
   const subListTasksSchema = z.object({});
   const subClaimTaskSchema = z.object({ task_id: z.string() });
@@ -468,12 +519,24 @@ function spawnTeammateThread(name: string, role: string, prompt: string): string
     zodTool("bash", "Run a shell command.", subBashSchema),
     zodTool("read_file", "Read file contents.", subReadSchema),
     zodTool("write_file", "Write content to a file.", subWriteSchema),
-    zodTool("send_message", "Send a message to another agent.", subSendMessageSchema),
-    zodTool("submit_plan", "Submit a plan for Lead approval.", subSubmitPlanSchema),
+    zodTool(
+      "send_message",
+      "Send a message to another agent.",
+      subSendMessageSchema,
+    ),
+    zodTool(
+      "submit_plan",
+      "Submit a plan for Lead approval.",
+      subSubmitPlanSchema,
+    ),
     // s17 new: teammates can list, claim, and complete tasks
     zodTool("list_tasks", "List all tasks on the board.", subListTasksSchema),
     zodTool("claim_task", "Claim a pending task.", subClaimTaskSchema),
-    zodTool("complete_task", "Mark an in-progress task as completed.", subCompleteTaskSchema),
+    zodTool(
+      "complete_task",
+      "Mark an in-progress task as completed.",
+      subCompleteTaskSchema,
+    ),
   ];
   const subSchemas: Partial<Record<string, z.ZodObject>> = {
     bash: subBashSchema,
@@ -507,7 +570,9 @@ function spawnTeammateThread(name: string, role: string, prompt: string): string
   };
 
   const run = async () => {
-    const messages: Anthropic.MessageParam[] = [{ role: "user", content: prompt }];
+    const messages: Anthropic.MessageParam[] = [
+      { role: "user", content: prompt },
+    ];
     let lastText = "";
     let shouldShutdown = false;
 
@@ -540,7 +605,7 @@ function spawnTeammateThread(name: string, role: string, prompt: string): string
           });
         }
 
-        let response;
+        let response: Anthropic.Message;
         try {
           response = await client.messages.create({
             model: MODEL_ID,
@@ -562,7 +627,8 @@ function spawnTeammateThread(name: string, role: string, prompt: string): string
           if (block.type !== "tool_use") continue;
           const schema = subSchemas[block.name];
           const handler = subHandlers[block.name];
-          const output = handler && schema ? handler(schema.parse(block.input)) : "Unknown";
+          const output =
+            handler && schema ? handler(schema.parse(block.input)) : "Unknown";
           results.push({
             type: "tool_result",
             tool_use_id: block.id,
@@ -603,7 +669,9 @@ function teammateSubmitPlan(fromName: string, plan: string): string {
     payload: plan,
     createdAt: Date.now() / 1000,
   });
-  BUS.send(fromName, "lead", plan, "plan_approval_request", { request_id: reqId });
+  BUS.send(fromName, "lead", plan, "plan_approval_request", {
+    request_id: reqId,
+  });
   return `Plan submitted (${reqId}). Waiting for approval...`;
 }
 
@@ -622,10 +690,18 @@ function runRequestShutdown(teammate: string): string {
     payload: "",
     createdAt: Date.now() / 1000,
   });
-  BUS.send("lead", teammate, "Please shut down gracefully.", "shutdown_request", {
-    request_id: reqId,
-  });
-  console.log(`  \x1b[35m[protocol] shutdown_request → ${teammate} (${reqId})\x1b[0m`);
+  BUS.send(
+    "lead",
+    teammate,
+    "Please shut down gracefully.",
+    "shutdown_request",
+    {
+      request_id: reqId,
+    },
+  );
+  console.log(
+    `  \x1b[35m[protocol] shutdown_request → ${teammate} (${reqId})\x1b[0m`,
+  );
   return `Shutdown request sent to ${teammate} (req: ${reqId})`;
 }
 
@@ -635,13 +711,23 @@ function runRequestPlan(teammate: string, task: string): string {
   return `Asked ${teammate} to submit a plan`;
 }
 
-function runReviewPlan(requestId: string, approve: boolean, feedback = ""): string {
+function runReviewPlan(
+  requestId: string,
+  approve: boolean,
+  feedback = "",
+): string {
   const state = pendingRequests.get(requestId);
   if (!state) return `Request ${requestId} not found`;
-  if (state.status !== "pending") return `Request ${requestId} already ${state.status}`;
+  if (state.status !== "pending")
+    return `Request ${requestId} already ${state.status}`;
   state.status = approve ? "approved" : "rejected";
-  BUS.send("lead", state.sender, feedback || (approve ? "Approved" : "Rejected"),
-    "plan_approval_response", { request_id: requestId, approve });
+  BUS.send(
+    "lead",
+    state.sender,
+    feedback || (approve ? "Approved" : "Rejected"),
+    "plan_approval_response",
+    { request_id: requestId, approve },
+  );
   const icon = approve ? "✓" : "✗";
   console.log(`  \x1b[32m[protocol] plan ${icon} (${requestId})\x1b[0m`);
   return `Plan ${approve ? "approved" : "rejected"} (${requestId})`;
@@ -649,7 +735,11 @@ function runReviewPlan(requestId: string, approve: boolean, feedback = ""): stri
 
 // ── Basic tool handlers ──
 
-function runCreateTask(subject: string, description = "", blockedBy?: string[]): string {
+function runCreateTask(
+  subject: string,
+  description = "",
+  blockedBy?: string[],
+): string {
   const task = createTask(subject, description, blockedBy ?? []);
   const deps = blockedBy?.length ? ` (blockedBy: ${blockedBy.join(", ")})` : "";
   console.log(`  \x1b[34m[create] ${task.subject}${deps}\x1b[0m`);
@@ -694,7 +784,10 @@ function runCheckInbox(): string {
 // ── Tool definitions ──
 
 const bashSchema = z.object({ command: z.string() });
-const readSchema = z.object({ path: z.string(), limit: z.number().int().optional() });
+const readSchema = z.object({
+  path: z.string(),
+  limit: z.number().int().optional(),
+});
 const writeSchema = z.object({ path: z.string(), content: z.string() });
 const createTaskSchema = z.object({
   subject: z.string(),
@@ -729,7 +822,11 @@ const tools: Anthropic.Tool[] = [
   zodTool("get_task", "Get full details of a specific task.", getTaskSchema),
   zodTool("claim_task", "Claim a pending task.", claimTaskSchema),
   zodTool("complete_task", "Complete an in-progress task.", completeTaskSchema),
-  zodTool("spawn_teammate", "Spawn an autonomous teammate agent.", spawnTeammateSchema),
+  zodTool(
+    "spawn_teammate",
+    "Spawn an autonomous teammate agent.",
+    spawnTeammateSchema,
+  ),
   zodTool("send_message", "Send message to a teammate.", sendMessageSchema),
   zodTool(
     "check_inbox",
@@ -741,8 +838,16 @@ const tools: Anthropic.Tool[] = [
     "Request a teammate to shut down gracefully.",
     requestShutdownSchema,
   ),
-  zodTool("request_plan", "Ask a teammate to submit a plan for review.", requestPlanSchema),
-  zodTool("review_plan", "Approve or reject a submitted plan.", reviewPlanSchema),
+  zodTool(
+    "request_plan",
+    "Ask a teammate to submit a plan for review.",
+    requestPlanSchema,
+  ),
+  zodTool(
+    "review_plan",
+    "Approve or reject a submitted plan.",
+    reviewPlanSchema,
+  ),
 ];
 
 const TOOL_SCHEMAS: Partial<Record<string, z.ZodObject>> = {
@@ -772,7 +877,8 @@ const TOOL_HANDLERS: Partial<Record<string, (input: any) => string>> = {
   get_task: ({ task_id }) => runGetTask(task_id),
   claim_task: ({ task_id }) => claimTask(task_id, "agent"),
   complete_task: ({ task_id }) => completeTask(task_id),
-  spawn_teammate: ({ name, role, prompt }) => runSpawnTeammate(name, role, prompt),
+  spawn_teammate: ({ name, role, prompt }) =>
+    runSpawnTeammate(name, role, prompt),
   send_message: ({ to, content }) => runSendMessage(to, content),
   check_inbox: () => runCheckInbox(),
   request_shutdown: ({ teammate }) => runRequestShutdown(teammate),
@@ -795,10 +901,13 @@ function updateContext(): Context {
 //  agentLoop
 // ═══════════════════════════════════════════════════════════
 
-async function agentLoop(messages: Anthropic.MessageParam[], context: Context): Promise<string> {
+async function agentLoop(
+  messages: Anthropic.MessageParam[],
+  context: Context,
+): Promise<string> {
   let system = getSystemPrompt(context);
   while (true) {
-    let response;
+    let response: Anthropic.Message;
     try {
       response = await client.messages.create({
         model: MODEL_ID,
@@ -824,7 +933,8 @@ async function agentLoop(messages: Anthropic.MessageParam[], context: Context): 
       console.log(`\x1b[36m> ${block.name}\x1b[0m`);
       const schema = TOOL_SCHEMAS[block.name];
       const handler = TOOL_HANDLERS[block.name];
-      const output = handler && schema ? handler(schema.parse(block.input)) : "Unknown";
+      const output =
+        handler && schema ? handler(schema.parse(block.input)) : "Unknown";
       console.log(output.slice(0, 300));
       results.push({
         type: "tool_result",
@@ -874,7 +984,10 @@ while (true) {
   const inbox = consumeLeadInbox(true);
   if (inbox.length) {
     const inboxText = inbox
-      .map((m) => `From ${m.from} [${m.type || "message"}]: ${m.content.slice(0, 200)}`)
+      .map(
+        (m) =>
+          `From ${m.from} [${m.type || "message"}]: ${m.content.slice(0, 200)}`,
+      )
       .join("\n");
     history.push({ role: "user", content: `[Inbox]\n${inboxText}` });
   }

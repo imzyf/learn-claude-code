@@ -5,10 +5,10 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { afterAll, beforeAll, vi } from "vitest";
 import type Anthropic from "@anthropic-ai/sdk";
-import type { ModelClient } from "./model";
+import { afterAll, beforeAll, vi } from "vitest";
 import type { SessionLogger } from "./logger";
+import type { ModelClient } from "./model";
 
 // 工具以 WORKDIR = process.cwd() 为根，临时目录必须建在仓库内。
 // 统一放在 .tmp/（已 gitignore）下，注册 beforeAll/afterAll 自动创建与清理。

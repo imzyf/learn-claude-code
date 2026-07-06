@@ -45,9 +45,9 @@ import * as path from "node:path";
 import * as readline from "node:readline/promises";
 import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
-import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
-import { zodTool, textOf } from "../lib/tools";
 import { createLogger, type SessionLogger } from "../lib/logger";
+import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
+import { textOf, zodTool } from "../lib/tools";
 
 const WORKDIR = process.cwd();
 const SKILLS_DIR = path.join(WORKDIR, "skills");
@@ -66,7 +66,10 @@ export type Deps = { client: ModelClient; logger: SessionLogger };
 export type Skill = { name: string; description: string; content: string };
 export type SkillRegistry = Record<string, Skill>;
 
-export function parseFrontmatter(text: string): { meta: Record<string, string>; body: string } {
+export function parseFrontmatter(text: string): {
+  meta: Record<string, string>;
+  body: string;
+} {
   if (!text.startsWith("---")) return { meta: {}, body: text };
   const end = text.indexOf("---", 3);
   if (end === -1) return { meta: {}, body: text };
@@ -96,7 +99,8 @@ export function scanSkills(dir: string): SkillRegistry {
     const raw = fs.readFileSync(manifest, "utf8");
     const { meta } = parseFrontmatter(raw);
     const name = meta.name ?? entry.name;
-    const description = meta.description ?? (raw.split("\n")[0] ?? "").replace(/^#+/, "").trim();
+    const description =
+      meta.description ?? (raw.split("\n")[0] ?? "").replace(/^#+/, "").trim();
     registry[name] = { name, description, content: raw };
   }
   return registry;
@@ -160,7 +164,10 @@ export function runRead(p: string, limit?: number): string {
   try {
     let lines = fs.readFileSync(safePath(p), "utf8").split("\n");
     if (limit && limit < lines.length) {
-      lines = [...lines.slice(0, limit), `... (${lines.length - limit} more lines)`];
+      lines = [
+        ...lines.slice(0, limit),
+        `... (${lines.length - limit} more lines)`,
+      ];
     }
     return lines.join("\n");
   } catch (e) {
@@ -187,7 +194,10 @@ export function runEdit(p: string, oldText: string, newText: string): string {
     // `$&`-style patterns in newText as special replacement syntax.
     const i = text.indexOf(oldText);
     if (i === -1) return `Error: text not found in ${p}`;
-    fs.writeFileSync(filePath, text.slice(0, i) + newText + text.slice(i + oldText.length));
+    fs.writeFileSync(
+      filePath,
+      text.slice(0, i) + newText + text.slice(i + oldText.length),
+    );
     return `Edited ${p}`;
   } catch (e) {
     return `Error: ${errMsg(e)}`;
@@ -215,7 +225,10 @@ type Todo = z.infer<typeof todoItem>;
 
 let currentTodos: Todo[] = [];
 
-export function normalizeTodos(todos: unknown): { todos?: Todo[]; error?: string } {
+export function normalizeTodos(todos: unknown): {
+  todos?: Todo[];
+  error?: string;
+} {
   if (typeof todos === "string") {
     try {
       todos = JSON.parse(todos);
@@ -225,7 +238,9 @@ export function normalizeTodos(todos: unknown): { todos?: Todo[]; error?: string
   }
   const parsed = z.array(todoItem).safeParse(todos);
   if (!parsed.success) {
-    return { error: "Error: todos must be a list of {content, status} objects" };
+    return {
+      error: "Error: todos must be a list of {content, status} objects",
+    };
   }
   return { todos: parsed.data };
 }
@@ -255,16 +270,22 @@ const CONTEXT_LIMIT = 50_000;
 const KEEP_RECENT = 3;
 const PERSIST_THRESHOLD = 30_000;
 
-export const estimateSize = (msgs: Anthropic.MessageParam[]): number => JSON.stringify(msgs).length;
+export const estimateSize = (msgs: Anthropic.MessageParam[]): number =>
+  JSON.stringify(msgs).length;
 
 // Replace an array's contents in place — callers hold the same reference
 // (mirrors Python's `messages[:] = ...`).
-export function setMessages(messages: Anthropic.MessageParam[], next: Anthropic.MessageParam[]): void {
+export function setMessages(
+  messages: Anthropic.MessageParam[],
+  next: Anthropic.MessageParam[],
+): void {
   messages.splice(0, messages.length, ...next);
 }
 
 const messageHasToolCall = (m: Anthropic.MessageParam): boolean =>
-  m.role === "assistant" && Array.isArray(m.content) && m.content.some((b) => b.type === "tool_use");
+  m.role === "assistant" &&
+  Array.isArray(m.content) &&
+  m.content.some((b) => b.type === "tool_use");
 
 // Tool results are user messages carrying tool_result content blocks.
 const isToolResultMessage = (m: Anthropic.MessageParam): boolean =>
@@ -273,7 +294,9 @@ const isToolResultMessage = (m: Anthropic.MessageParam): boolean =>
   m.content.some((b) => typeof b !== "string" && b.type === "tool_result");
 
 const outputText = (part: Anthropic.ToolResultBlockParam): string =>
-  typeof part.content === "string" ? part.content : JSON.stringify(part.content);
+  typeof part.content === "string"
+    ? part.content
+    : JSON.stringify(part.content);
 
 // L1: snipCompact — trim middle messages
 export function snipCompact(
@@ -287,7 +310,8 @@ export function snipCompact(
   let tailStart = messages.length - keepTail;
   // never split a tool-call/tool-result pair at either boundary
   if (headEnd > 0 && messageHasToolCall(messages[headEnd - 1])) {
-    while (headEnd < messages.length && isToolResultMessage(messages[headEnd])) headEnd += 1;
+    while (headEnd < messages.length && isToolResultMessage(messages[headEnd]))
+      headEnd += 1;
   }
   if (
     tailStart > 0 &&
@@ -314,13 +338,16 @@ export function collectToolResults(
   for (const m of messages) {
     if (m.role !== "user" || !Array.isArray(m.content)) continue;
     for (const part of m.content) {
-      if (typeof part !== "string" && part.type === "tool_result") parts.push(part);
+      if (typeof part !== "string" && part.type === "tool_result")
+        parts.push(part);
     }
   }
   return parts;
 }
 
-export function microCompact(messages: Anthropic.MessageParam[]): Anthropic.MessageParam[] {
+export function microCompact(
+  messages: Anthropic.MessageParam[],
+): Anthropic.MessageParam[] {
   const toolResults = collectToolResults(messages);
   if (toolResults.length <= KEEP_RECENT) return messages;
   for (const part of toolResults.slice(0, -KEEP_RECENT)) {
@@ -345,13 +372,16 @@ export function toolResultBudget(
   maxBytes = 200_000,
 ): Anthropic.MessageParam[] {
   const last = messages[messages.length - 1];
-  if (!last || last.role !== "user" || !Array.isArray(last.content)) return messages;
+  if (last?.role !== "user" || !Array.isArray(last.content)) return messages;
   const blocks = last.content.filter(
-    (b): b is Anthropic.ToolResultBlockParam => typeof b !== "string" && b.type === "tool_result",
+    (b): b is Anthropic.ToolResultBlockParam =>
+      typeof b !== "string" && b.type === "tool_result",
   );
   let total = blocks.reduce((n, b) => n + outputText(b).length, 0);
   if (total <= maxBytes) return messages;
-  const ranked = [...blocks].sort((a, b) => outputText(b).length - outputText(a).length);
+  const ranked = [...blocks].sort(
+    (a, b) => outputText(b).length - outputText(a).length,
+  );
   for (const block of ranked) {
     if (total <= maxBytes) break;
     const content = outputText(block);
@@ -365,8 +395,14 @@ export function toolResultBudget(
 // L4: autoCompact — LLM full summary
 function writeTranscript(messages: Anthropic.MessageParam[]): string {
   fs.mkdirSync(TRANSCRIPT_DIR, { recursive: true });
-  const filePath = path.join(TRANSCRIPT_DIR, `transcript_${Math.floor(Date.now() / 1000)}.jsonl`);
-  fs.writeFileSync(filePath, messages.map((m) => JSON.stringify(m)).join("\n") + "\n");
+  const filePath = path.join(
+    TRANSCRIPT_DIR,
+    `transcript_${Math.floor(Date.now() / 1000)}.jsonl`,
+  );
+  fs.writeFileSync(
+    filePath,
+    `${messages.map((m) => JSON.stringify(m)).join("\n")}\n`,
+  );
   return filePath;
 }
 
@@ -418,7 +454,10 @@ export async function reactiveCompact(
     tailStart -= 1;
   }
   const summary = await summarizeHistory(messages.slice(0, tailStart), deps);
-  return [{ role: "user", content: `[Reactive compact]\n\n${summary}` }, ...messages.slice(tailStart)];
+  return [
+    { role: "user", content: `[Reactive compact]\n\n${summary}` },
+    ...messages.slice(tailStart),
+  ];
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -426,11 +465,20 @@ export async function reactiveCompact(
 // ═══════════════════════════════════════════════════════════
 
 const bashSchema = z.object({ command: z.string() });
-const readSchema = z.object({ path: z.string(), limit: z.number().int().optional() });
+const readSchema = z.object({
+  path: z.string(),
+  limit: z.number().int().optional(),
+});
 const writeSchema = z.object({ path: z.string(), content: z.string() });
-const editSchema = z.object({ path: z.string(), old_text: z.string(), new_text: z.string() });
+const editSchema = z.object({
+  path: z.string(),
+  old_text: z.string(),
+  new_text: z.string(),
+});
 const globSchema = z.object({ pattern: z.string() });
-const todoWriteSchema = z.object({ todos: z.union([z.array(todoItem), z.string()]) });
+const todoWriteSchema = z.object({
+  todos: z.union([z.array(todoItem), z.string()]),
+});
 const taskSchema = z.object({ description: z.string() });
 const loadSkillSchema = z.object({ name: z.string() });
 const compactSchema = z.object({ focus: z.string().optional() });
@@ -464,9 +512,17 @@ const tools: Anthropic.Tool[] = [
     "Launch a subagent to handle a complex subtask. Returns only the final conclusion.",
     taskSchema,
   ),
-  zodTool("load_skill", "Load the full content of a skill by name.", loadSkillSchema),
+  zodTool(
+    "load_skill",
+    "Load the full content of a skill by name.",
+    loadSkillSchema,
+  ),
   // s08 change: new compact tool — triggers compactHistory, not a no-op
-  zodTool("compact", "Summarize earlier conversation to free context space.", compactSchema),
+  zodTool(
+    "compact",
+    "Summarize earlier conversation to free context space.",
+    compactSchema,
+  ),
 ];
 
 const TOOL_SCHEMAS: Partial<Record<string, z.ZodObject>> = {
@@ -484,7 +540,8 @@ const SUB_HANDLERS: Partial<Record<string, (input: any) => string>> = {
   bash: ({ command }) => runBash(command),
   read_file: ({ path, limit }) => runRead(path, limit),
   write_file: ({ path, content }) => runWrite(path, content),
-  edit_file: ({ path, old_text, new_text }) => runEdit(path, old_text, new_text),
+  edit_file: ({ path, old_text, new_text }) =>
+    runEdit(path, old_text, new_text),
   glob: ({ pattern }) => runGlob(pattern),
 };
 
@@ -505,10 +562,15 @@ const TOOL_HANDLERS: Partial<
 //  FROM s06-s07 (unchanged): Subagent
 // ═══════════════════════════════════════════════════════════
 
-export async function spawnSubagent(description: string, deps: Deps): Promise<string> {
+export async function spawnSubagent(
+  description: string,
+  deps: Deps,
+): Promise<string> {
   const { client, logger } = deps;
   console.log(`\n\x1b[35m[Subagent spawned]\x1b[0m`);
-  const messages: Anthropic.MessageParam[] = [{ role: "user", content: description }]; // fresh context
+  const messages: Anthropic.MessageParam[] = [
+    { role: "user", content: description },
+  ]; // fresh context
   let lastText = "";
 
   for (let turn = 0; turn < 30; turn++) {
@@ -543,10 +605,15 @@ export async function spawnSubagent(description: string, deps: Deps): Promise<st
 
       const schema = FILE_SCHEMAS[block.name];
       const handler = SUB_HANDLERS[block.name];
-      const output = handler && schema ? handler(schema.parse(block.input)) : `Unknown: ${block.name}`;
+      const output =
+        handler && schema
+          ? handler(schema.parse(block.input))
+          : `Unknown: ${block.name}`;
       logger.toolResult(block.name, output);
       await triggerHooks("PostToolUse", block, output);
-      console.log(`  \x1b[90m[sub] ${block.name}: ${output.slice(0, 100)}\x1b[0m`);
+      console.log(
+        `  \x1b[90m[sub] ${block.name}: ${output.slice(0, 100)}\x1b[0m`,
+      );
       results.push({
         type: "tool_result",
         tool_use_id: block.id,
@@ -575,7 +642,10 @@ export function registerHook(event: string, callback: Hook): void {
   HOOKS[event].push(callback);
 }
 
-export async function triggerHooks(event: string, ...args: any[]): Promise<string | null> {
+export async function triggerHooks(
+  event: string,
+  ...args: any[]
+): Promise<string | null> {
   for (const callback of HOOKS[event]) {
     const result = await callback(...args);
     if (result != null) return result;
@@ -593,7 +663,8 @@ const DENY_LIST = ["rm -rf /", "sudo", "shutdown", "osascript"];
 export function permissionHook(call: ToolCallInfo): string | null {
   if (call.name === "bash") {
     for (const pattern of DENY_LIST) {
-      if (((call.input as any).command ?? "").includes(pattern)) return "Permission denied";
+      if (((call.input as any).command ?? "").includes(pattern))
+        return "Permission denied";
     }
   }
   return null;
@@ -634,7 +705,7 @@ export async function agentLoop(
       setMessages(messages, await compactHistory(messages, deps));
     }
 
-    let response;
+    let response: Anthropic.Message;
     try {
       logger.request(messages);
       response = await client.messages.create({
@@ -692,7 +763,9 @@ export async function agentLoop(
       const schema = TOOL_SCHEMAS[block.name];
       const handler = TOOL_HANDLERS[block.name];
       const output =
-        handler && schema ? await handler(schema.parse(block.input), deps) : `Unknown: ${block.name}`;
+        handler && schema
+          ? await handler(schema.parse(block.input), deps)
+          : `Unknown: ${block.name}`;
       logger.toolResult(block.name, output);
       await triggerHooks("PostToolUse", block, output);
       console.log(output.slice(0, 200));
@@ -743,7 +816,12 @@ if (import.meta.main) {
 
     logger.userInput(query);
     history.push({ role: "user", content: query });
-    const finalText = await agentLoop(history, { client, logger, skills, system });
+    const finalText = await agentLoop(history, {
+      client,
+      logger,
+      skills,
+      system,
+    });
     console.log(finalText);
     console.log();
   }

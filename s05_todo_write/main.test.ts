@@ -6,8 +6,9 @@
  * todo_write 一旦被调用即复位计数器。hooks 用 clearHooks 隔离，
  * 计数器用 resetNagCounter 复位。
  */
-import { beforeEach, describe, expect, it } from "vitest";
+
 import type Anthropic from "@anthropic-ai/sdk";
+import { beforeEach, describe, expect, it } from "vitest";
 import {
   fakeClient,
   fakeMessage,
@@ -31,7 +32,10 @@ beforeEach(() => {
   resetNagCounter();
 });
 
-const todo = (content: string, status: "pending" | "in_progress" | "completed") => ({
+const todo = (
+  content: string,
+  status: "pending" | "in_progress" | "completed",
+) => ({
   content,
   status,
 });
@@ -58,7 +62,9 @@ describe("normalizeTodos", () => {
   });
 
   it("rejects an invalid status value", () => {
-    expect(normalizeTodos([{ content: "x", status: "done" }]).error).toBeDefined();
+    expect(
+      normalizeTodos([{ content: "x", status: "done" }]).error,
+    ).toBeDefined();
   });
 });
 
@@ -78,13 +84,15 @@ describe("runTodoWrite", () => {
 // ── permissionHook ────────────────────────────────────────
 describe("permissionHook", () => {
   it("denies deny-list bash commands", () => {
-    expect(permissionHook(toolUseBlock("t", "bash", { command: "sudo ls" }))).toBe(
-      "Permission denied",
-    );
+    expect(
+      permissionHook(toolUseBlock("t", "bash", { command: "sudo ls" })),
+    ).toBe("Permission denied");
   });
 
   it("allows safe commands", () => {
-    expect(permissionHook(toolUseBlock("t", "bash", { command: "echo hi" }))).toBeNull();
+    expect(
+      permissionHook(toolUseBlock("t", "bash", { command: "echo hi" })),
+    ).toBeNull();
   });
 });
 
@@ -95,8 +103,13 @@ describe("agentLoop", () => {
 
   it("executes a tool and returns final text", async () => {
     registerDefaultHooks();
-    const client = fakeClient(bashRound("echo hi"), fakeMessage([textBlock("done")], "end_turn"));
-    const messages: Anthropic.MessageParam[] = [{ role: "user", content: "go" }];
+    const client = fakeClient(
+      bashRound("echo hi"),
+      fakeMessage([textBlock("done")], "end_turn"),
+    );
+    const messages: Anthropic.MessageParam[] = [
+      { role: "user", content: "go" },
+    ];
 
     const result = await agentLoop(messages, { client, logger: noopLogger });
 
@@ -107,8 +120,13 @@ describe("agentLoop", () => {
 
   it("blocks deny-list commands via the permission hook", async () => {
     registerDefaultHooks();
-    const client = fakeClient(bashRound("sudo rm"), fakeMessage([textBlock("stop")], "end_turn"));
-    const messages: Anthropic.MessageParam[] = [{ role: "user", content: "go" }];
+    const client = fakeClient(
+      bashRound("sudo rm"),
+      fakeMessage([textBlock("stop")], "end_turn"),
+    );
+    const messages: Anthropic.MessageParam[] = [
+      { role: "user", content: "go" },
+    ];
 
     await agentLoop(messages, { client, logger: noopLogger });
 
@@ -123,7 +141,9 @@ describe("agentLoop", () => {
       bashRound("echo 3"),
       fakeMessage([textBlock("done")], "end_turn"),
     );
-    const messages: Anthropic.MessageParam[] = [{ role: "user", content: "go" }];
+    const messages: Anthropic.MessageParam[] = [
+      { role: "user", content: "go" },
+    ];
 
     await agentLoop(messages, { client, logger: noopLogger });
 
@@ -139,13 +159,19 @@ describe("agentLoop", () => {
       bashRound("echo 1"),
       bashRound("echo 2"),
       fakeMessage(
-        [toolUseBlock("tu", "todo_write", { todos: [todo("plan", "in_progress")] })],
+        [
+          toolUseBlock("tu", "todo_write", {
+            todos: [todo("plan", "in_progress")],
+          }),
+        ],
         "tool_use",
       ),
       bashRound("echo 3"),
       fakeMessage([textBlock("done")], "end_turn"),
     );
-    const messages: Anthropic.MessageParam[] = [{ role: "user", content: "go" }];
+    const messages: Anthropic.MessageParam[] = [
+      { role: "user", content: "go" },
+    ];
 
     await agentLoop(messages, { client, logger: noopLogger });
 
@@ -167,7 +193,9 @@ describe("agentLoop", () => {
       fired = true;
       return "keep going";
     });
-    const messages: Anthropic.MessageParam[] = [{ role: "user", content: "go" }];
+    const messages: Anthropic.MessageParam[] = [
+      { role: "user", content: "go" },
+    ];
 
     const result = await agentLoop(messages, { client, logger: noopLogger });
 

@@ -39,14 +39,14 @@ import { spawnSync } from "node:child_process";
 import * as readline from "node:readline/promises";
 import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
-import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
-import { zodTool, textOf } from "../lib/tools";
 import { createLogger, type SessionLogger } from "../lib/logger";
+import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
+import { textOf, zodTool } from "../lib/tools";
 import {
-  runRead as s02RunRead,
-  runWrite as s02RunWrite,
   runEdit as s02RunEdit,
   runGlob as s02RunGlob,
+  runRead as s02RunRead,
+  runWrite as s02RunWrite,
   safePath as s02SafePath,
 } from "../s02_tool_use/main";
 
@@ -116,7 +116,10 @@ let currentTodos: Todo[] = [];
 // The model occasionally sends `todos` as a JSON string instead of an
 // array — the input schema admits both, this unwraps and validates.
 // (Python's _normalize_todos also tries ast.literal_eval; JSON is enough here.)
-export function normalizeTodos(todos: unknown): { todos?: Todo[]; error?: string } {
+export function normalizeTodos(todos: unknown): {
+  todos?: Todo[];
+  error?: string;
+} {
   if (typeof todos === "string") {
     try {
       todos = JSON.parse(todos);
@@ -126,7 +129,9 @@ export function normalizeTodos(todos: unknown): { todos?: Todo[]; error?: string
   }
   const parsed = z.array(todoItem).safeParse(todos);
   if (!parsed.success) {
-    return { error: "Error: todos must be a list of {content, status} objects" };
+    return {
+      error: "Error: todos must be a list of {content, status} objects",
+    };
   }
   return { todos: parsed.data };
 }
@@ -149,11 +154,20 @@ export function runTodoWrite(todosInput: unknown): string {
 }
 
 const bashSchema = z.object({ command: z.string() });
-const readSchema = z.object({ path: z.string(), limit: z.number().int().optional() });
+const readSchema = z.object({
+  path: z.string(),
+  limit: z.number().int().optional(),
+});
 const writeSchema = z.object({ path: z.string(), content: z.string() });
-const editSchema = z.object({ path: z.string(), old_text: z.string(), new_text: z.string() });
+const editSchema = z.object({
+  path: z.string(),
+  old_text: z.string(),
+  new_text: z.string(),
+});
 const globSchema = z.object({ pattern: z.string() });
-const todoWriteSchema = z.object({ todos: z.union([z.array(todoItem), z.string()]) });
+const todoWriteSchema = z.object({
+  todos: z.union([z.array(todoItem), z.string()]),
+});
 
 const tools: Anthropic.Tool[] = [
   zodTool("bash", "Run a shell command.", bashSchema),
@@ -184,7 +198,8 @@ const TOOL_HANDLERS: Partial<Record<string, (input: any) => string>> = {
   bash: ({ command }) => runBash(command),
   read_file: ({ path, limit }) => runRead(path, limit),
   write_file: ({ path, content }) => runWrite(path, content),
-  edit_file: ({ path, old_text, new_text }) => runEdit(path, old_text, new_text),
+  edit_file: ({ path, old_text, new_text }) =>
+    runEdit(path, old_text, new_text),
   glob: ({ pattern }) => runGlob(pattern),
   todo_write: ({ todos }) => runTodoWrite(todos),
 };
@@ -207,7 +222,10 @@ export function registerHook(event: string, callback: Hook): void {
   HOOKS[event].push(callback);
 }
 
-export async function triggerHooks(event: string, ...args: any[]): Promise<string | null> {
+export async function triggerHooks(
+  event: string,
+  ...args: any[]
+): Promise<string | null> {
   for (const callback of HOOKS[event]) {
     const result = await callback(...args);
     if (result != null) return result;
@@ -223,7 +241,15 @@ export function clearHooks(): void {
 type ToolCallInfo = Anthropic.ToolUseBlock;
 
 // s04 hooks preserved
-const DENY_LIST = ["rm -rf /", "sudo", "shutdown", "reboot", "mkfs", "dd if=", "osascript"];
+const DENY_LIST = [
+  "rm -rf /",
+  "sudo",
+  "shutdown",
+  "reboot",
+  "mkfs",
+  "dd if=",
+  "osascript",
+];
 
 // PreToolUse: deny list check.
 export function permissionHook(call: ToolCallInfo): string | null {
@@ -255,10 +281,14 @@ export function summaryHook(messages: Anthropic.MessageParam[]): null {
   const toolCount = messages.reduce(
     (n, m) =>
       n +
-      (Array.isArray(m.content) ? m.content.filter((b) => b.type === "tool_result").length : 0),
+      (Array.isArray(m.content)
+        ? m.content.filter((b) => b.type === "tool_result").length
+        : 0),
     0,
   );
-  console.log(`\x1b[90m[HOOK] Stop: session used ${toolCount} tool calls\x1b[0m`);
+  console.log(
+    `\x1b[90m[HOOK] Stop: session used ${toolCount} tool calls\x1b[0m`,
+  );
   return null;
 }
 
@@ -289,7 +319,10 @@ export async function agentLoop(
   while (true) {
     // s05: nag reminder — inject if model hasn't updated todos for 3 rounds
     if (roundsSinceTodo >= 3 && messages.length) {
-      messages.push({ role: "user", content: "<reminder>Update your todos.</reminder>" });
+      messages.push({
+        role: "user",
+        content: "<reminder>Update your todos.</reminder>",
+      });
       roundsSinceTodo = 0;
     }
 
@@ -330,7 +363,10 @@ export async function agentLoop(
 
       const schema = TOOL_SCHEMAS[block.name];
       const handler = TOOL_HANDLERS[block.name];
-      const output = handler && schema ? handler(schema.parse(block.input)) : `Unknown: ${block.name}`;
+      const output =
+        handler && schema
+          ? handler(schema.parse(block.input))
+          : `Unknown: ${block.name}`;
       logger.toolResult(block.name, output);
 
       await triggerHooks("PostToolUse", block, output);

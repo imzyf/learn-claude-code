@@ -43,7 +43,7 @@ import { promisify } from "node:util";
 import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
 import { createClient, MODEL_ID } from "../lib/model";
-import { zodTool, textOf } from "../lib/tools";
+import { textOf, zodTool } from "../lib/tools";
 
 const client = createClient();
 
@@ -66,7 +66,8 @@ const BASE_DELAY_MS = 500;
 const CONTEXT_LIMIT = 50_000;
 const KEEP_RECENT_TOOL_RESULTS = 3;
 const PERSIST_THRESHOLD = 30_000;
-const CONTINUATION_PROMPT = "Continue from the previous response. Do not repeat completed work.";
+const CONTINUATION_PROMPT =
+  "Continue from the previous response. Do not repeat completed work.";
 const PROMPT = "\x1b[36ms20 >> \x1b[0m";
 let CLI_ACTIVE = false;
 
@@ -119,7 +120,11 @@ type Task = {
 
 const taskPath = (taskId: string) => path.join(TASKS_DIR, `${taskId}.json`);
 
-function createTask(subject: string, description = "", blockedBy: string[] = []): Task {
+function createTask(
+  subject: string,
+  description = "",
+  blockedBy: string[] = [],
+): Task {
   const task: Task = {
     id: `task_${Math.floor(Date.now() / 1000)}_${String(Math.floor(Math.random() * 10_000)).padStart(4, "0")}`,
     subject,
@@ -149,7 +154,9 @@ function listTasks(): Task[] {
     .filter((f) => f.startsWith("task_") && f.endsWith(".json"))
     .sort()
     .map((f) => {
-      const task = JSON.parse(fs.readFileSync(path.join(TASKS_DIR, f), "utf8")) as Task;
+      const task = JSON.parse(
+        fs.readFileSync(path.join(TASKS_DIR, f), "utf8"),
+      ) as Task;
       task.worktree ??= null;
       return task;
     });
@@ -186,7 +193,7 @@ function claimTask(taskId: string, owner = "agent"): string {
     const parts: string[] = [];
     if (deps.length) parts.push(`blocked by: [${deps.join(", ")}]`);
     if (missing.length) parts.push(`missing deps: [${missing.join(", ")}]`);
-    return "Cannot start — " + parts.join(", ");
+    return `Cannot start — ${parts.join(", ")}`;
   }
   task.owner = owner;
   task.status = "in_progress";
@@ -203,7 +210,9 @@ function completeTask(taskId: string): string {
   task.status = "completed";
   saveTask(task);
   const unblocked = listTasks()
-    .filter((t) => t.status === "pending" && t.blockedBy.length > 0 && canStart(t.id))
+    .filter(
+      (t) => t.status === "pending" && t.blockedBy.length > 0 && canStart(t.id),
+    )
     .map((t) => t.subject);
   terminalPrint(`  \x1b[32m[complete] ${task.subject} ✓\x1b[0m`);
   let msg = `Completed ${task.id} (${task.subject})`;
@@ -226,7 +235,8 @@ const VALID_WT_NAME = /^[A-Za-z0-9._-]{1,64}$/;
 
 function validateWorktreeName(name: string): string | null {
   if (!name) return "Worktree name cannot be empty";
-  if (name === "." || name === "..") return `'${name}' is not a valid worktree name`;
+  if (name === "." || name === "..")
+    return `'${name}' is not a valid worktree name`;
   if (!VALID_WT_NAME.test(name)) {
     return (
       `Invalid worktree name '${name}': ` +
@@ -252,8 +262,16 @@ function runGit(args: string[]): [boolean, string] {
 }
 
 function logEvent(eventType: string, worktreeName: string, taskId = ""): void {
-  const event = { type: eventType, worktree: worktreeName, task_id: taskId, ts: Date.now() / 1000 };
-  fs.appendFileSync(path.join(WORKTREES_DIR, "events.jsonl"), JSON.stringify(event) + "\n");
+  const event = {
+    type: eventType,
+    worktree: worktreeName,
+    task_id: taskId,
+    ts: Date.now() / 1000,
+  };
+  fs.appendFileSync(
+    path.join(WORKTREES_DIR, "events.jsonl"),
+    `${JSON.stringify(event)}\n`,
+  );
 }
 
 function createWorktree(name: string, taskId = ""): string {
@@ -272,7 +290,14 @@ function createWorktree(name: string, taskId = ""): string {
   if (fs.existsSync(wtPath)) {
     return `Worktree '${name}' already exists at ${wtPath}`;
   }
-  const [ok, result] = runGit(["worktree", "add", wtPath, "-b", `wt/${name}`, "HEAD"]);
+  const [ok, result] = runGit([
+    "worktree",
+    "add",
+    wtPath,
+    "-b",
+    `wt/${name}`,
+    "HEAD",
+  ]);
   if (!ok) return `Git error: ${result}`;
   if (taskId) {
     bindTaskToWorktree(taskId, name);
@@ -303,7 +328,9 @@ function countWorktreeChanges(wtPath: string): [number, number] {
       timeout: 10_000,
     });
     if (r2.error) return [-1, -1];
-    const commits = (r2.stdout ?? "").split("\n").filter((l) => l.trim()).length;
+    const commits = (r2.stdout ?? "")
+      .split("\n")
+      .filter((l) => l.trim()).length;
     return [files, commits];
   } catch {
     return [-1, -1];
@@ -354,7 +381,10 @@ const SKILL_REGISTRY: Record<string, Skill> = {};
 
 // Parse frontmatter from SKILL.md. Returns { meta, body }.
 // Minimal `key: value` line parser (Python uses PyYAML).
-function parseFrontmatter(text: string): { meta: Record<string, string>; body: string } {
+function parseFrontmatter(text: string): {
+  meta: Record<string, string>;
+  body: string;
+} {
   if (!text.startsWith("---")) return { meta: {}, body: text };
   const end = text.indexOf("---", 3);
   if (end === -1) return { meta: {}, body: text };
@@ -378,7 +408,8 @@ function scanSkills(): void {
     const raw = fs.readFileSync(manifest, "utf8");
     const { meta } = parseFrontmatter(raw);
     const name = meta.name || entry;
-    const description = meta.description || raw.split("\n")[0].replace(/^#+/, "").trim();
+    const description =
+      meta.description || raw.split("\n")[0].replace(/^#+/, "").trim();
     SKILL_REGISTRY[name] = { name, description, content: raw };
   }
 }
@@ -428,10 +459,16 @@ type Context = {
 // The system prompt is rebuilt each turn from live context. This is where
 // memory, skill catalog, MCP state, and active teammates become visible.
 function assembleSystemPrompt(context: Context): string {
-  const sections = [PROMPT_SECTIONS.identity, PROMPT_SECTIONS.tools, PROMPT_SECTIONS.workspace];
+  const sections = [
+    PROMPT_SECTIONS.identity,
+    PROMPT_SECTIONS.tools,
+    PROMPT_SECTIONS.workspace,
+  ];
   sections.push(`Current time: ${new Date().toISOString().slice(0, 19)}`);
   sections.push(
-    "Skills catalog:\n" + listSkills() + "\nUse load_skill(name) when a skill is relevant.",
+    "Skills catalog:\n" +
+      listSkills() +
+      "\nUse load_skill(name) when a skill is relevant.",
   );
   if (context.memories) {
     sections.push(`Relevant memories:\n${context.memories}`);
@@ -477,7 +514,10 @@ function runBash(command: string, cwd?: string | null): string {
 
 // Async variant for background execution — keeps the event loop free
 // (Python runs the same sync handler inside a worker thread instead).
-async function runBashAsync(command: string, cwd?: string | null): Promise<string> {
+async function runBashAsync(
+  command: string,
+  cwd?: string | null,
+): Promise<string> {
   try {
     const { stdout, stderr } = await execAsync(command, {
       cwd: cwd || WORKDIR,
@@ -494,12 +534,20 @@ async function runBashAsync(command: string, cwd?: string | null): Promise<strin
   }
 }
 
-function runRead(p: string, limit?: number, offset = 0, cwd?: string | null): string {
+function runRead(
+  p: string,
+  limit?: number,
+  offset = 0,
+  cwd?: string | null,
+): string {
   try {
     let lines = fs.readFileSync(safePath(p, cwd), "utf8").split("\n");
     lines = lines.slice(Math.max(offset, 0));
     if (limit != null && limit < lines.length) {
-      lines = [...lines.slice(0, limit), `... (${lines.length - limit} more lines)`];
+      lines = [
+        ...lines.slice(0, limit),
+        `... (${lines.length - limit} more lines)`,
+      ];
     }
     return lines.join("\n");
   } catch (e) {
@@ -518,7 +566,12 @@ function runWrite(p: string, content: string, cwd?: string | null): string {
   }
 }
 
-function runEdit(p: string, oldText: string, newText: string, cwd?: string | null): string {
+function runEdit(
+  p: string,
+  oldText: string,
+  newText: string,
+  cwd?: string | null,
+): string {
   try {
     const filePath = safePath(p, cwd);
     const text = fs.readFileSync(filePath, "utf8");
@@ -526,7 +579,10 @@ function runEdit(p: string, oldText: string, newText: string, cwd?: string | nul
     // `$&`-style patterns in newText as special replacement syntax.
     const i = text.indexOf(oldText);
     if (i === -1) return `Error: text not found in ${p}`;
-    fs.writeFileSync(filePath, text.slice(0, i) + newText + text.slice(i + oldText.length));
+    fs.writeFileSync(
+      filePath,
+      text.slice(0, i) + newText + text.slice(i + oldText.length),
+    );
     return `Edited ${p}`;
   } catch (e) {
     return `Error: ${errMsg(e)}`;
@@ -567,7 +623,9 @@ function normalizeTodos(todos: unknown): { todos?: Todo[]; error?: string } {
   }
   const parsed = z.array(todoItem).safeParse(todos);
   if (!parsed.success) {
-    return { error: "Error: todos must be a list of {content, status} objects" };
+    return {
+      error: "Error: todos must be a list of {content, status} objects",
+    };
   }
   return { todos: parsed.data };
 }
@@ -576,7 +634,9 @@ function runTodoWrite(todosInput: unknown): string {
   const { todos, error } = normalizeTodos(todosInput);
   if (error || !todos) return error ?? "Error: invalid todos";
   currentTodos = todos;
-  terminalPrint(`  \x1b[33m[todo] updated ${currentTodos.length} item(s)\x1b[0m`);
+  terminalPrint(
+    `  \x1b[33m[todo] updated ${currentTodos.length} item(s)\x1b[0m`,
+  );
   return `Updated ${currentTodos.length} todos`;
 }
 
@@ -614,7 +674,10 @@ class MessageBus {
       ts: Date.now() / 1000,
       metadata,
     };
-    fs.appendFileSync(path.join(MAILBOX_DIR, `${toAgent}.jsonl`), JSON.stringify(msg) + "\n");
+    fs.appendFileSync(
+      path.join(MAILBOX_DIR, `${toAgent}.jsonl`),
+      `${JSON.stringify(msg)}\n`,
+    );
     terminalPrint(
       `  \x1b[33m[bus] ${fromAgent} → ${toAgent}: (${msgType}) ${content.slice(0, 50)}\x1b[0m`,
     );
@@ -657,11 +720,19 @@ const newRequestId = () =>
 
 // Responses are matched by request_id so one protocol reply cannot approve
 // a different pending request.
-function matchResponse(responseType: string, requestId: string, approve: boolean): void {
+function matchResponse(
+  responseType: string,
+  requestId: string,
+  approve: boolean,
+): void {
   const state = pendingRequests.get(requestId);
   if (!state) return;
   if (state.type === "shutdown" && responseType !== "shutdown_response") return;
-  if (state.type === "plan_approval" && responseType !== "plan_approval_response") return;
+  if (
+    state.type === "plan_approval" &&
+    responseType !== "plan_approval_response"
+  )
+    return;
   state.status = approve ? "approved" : "rejected";
 }
 
@@ -686,7 +757,9 @@ const IDLE_POLL_INTERVAL = 5;
 const IDLE_TIMEOUT = 60;
 
 function scanUnclaimedTasks(): Task[] {
-  return listTasks().filter((t) => t.status === "pending" && !t.owner && canStart(t.id));
+  return listTasks().filter(
+    (t) => t.status === "pending" && !t.owner && canStart(t.id),
+  );
 }
 
 // Autonomous teammates wake up for inbox messages first, then look for
@@ -710,7 +783,10 @@ async function idlePoll(
           return "shutdown";
         }
       }
-      messages.push({ role: "user", content: `<inbox>${JSON.stringify(inbox)}</inbox>` });
+      messages.push({
+        role: "user",
+        content: `<inbox>${JSON.stringify(inbox)}</inbox>`,
+      });
       return "work";
     }
     const unclaimed = scanUnclaimedTasks();
@@ -741,7 +817,11 @@ async function idlePoll(
 //  Teammate (s15 + s16 + s17 + s18)
 // ═══════════════════════════════════════════════════════════
 
-function spawnTeammateThread(name: string, role: string, prompt: string): string {
+function spawnTeammateThread(
+  name: string,
+  role: string,
+  prompt: string,
+): string {
   if (activeTeammates.has(name)) {
     return `Teammate '${name}' already exists`;
   }
@@ -753,7 +833,10 @@ function spawnTeammateThread(name: string, role: string, prompt: string): string
     `You are '${name}', a ${role}. Use tools to complete tasks. ` +
     `If a task has a worktree, work in that directory.`;
 
-  const handleInboxMessage = (msg: BusMessage, messages: Anthropic.MessageParam[]): boolean => {
+  const handleInboxMessage = (
+    msg: BusMessage,
+    messages: Anthropic.MessageParam[],
+  ): boolean => {
     const reqId = String(msg.metadata?.request_id ?? "");
     if (msg.type === "shutdown_request") {
       BUS.send(name, "lead", "Shutting down.", "shutdown_response", {
@@ -786,7 +869,8 @@ function spawnTeammateThread(name: string, role: string, prompt: string): string
       return tasks
         .map(
           (t) =>
-            `  ${t.id}: ${t.subject} [${t.status}]` + (t.worktree ? ` (wt:${t.worktree})` : ""),
+            `  ${t.id}: ${t.subject} [${t.status}]` +
+            (t.worktree ? ` (wt:${t.worktree})` : ""),
         )
         .join("\n");
     };
@@ -795,7 +879,9 @@ function spawnTeammateThread(name: string, role: string, prompt: string): string
       const result = claimTask(taskId, name);
       if (result.includes("Claimed")) {
         const task = loadTask(taskId);
-        wtCtx.path = task.worktree ? path.join(WORKTREES_DIR, task.worktree) : null;
+        wtCtx.path = task.worktree
+          ? path.join(WORKTREES_DIR, task.worktree)
+          : null;
       }
       return result;
     };
@@ -813,7 +899,10 @@ function spawnTeammateThread(name: string, role: string, prompt: string): string
       offset: z.number().int().optional(),
     });
     const subWriteSchema = z.object({ path: z.string(), content: z.string() });
-    const subSendMessageSchema = z.object({ to: z.string(), content: z.string() });
+    const subSendMessageSchema = z.object({
+      to: z.string(),
+      content: z.string(),
+    });
     const subSubmitPlanSchema = z.object({ plan: z.string() });
     const subListTasksSchema = z.object({});
     const subClaimTaskSchema = z.object({ task_id: z.string() });
@@ -823,11 +912,23 @@ function spawnTeammateThread(name: string, role: string, prompt: string): string
       zodTool("bash", "Run a shell command.", subBashSchema),
       zodTool("read_file", "Read file contents.", subReadSchema),
       zodTool("write_file", "Write content to a file.", subWriteSchema),
-      zodTool("send_message", "Send a message to another agent.", subSendMessageSchema),
-      zodTool("submit_plan", "Submit a plan for Lead approval.", subSubmitPlanSchema),
+      zodTool(
+        "send_message",
+        "Send a message to another agent.",
+        subSendMessageSchema,
+      ),
+      zodTool(
+        "submit_plan",
+        "Submit a plan for Lead approval.",
+        subSubmitPlanSchema,
+      ),
       zodTool("list_tasks", "List all tasks.", subListTasksSchema),
       zodTool("claim_task", "Claim a pending task.", subClaimTaskSchema),
-      zodTool("complete_task", "Mark an in-progress task as completed.", subCompleteTaskSchema),
+      zodTool(
+        "complete_task",
+        "Mark an in-progress task as completed.",
+        subCompleteTaskSchema,
+      ),
     ];
     const subSchemas: Partial<Record<string, z.ZodObject>> = {
       bash: subBashSchema,
@@ -842,7 +943,8 @@ function spawnTeammateThread(name: string, role: string, prompt: string): string
 
     const subHandlers: Partial<Record<string, (input: any) => string>> = {
       bash: ({ command }) => runBash(command, wtCtx.path),
-      read_file: ({ path, limit, offset }) => runRead(path, limit, offset ?? 0, wtCtx.path),
+      read_file: ({ path, limit, offset }) =>
+        runRead(path, limit, offset ?? 0, wtCtx.path),
       write_file: ({ path, content }) => runWrite(path, content, wtCtx.path),
       send_message: ({ to, content }) => {
         BUS.send(name, to, content);
@@ -853,7 +955,9 @@ function spawnTeammateThread(name: string, role: string, prompt: string): string
       complete_task: ({ task_id }) => subCompleteTask(task_id),
     };
 
-    const messages: Anthropic.MessageParam[] = [{ role: "user", content: prompt }];
+    const messages: Anthropic.MessageParam[] = [
+      { role: "user", content: prompt },
+    ];
     let lastText = "";
     let shouldShutdown = false;
 
@@ -888,7 +992,7 @@ function spawnTeammateThread(name: string, role: string, prompt: string): string
           });
         }
 
-        let response;
+        let response: Anthropic.Message;
         try {
           response = await client.messages.create({
             model: MODEL_ID,
@@ -915,13 +1019,19 @@ function spawnTeammateThread(name: string, role: string, prompt: string): string
             // so this is a placeholder rather than a dropped call.
             output = "[Ignored: waiting for plan approval]";
           } else if (block.name === "submit_plan") {
-            output = teammateSubmitPlan(name, (block.input as { plan?: string }).plan ?? "");
+            output = teammateSubmitPlan(
+              name,
+              (block.input as { plan?: string }).plan ?? "",
+            );
             const match = /\((req_\d+)\)/.exec(output);
             protocolCtx.waitingPlan = match ? match[1] : output;
           } else {
             const schema = subSchemas[block.name];
             const handler = subHandlers[block.name];
-            output = handler && schema ? handler(schema.parse(block.input)) : "Unknown";
+            output =
+              handler && schema
+                ? handler(schema.parse(block.input))
+                : "Unknown";
           }
           results.push({
             type: "tool_result",
@@ -959,7 +1069,9 @@ function teammateSubmitPlan(fromName: string, plan: string): string {
     payload: plan,
     createdAt: Date.now() / 1000,
   });
-  BUS.send(fromName, "lead", plan, "plan_approval_request", { request_id: reqId });
+  BUS.send(fromName, "lead", plan, "plan_approval_request", {
+    request_id: reqId,
+  });
   return `Plan submitted (${reqId})`;
 }
 
@@ -978,7 +1090,9 @@ function runRequestShutdown(teammate: string): string {
     payload: "",
     createdAt: Date.now() / 1000,
   });
-  BUS.send("lead", teammate, "Shut down.", "shutdown_request", { request_id: reqId });
+  BUS.send("lead", teammate, "Shut down.", "shutdown_request", {
+    request_id: reqId,
+  });
   return `Shutdown request sent to ${teammate}`;
 }
 
@@ -987,12 +1101,21 @@ function runRequestPlan(teammate: string, task: string): string {
   return `Asked ${teammate} to submit a plan`;
 }
 
-function runReviewPlan(requestId: string, approve: boolean, feedback = ""): string {
+function runReviewPlan(
+  requestId: string,
+  approve: boolean,
+  feedback = "",
+): string {
   const state = pendingRequests.get(requestId);
   if (!state) return `Request ${requestId} not found`;
   state.status = approve ? "approved" : "rejected";
-  BUS.send("lead", state.sender, feedback || (approve ? "Approved" : "Rejected"),
-    "plan_approval_response", { request_id: requestId, approve });
+  BUS.send(
+    "lead",
+    state.sender,
+    feedback || (approve ? "Approved" : "Rejected"),
+    "plan_approval_response",
+    { request_id: requestId, approve },
+  );
   return `Plan ${approve ? "approved" : "rejected"}`;
 }
 
@@ -1015,7 +1138,10 @@ function registerHook(event: string, callback: Hook): void {
   HOOKS[event].push(callback);
 }
 
-async function triggerHooks(event: string, ...args: any[]): Promise<string | null> {
+async function triggerHooks(
+  event: string,
+  ...args: any[]
+): Promise<string | null> {
   for (const callback of HOOKS[event]) {
     const result = await callback(...args);
     if (result != null) return result;
@@ -1027,7 +1153,10 @@ async function triggerHooks(event: string, ...args: any[]): Promise<string | nul
 // (matches what Python hooks receive too).
 type ToolCallInfo = Anthropic.ToolUseBlock;
 
-async function confirmWithUser(warning: string, detail: string): Promise<boolean> {
+async function confirmWithUser(
+  warning: string,
+  detail: string,
+): Promise<boolean> {
   console.log(`\n\x1b[33m[permission] ${warning}\x1b[0m`);
   console.log(`  ${detail}`);
   let choice: string;
@@ -1039,7 +1168,15 @@ async function confirmWithUser(warning: string, detail: string): Promise<boolean
   return choice === "y" || choice === "yes";
 }
 
-const DENY_LIST = ["rm -rf /", "sudo", "shutdown", "reboot", "mkfs", "dd if=", "osascript"];
+const DENY_LIST = [
+  "rm -rf /",
+  "sudo",
+  "shutdown",
+  "reboot",
+  "mkfs",
+  "dd if=",
+  "osascript",
+];
 const DESTRUCTIVE = ["rm ", "> /etc/", "chmod 777"];
 
 // The permission layer sees the tool call before dispatch. It can deny,
@@ -1098,7 +1235,9 @@ function stopHook(messages: Anthropic.MessageParam[]): null {
   const toolCount = messages.reduce(
     (n, m) =>
       n +
-      (Array.isArray(m.content) ? m.content.filter((b) => b.type === "tool_result").length : 0),
+      (Array.isArray(m.content)
+        ? m.content.filter((b) => b.type === "tool_result").length
+        : 0),
     0,
   );
   console.log(`\x1b[90m[HOOK] Stop: ${toolCount} tool result(s)\x1b[0m`);
@@ -1138,7 +1277,11 @@ const SUB_AGENT_TOOLS: Anthropic.Tool[] = [
   zodTool("bash", "Run a shell command.", subAgentBashSchema),
   zodTool("read_file", "Read file contents.", subAgentReadSchema),
   zodTool("write_file", "Write content to a file.", subAgentWriteSchema),
-  zodTool("edit_file", "Replace exact text in a file once.", subAgentEditSchema),
+  zodTool(
+    "edit_file",
+    "Replace exact text in a file once.",
+    subAgentEditSchema,
+  ),
   zodTool("glob", "Find files matching a glob pattern.", subAgentGlobSchema),
 ];
 
@@ -1154,12 +1297,15 @@ const SUB_HANDLERS: Partial<Record<string, (input: any) => string>> = {
   bash: ({ command }) => runBash(command),
   read_file: ({ path, limit, offset }) => runRead(path, limit, offset ?? 0),
   write_file: ({ path, content }) => runWrite(path, content),
-  edit_file: ({ path, old_text, new_text }) => runEdit(path, old_text, new_text),
+  edit_file: ({ path, old_text, new_text }) =>
+    runEdit(path, old_text, new_text),
   glob: ({ pattern }) => runGlob(pattern),
 };
 
 async function spawnSubagent(description: string): Promise<string> {
-  const messages: Anthropic.MessageParam[] = [{ role: "user", content: description }];
+  const messages: Anthropic.MessageParam[] = [
+    { role: "user", content: description },
+  ];
   let lastText = "";
   for (let round = 0; round < 30; round++) {
     const response = await client.messages.create({
@@ -1184,7 +1330,10 @@ async function spawnSubagent(description: string): Promise<string> {
       } else {
         const schema = SUB_AGENT_SCHEMAS[block.name];
         const handler = SUB_HANDLERS[block.name];
-        output = handler && schema ? handler(schema.parse(block.input)) : `Unknown: ${block.name}`;
+        output =
+          handler && schema
+            ? handler(schema.parse(block.input))
+            : `Unknown: ${block.name}`;
         await triggerHooks("PostToolUse", block, output);
       }
       results.push({
@@ -1205,16 +1354,22 @@ async function spawnSubagent(description: string): Promise<string> {
 // Compaction is layered: first shrink oversized tool results, then trim old
 // message ranges, and only call the model for a summary when the context is
 // still too large or the model explicitly asks for compact.
-const estimateSize = (msgs: Anthropic.MessageParam[]): number => JSON.stringify(msgs).length;
+const estimateSize = (msgs: Anthropic.MessageParam[]): number =>
+  JSON.stringify(msgs).length;
 
 // Replace an array's contents in place — callers hold the same reference
 // (mirrors Python's `messages[:] = ...`).
-function setMessages(messages: Anthropic.MessageParam[], next: Anthropic.MessageParam[]): void {
+function setMessages(
+  messages: Anthropic.MessageParam[],
+  next: Anthropic.MessageParam[],
+): void {
   messages.splice(0, messages.length, ...next);
 }
 
 const messageHasToolCall = (m: Anthropic.MessageParam): boolean =>
-  m.role === "assistant" && Array.isArray(m.content) && m.content.some((b) => b.type === "tool_use");
+  m.role === "assistant" &&
+  Array.isArray(m.content) &&
+  m.content.some((b) => b.type === "tool_use");
 
 // Tool results are user messages carrying tool_result content blocks.
 const isToolResultMessage = (m: Anthropic.MessageParam): boolean =>
@@ -1223,14 +1378,19 @@ const isToolResultMessage = (m: Anthropic.MessageParam): boolean =>
   m.content.some((b) => typeof b !== "string" && b.type === "tool_result");
 
 const outputText = (part: Anthropic.ToolResultBlockParam): string =>
-  typeof part.content === "string" ? part.content : JSON.stringify(part.content);
+  typeof part.content === "string"
+    ? part.content
+    : JSON.stringify(part.content);
 
-function collectToolResults(messages: Anthropic.MessageParam[]): Anthropic.ToolResultBlockParam[] {
+function collectToolResults(
+  messages: Anthropic.MessageParam[],
+): Anthropic.ToolResultBlockParam[] {
   const parts: Anthropic.ToolResultBlockParam[] = [];
   for (const m of messages) {
     if (m.role !== "user" || !Array.isArray(m.content)) continue;
     for (const part of m.content) {
-      if (typeof part !== "string" && part.type === "tool_result") parts.push(part);
+      if (typeof part !== "string" && part.type === "tool_result")
+        parts.push(part);
     }
   }
   return parts;
@@ -1249,13 +1409,16 @@ function toolResultBudget(
   maxBytes = 200_000,
 ): Anthropic.MessageParam[] {
   const last = messages[messages.length - 1];
-  if (!last || last.role !== "user" || !Array.isArray(last.content)) return messages;
+  if (last?.role !== "user" || !Array.isArray(last.content)) return messages;
   const blocks = last.content.filter(
-    (b): b is Anthropic.ToolResultBlockParam => typeof b !== "string" && b.type === "tool_result",
+    (b): b is Anthropic.ToolResultBlockParam =>
+      typeof b !== "string" && b.type === "tool_result",
   );
   let total = blocks.reduce((n, b) => n + outputText(b).length, 0);
   if (total <= maxBytes) return messages;
-  const ranked = [...blocks].sort((a, b) => outputText(b).length - outputText(a).length);
+  const ranked = [...blocks].sort(
+    (a, b) => outputText(b).length - outputText(a).length,
+  );
   for (const block of ranked) {
     if (total <= maxBytes) break;
     const content = outputText(block);
@@ -1266,7 +1429,10 @@ function toolResultBudget(
   return messages;
 }
 
-function snipCompact(messages: Anthropic.MessageParam[], maxMessages = 50): Anthropic.MessageParam[] {
+function snipCompact(
+  messages: Anthropic.MessageParam[],
+  maxMessages = 50,
+): Anthropic.MessageParam[] {
   if (messages.length <= maxMessages) return messages;
   const keepHead = 3;
   const keepTail = maxMessages - 3;
@@ -1274,7 +1440,8 @@ function snipCompact(messages: Anthropic.MessageParam[], maxMessages = 50): Anth
   let tailStart = messages.length - keepTail;
   // never split a tool-call/tool-result pair at either boundary
   if (headEnd > 0 && messageHasToolCall(messages[headEnd - 1])) {
-    while (headEnd < messages.length && isToolResultMessage(messages[headEnd])) headEnd += 1;
+    while (headEnd < messages.length && isToolResultMessage(messages[headEnd]))
+      headEnd += 1;
   }
   if (
     tailStart > 0 &&
@@ -1293,7 +1460,9 @@ function snipCompact(messages: Anthropic.MessageParam[], maxMessages = 50): Anth
   ];
 }
 
-function microCompact(messages: Anthropic.MessageParam[]): Anthropic.MessageParam[] {
+function microCompact(
+  messages: Anthropic.MessageParam[],
+): Anthropic.MessageParam[] {
   const toolResults = collectToolResults(messages);
   if (toolResults.length <= KEEP_RECENT_TOOL_RESULTS) return messages;
   for (const part of toolResults.slice(0, -KEEP_RECENT_TOOL_RESULTS)) {
@@ -1306,12 +1475,20 @@ function microCompact(messages: Anthropic.MessageParam[]): Anthropic.MessagePara
 
 function writeTranscript(messages: Anthropic.MessageParam[]): string {
   fs.mkdirSync(TRANSCRIPT_DIR, { recursive: true });
-  const filePath = path.join(TRANSCRIPT_DIR, `transcript_${Math.floor(Date.now() / 1000)}.jsonl`);
-  fs.writeFileSync(filePath, messages.map((m) => JSON.stringify(m)).join("\n") + "\n");
+  const filePath = path.join(
+    TRANSCRIPT_DIR,
+    `transcript_${Math.floor(Date.now() / 1000)}.jsonl`,
+  );
+  fs.writeFileSync(
+    filePath,
+    `${messages.map((m) => JSON.stringify(m)).join("\n")}\n`,
+  );
   return filePath;
 }
 
-async function summarizeHistory(messages: Anthropic.MessageParam[]): Promise<string> {
+async function summarizeHistory(
+  messages: Anthropic.MessageParam[],
+): Promise<string> {
   const conversation = JSON.stringify(messages).slice(0, 80_000);
   const prompt =
     "Summarize this coding-agent conversation so work can continue. " +
@@ -1339,7 +1516,9 @@ async function reactiveCompact(
   messages: Anthropic.MessageParam[],
 ): Promise<Anthropic.MessageParam[]> {
   const transcriptPath = writeTranscript(messages);
-  console.log(`  \x1b[31m[reactive compact] transcript saved: ${transcriptPath}\x1b[0m`);
+  console.log(
+    `  \x1b[31m[reactive compact] transcript saved: ${transcriptPath}\x1b[0m`,
+  );
   let tailStart = Math.max(0, messages.length - 5);
   if (
     tailStart > 0 &&
@@ -1392,7 +1571,10 @@ function errorStatus(e: unknown): number | undefined {
  * Exponential backoff for transient errors (429/529).
  * Non-transient errors are re-thrown for the outer handler.
  */
-async function withRetry<T>(fn: () => Promise<T>, state: RecoveryState): Promise<T> {
+async function withRetry<T>(
+  fn: () => Promise<T>,
+  state: RecoveryState,
+): Promise<T> {
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     try {
       const result = await fn();
@@ -1412,7 +1594,12 @@ async function withRetry<T>(fn: () => Promise<T>, state: RecoveryState): Promise
         continue;
       }
 
-      if (status === 529 || name.includes("overloaded") || msg.includes("overloaded") || msg.includes("529")) {
+      if (
+        status === 529 ||
+        name.includes("overloaded") ||
+        msg.includes("overloaded") ||
+        msg.includes("529")
+      ) {
         state.consecutive529 += 1;
         if (state.consecutive529 >= MAX_CONSECUTIVE_529 && FALLBACK_MODEL) {
           state.currentModel = FALLBACK_MODEL;
@@ -1449,7 +1636,11 @@ function isPromptTooLongError(e: unknown): boolean {
 // Slow tools return a placeholder tool_result immediately. Their real output is
 // later injected as a task_notification, so the main loop can keep moving.
 let bgCounter = 0;
-type BgTask = { toolCallId: string; command: string; status: "running" | "completed" };
+type BgTask = {
+  toolCallId: string;
+  command: string;
+  status: "running" | "completed";
+};
 const backgroundTasks: Record<string, BgTask> = {};
 const backgroundResults: Record<string, string> = {};
 
@@ -1474,7 +1665,9 @@ function isSlowOperation(toolName: string, toolInput: any): boolean {
 
 function shouldRunBackground(toolName: string, toolInput: any): boolean {
   if (toolName !== "bash") return false;
-  return Boolean(toolInput.run_in_background) || isSlowOperation(toolName, toolInput);
+  return (
+    Boolean(toolInput.run_in_background) || isSlowOperation(toolName, toolInput)
+  );
 }
 
 function startBackgroundTask(call: Anthropic.ToolUseBlock): string {
@@ -1483,7 +1676,11 @@ function startBackgroundTask(call: Anthropic.ToolUseBlock): string {
   const input = call.input as any;
   const cmd = String(input.command ?? call.name);
 
-  backgroundTasks[bgId] = { toolCallId: call.id, command: cmd, status: "running" };
+  backgroundTasks[bgId] = {
+    toolCallId: call.id,
+    command: cmd,
+    status: "running",
+  };
   void (async () => {
     const result = await runBashAsync(String(input.command ?? ""));
     await triggerHooks("PostToolUse", call, result);
@@ -1551,7 +1748,9 @@ function cronFieldMatches(field: string, value: number): boolean {
   }
   if (field.includes("-")) {
     const i = field.indexOf("-");
-    return Number(field.slice(0, i)) <= value && value <= Number(field.slice(i + 1));
+    return (
+      Number(field.slice(0, i)) <= value && value <= Number(field.slice(i + 1))
+    );
   }
   return value === Number(field);
 }
@@ -1579,11 +1778,16 @@ function cronMatches(cronExpr: string, dt: Date): boolean {
   return domOk || dowOk;
 }
 
-function validateCronField(field: string, lo: number, hi: number): string | null {
+function validateCronField(
+  field: string,
+  lo: number,
+  hi: number,
+): string | null {
   if (field === "*") return null;
   if (field.startsWith("*/")) {
     const stepStr = field.slice(2);
-    if (!isDigits(stepStr) || Number(stepStr) <= 0) return `Invalid step: ${field}`;
+    if (!isDigits(stepStr) || Number(stepStr) <= 0)
+      return `Invalid step: ${field}`;
     return null;
   }
   if (field.includes(",")) {
@@ -1600,7 +1804,8 @@ function validateCronField(field: string, lo: number, hi: number): string | null
     if (!isDigits(loStr) || !isDigits(hiStr)) return `Invalid range: ${field}`;
     const a = Number(loStr);
     const b = Number(hiStr);
-    if (a < lo || a > hi || b < lo || b > hi) return `Range ${field} out of bounds [${lo}-${hi}]`;
+    if (a < lo || a > hi || b < lo || b > hi)
+      return `Range ${field} out of bounds [${lo}-${hi}]`;
     if (a > b) return `Range start > end: ${field}`;
     return null;
   }
@@ -1636,7 +1841,9 @@ function saveDurableJobs(): void {
 function loadDurableJobs(): void {
   if (!fs.existsSync(DURABLE_PATH)) return;
   try {
-    for (const job of JSON.parse(fs.readFileSync(DURABLE_PATH, "utf8")) as CronJob[]) {
+    for (const job of JSON.parse(
+      fs.readFileSync(DURABLE_PATH, "utf8"),
+    ) as CronJob[]) {
       if (!validateCron(job.cron)) {
         scheduledJobs.set(job.id, job);
       }
@@ -1646,7 +1853,12 @@ function loadDurableJobs(): void {
   }
 }
 
-function scheduleJob(cron: string, prompt: string, recurring = true, durable = true): CronJob | string {
+function scheduleJob(
+  cron: string,
+  prompt: string,
+  recurring = true,
+  durable = true,
+): CronJob | string {
   const err = validateCron(cron);
   if (err) return err;
   const job: CronJob = {
@@ -1683,7 +1895,10 @@ function startCronScheduler(): void {
       `${pad(now.getHours())}:${pad(now.getMinutes())}`;
     for (const job of [...scheduledJobs.values()]) {
       try {
-        if (cronMatches(job.cron, now) && lastFiredAt.get(job.id) !== minuteMarker) {
+        if (
+          cronMatches(job.cron, now) &&
+          lastFiredAt.get(job.id) !== minuteMarker
+        ) {
           cronQueue.push(job);
           lastFiredAt.set(job.id, minuteMarker);
           if (!job.recurring) {
@@ -1708,7 +1923,12 @@ function hasCronQueue(): boolean {
   return cronQueue.length > 0;
 }
 
-function runScheduleCron(cron: string, prompt: string, recurring = true, durable = true): string {
+function runScheduleCron(
+  cron: string,
+  prompt: string,
+  recurring = true,
+  durable = true,
+): string {
   const result = scheduleJob(cron, prompt, recurring, durable);
   if (typeof result === "string") {
     return `Error: ${result}`;
@@ -1757,7 +1977,10 @@ class MCPClient {
     this.name = name;
   }
 
-  register(toolDefs: McpToolDef[], handlers: Record<string, (...args: any[]) => string>): void {
+  register(
+    toolDefs: McpToolDef[],
+    handlers: Record<string, (...args: any[]) => string>,
+  ): void {
     this.tools = toolDefs;
     this.handlers = handlers;
   }
@@ -1802,7 +2025,8 @@ function mockServerDocs(): MCPClient {
       },
     ],
     {
-      search: ({ query }: { query: string }) => `[docs] Found 3 results for '${query}'`,
+      search: ({ query }: { query: string }) =>
+        `[docs] Found 3 results for '${query}'`,
       get_version: () => "[docs] API v2.1.0",
     },
   );
@@ -1815,7 +2039,8 @@ function mockServerDeploy(): MCPClient {
     [
       {
         name: "trigger",
-        description: "Trigger a deployment. (destructive — requires approval in real CC)",
+        description:
+          "Trigger a deployment. (destructive — requires approval in real CC)",
         inputSchema: {
           type: "object",
           properties: { service: { type: "string" } },
@@ -1833,8 +2058,10 @@ function mockServerDeploy(): MCPClient {
       },
     ],
     {
-      trigger: ({ service }: { service: string }) => `[deploy] Triggered: ${service}`,
-      status: ({ service }: { service: string }) => `[deploy] ${service}: running (v1.4.2)`,
+      trigger: ({ service }: { service: string }) =>
+        `[deploy] Triggered: ${service}`,
+      status: ({ service }: { service: string }) =>
+        `[deploy] ${service}: running (v1.4.2)`,
     },
   );
   return client;
@@ -1854,7 +2081,9 @@ function connectMcp(name: string): string {
   const client = factory();
   mcpClients[name] = client;
   const toolNames = client.tools.map((t) => t.name);
-  terminalPrint(`  \x1b[31m[mcp] connected: ${name} → [${toolNames.join(", ")}]\x1b[0m`);
+  terminalPrint(
+    `  \x1b[31m[mcp] connected: ${name} → [${toolNames.join(", ")}]\x1b[0m`,
+  );
   return (
     `Connected to MCP server '${name}'. ` +
     `Discovered ${client.tools.length} tools: ${toolNames.join(", ")}`
@@ -1900,7 +2129,9 @@ function assembleToolPool(): {
 } {
   const tools: Anthropic.Tool[] = [...BUILTIN_TOOLS];
   const schemas: Partial<Record<string, z.ZodObject>> = { ...BUILTIN_SCHEMAS };
-  const handlers: Partial<Record<string, ToolHandler>> = { ...BUILTIN_HANDLERS };
+  const handlers: Partial<Record<string, ToolHandler>> = {
+    ...BUILTIN_HANDLERS,
+  };
   for (const [serverName, mcpClient] of Object.entries(mcpClients)) {
     const safeServer = normalizeMcpName(serverName);
     for (const toolDef of mcpClient.tools) {
@@ -1909,7 +2140,8 @@ function assembleToolPool(): {
       const schema = jsonSchemaToZod(toolDef.inputSchema ?? {});
       tools.push(zodTool(prefixed, toolDef.description ?? "", schema));
       schemas[prefixed] = schema;
-      handlers[prefixed] = (input: any) => mcpClient.callTool(toolDef.name, input);
+      handlers[prefixed] = (input: any) =>
+        mcpClient.callTool(toolDef.name, input);
     }
   }
   return { tools, schemas, handlers };
@@ -1931,7 +2163,11 @@ function runKeepWorktree(name: string): string {
 
 // ── Basic tool handlers ──
 
-function runCreateTask(subject: string, description = "", blockedBy?: string[]): string {
+function runCreateTask(
+  subject: string,
+  description = "",
+  blockedBy?: string[],
+): string {
   const task = createTask(subject, description, blockedBy ?? []);
   const deps = blockedBy?.length ? ` (blockedBy: ${blockedBy.join(", ")})` : "";
   terminalPrint(`  \x1b[34m[create] ${task.subject}${deps}\x1b[0m`);
@@ -1943,7 +2179,9 @@ function runListTasks(): string {
   if (!tasks.length) return "No tasks.";
   return tasks
     .map(
-      (t) => `  ${t.id}: ${t.subject} [${t.status}]` + (t.worktree ? ` (wt:${t.worktree})` : ""),
+      (t) =>
+        `  ${t.id}: ${t.subject} [${t.status}]` +
+        (t.worktree ? ` (wt:${t.worktree})` : ""),
     )
     .join("\n");
 }
@@ -2050,7 +2288,10 @@ const reviewPlanSchema = z.object({
   approve: z.boolean(),
   feedback: z.string().optional(),
 });
-const createWorktreeSchema = z.object({ name: z.string(), task_id: z.string().optional() });
+const createWorktreeSchema = z.object({
+  name: z.string(),
+  task_id: z.string().optional(),
+});
 const removeWorktreeSchema = z.object({
   name: z.string(),
   discard_changes: z.boolean().optional(),
@@ -2071,8 +2312,16 @@ const BUILTIN_TOOLS: Anthropic.Tool[] = [
     "Create and manage a task list for the current session.",
     todoWriteSchema,
   ),
-  zodTool("task", "Launch a focused subagent. Returns only its final summary.", taskSchema),
-  zodTool("load_skill", "Load the full content of a skill by name.", loadSkillSchema),
+  zodTool(
+    "task",
+    "Launch a focused subagent. Returns only its final summary.",
+    taskSchema,
+  ),
+  zodTool(
+    "load_skill",
+    "Load the full content of a skill by name.",
+    loadSkillSchema,
+  ),
   zodTool(
     "compact",
     "Summarize earlier conversation and continue with compacted context.",
@@ -2091,23 +2340,47 @@ const BUILTIN_TOOLS: Anthropic.Tool[] = [
   ),
   zodTool("list_crons", "List registered cron jobs.", listCronsSchema),
   zodTool("cancel_cron", "Cancel a cron job by ID.", cancelCronSchema),
-  zodTool("spawn_teammate", "Spawn an autonomous teammate.", spawnTeammateSchema),
+  zodTool(
+    "spawn_teammate",
+    "Spawn an autonomous teammate.",
+    spawnTeammateSchema,
+  ),
   zodTool("send_message", "Send message to a teammate.", sendMessageSchema),
   zodTool(
     "check_inbox",
     "Check inbox for messages and protocol responses.",
     checkInboxSchema,
   ),
-  zodTool("request_shutdown", "Request a teammate to shut down.", requestShutdownSchema),
-  zodTool("request_plan", "Ask a teammate to submit a plan.", requestPlanSchema),
-  zodTool("review_plan", "Approve or reject a submitted plan.", reviewPlanSchema),
-  zodTool("create_worktree", "Create an isolated git worktree.", createWorktreeSchema),
+  zodTool(
+    "request_shutdown",
+    "Request a teammate to shut down.",
+    requestShutdownSchema,
+  ),
+  zodTool(
+    "request_plan",
+    "Ask a teammate to submit a plan.",
+    requestPlanSchema,
+  ),
+  zodTool(
+    "review_plan",
+    "Approve or reject a submitted plan.",
+    reviewPlanSchema,
+  ),
+  zodTool(
+    "create_worktree",
+    "Create an isolated git worktree.",
+    createWorktreeSchema,
+  ),
   zodTool(
     "remove_worktree",
     "Remove a worktree. Refuses if changes exist.",
     removeWorktreeSchema,
   ),
-  zodTool("keep_worktree", "Keep a worktree for manual review.", keepWorktreeSchema),
+  zodTool(
+    "keep_worktree",
+    "Keep a worktree for manual review.",
+    keepWorktreeSchema,
+  ),
   zodTool(
     "connect_mcp",
     "Connect to an MCP server (docs, deploy) and discover tools.",
@@ -2150,7 +2423,8 @@ const BUILTIN_HANDLERS: Partial<Record<string, ToolHandler>> = {
   bash: ({ command }) => runBash(command),
   read_file: ({ path, limit, offset }) => runRead(path, limit, offset ?? 0),
   write_file: ({ path, content }) => runWrite(path, content),
-  edit_file: ({ path, old_text, new_text }) => runEdit(path, old_text, new_text),
+  edit_file: ({ path, old_text, new_text }) =>
+    runEdit(path, old_text, new_text),
   glob: ({ pattern }) => runGlob(pattern),
   todo_write: ({ todos }) => runTodoWrite(todos),
   task: ({ description }) => spawnSubagent(description),
@@ -2165,14 +2439,16 @@ const BUILTIN_HANDLERS: Partial<Record<string, ToolHandler>> = {
     runScheduleCron(cron, prompt, recurring ?? true, durable ?? true),
   list_crons: () => runListCrons(),
   cancel_cron: ({ job_id }) => runCancelCron(job_id),
-  spawn_teammate: ({ name, role, prompt }) => runSpawnTeammate(name, role, prompt),
+  spawn_teammate: ({ name, role, prompt }) =>
+    runSpawnTeammate(name, role, prompt),
   send_message: ({ to, content }) => runSendMessage(to, content),
   check_inbox: () => runCheckInbox(),
   request_shutdown: ({ teammate }) => runRequestShutdown(teammate),
   request_plan: ({ teammate, task }) => runRequestPlan(teammate, task),
   review_plan: ({ request_id, approve, feedback }) =>
     runReviewPlan(request_id, approve, feedback ?? ""),
-  create_worktree: ({ name, task_id }) => runCreateWorktree(name, task_id ?? ""),
+  create_worktree: ({ name, task_id }) =>
+    runCreateWorktree(name, task_id ?? ""),
   remove_worktree: ({ name, discard_changes }) =>
     runRemoveWorktree(name, discard_changes ?? false),
   keep_worktree: ({ name }) => runKeepWorktree(name),
@@ -2200,7 +2476,9 @@ function updateContext(): Context {
 let roundsSinceTodo = 0;
 
 // Every LLM turn enters through the same context budget pipeline.
-async function prepareContext(messages: Anthropic.MessageParam[]): Promise<void> {
+async function prepareContext(
+  messages: Anthropic.MessageParam[],
+): Promise<void> {
   setMessages(messages, toolResultBudget(messages));
   setMessages(messages, snipCompact(messages));
   setMessages(messages, microCompact(messages));
@@ -2212,7 +2490,9 @@ async function prepareContext(messages: Anthropic.MessageParam[]): Promise<void>
 // Completed background notifications return to the model as their own
 // user-side text message (used when none arrive alongside a tool_result
 // batch — e.g. between turns rather than right after tool execution).
-function injectBackgroundNotifications(messages: Anthropic.MessageParam[]): void {
+function injectBackgroundNotifications(
+  messages: Anthropic.MessageParam[],
+): void {
   const notes = collectBackgroundResults();
   if (notes.length) {
     messages.push({ role: "user", content: notes.join("\n") });
@@ -2243,7 +2523,10 @@ function callLLM(
   );
 }
 
-async function agentLoop(messages: Anthropic.MessageParam[], context: Context): Promise<void> {
+async function agentLoop(
+  messages: Anthropic.MessageParam[],
+  context: Context,
+): Promise<void> {
   let { tools, schemas, handlers } = assembleToolPool();
   const state = new RecoveryState();
   let maxTokens = DEFAULT_MAX_TOKENS;
@@ -2254,13 +2537,18 @@ async function agentLoop(messages: Anthropic.MessageParam[], context: Context): 
     const fired = consumeCronQueue();
     for (const job of fired) {
       messages.push({ role: "user", content: `[Scheduled] ${job.prompt}` });
-      terminalPrint(`  \x1b[35m[cron inject] ${job.prompt.slice(0, 60)}\x1b[0m`);
+      terminalPrint(
+        `  \x1b[35m[cron inject] ${job.prompt.slice(0, 60)}\x1b[0m`,
+      );
     }
 
     injectBackgroundNotifications(messages);
 
     if (roundsSinceTodo >= 3) {
-      messages.push({ role: "user", content: "<reminder>Update your todos.</reminder>" });
+      messages.push({
+        role: "user",
+        content: "<reminder>Update your todos.</reminder>",
+      });
       roundsSinceTodo = 0;
     }
 
@@ -2268,7 +2556,7 @@ async function agentLoop(messages: Anthropic.MessageParam[], context: Context): 
     context = updateContext();
     ({ tools, schemas, handlers } = assembleToolPool());
 
-    let response;
+    let response: Anthropic.Message;
     try {
       response = await callLLM(messages, context, tools, state, maxTokens);
     } catch (e) {
@@ -2319,7 +2607,10 @@ async function agentLoop(messages: Anthropic.MessageParam[], context: Context): 
         // compactHistory replaces the whole message list, so the pending
         // tool call disappears with it — no orphan tool_result needed.
         setMessages(messages, await compactHistory(messages));
-        messages.push({ role: "user", content: "[Compacted. Continue with summarized context.]" });
+        messages.push({
+          role: "user",
+          content: "[Compacted. Continue with summarized context.]",
+        });
         compactedNow = true;
         break;
       }
@@ -2379,7 +2670,10 @@ async function agentLoop(messages: Anthropic.MessageParam[], context: Context): 
 
 // Print every assistant text produced during this turn (Python:
 // print_turn_assistants), not just the final one.
-function printTurnAssistants(messages: Anthropic.MessageParam[], turnStart: number): void {
+function printTurnAssistants(
+  messages: Anthropic.MessageParam[],
+  turnStart: number,
+): void {
   for (const msg of messages.slice(turnStart)) {
     if (msg.role !== "assistant") continue;
     if (typeof msg.content === "string") {
@@ -2463,7 +2757,9 @@ while (true) {
       return reqId ? `${m.type} req:${reqId}` : m.type || "message";
     };
     const inboxText = inbox
-      .map((m) => `From ${m.from} [${inboxLabel(m)}]: ${m.content.slice(0, 200)}`)
+      .map(
+        (m) => `From ${m.from} [${inboxLabel(m)}]: ${m.content.slice(0, 200)}`,
+      )
       .join("\n");
     history.push({ role: "user", content: `[Inbox]\n${inboxText}` });
   }

@@ -7,8 +7,8 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { describe, expect, it, vi } from "vitest";
 import type Anthropic from "@anthropic-ai/sdk";
+import { describe, expect, it, vi } from "vitest";
 import {
   fakeClient,
   fakeMessage,
@@ -18,11 +18,11 @@ import {
   useTempDir,
 } from "../lib/testing";
 import {
+  type AskUser,
   agentLoop,
   checkDenyList,
   checkPermission,
   checkRules,
-  type AskUser,
 } from "./main";
 
 let tmp: string;
@@ -144,7 +144,10 @@ describe("agentLoop", () => {
   it("denies a deny-list tool call without executing it", async () => {
     const ask = vi.fn(allow);
     const client = fakeClient(
-      fakeMessage([toolUseBlock("tu_1", "bash", { command: "sudo ls" })], "tool_use"),
+      fakeMessage(
+        [toolUseBlock("tu_1", "bash", { command: "sudo ls" })],
+        "tool_use",
+      ),
       fakeMessage([textBlock("stopped")], "end_turn"),
     );
     const messages: Anthropic.MessageParam[] = [
@@ -167,7 +170,12 @@ describe("agentLoop", () => {
     const ask = vi.fn(deny);
     const client = fakeClient(
       fakeMessage(
-        [toolUseBlock("tu_1", "write_file", { path: "../escape.txt", content: "x" })],
+        [
+          toolUseBlock("tu_1", "write_file", {
+            path: "../escape.txt",
+            content: "x",
+          }),
+        ],
         "tool_use",
       ),
       fakeMessage([textBlock("ok")], "end_turn"),
@@ -188,7 +196,10 @@ describe("agentLoop", () => {
   it("executes a safe tool without asking", async () => {
     const ask = vi.fn(allow);
     const client = fakeClient(
-      fakeMessage([toolUseBlock("tu_1", "bash", { command: "echo hi" })], "tool_use"),
+      fakeMessage(
+        [toolUseBlock("tu_1", "bash", { command: "echo hi" })],
+        "tool_use",
+      ),
       fakeMessage([textBlock("done")], "end_turn"),
     );
     const messages: Anthropic.MessageParam[] = [
@@ -212,7 +223,11 @@ describe("agentLoop", () => {
     const ask = vi.fn(allow);
     const client = fakeClient(
       fakeMessage(
-        [toolUseBlock("tu_1", "bash", { command: `chmod 777 ${rel("perm.txt")}` })],
+        [
+          toolUseBlock("tu_1", "bash", {
+            command: `chmod 777 ${rel("perm.txt")}`,
+          }),
+        ],
         "tool_use",
       ),
       fakeMessage([textBlock("done")], "end_turn"),

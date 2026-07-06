@@ -113,10 +113,7 @@ export function createLogger(sessionDir: string): SessionLogger {
         writeTranscript("HOOK REGISTER", `${event} ← ${hookName}`);
         return;
       } else if (phase === "trigger") {
-        writeTranscript(
-          "HOOK TRIGGER",
-         `${event} → ${hookName}`
-        );
+        writeTranscript("HOOK TRIGGER", `${event} → ${hookName}`);
       } else if (phase === "result" && blocked) {
         writeTranscript(
           "HOOK RESULT",
@@ -131,7 +128,9 @@ export function createLogger(sessionDir: string): SessionLogger {
     },
 
     request(messages: Anthropic.MessageParam[]) {
-      writeJson("api_request", { new_messages: messages.slice(loggedMessages) });
+      writeJson("api_request", {
+        new_messages: messages.slice(loggedMessages),
+      });
       loggedMessages = messages.length;
     },
 

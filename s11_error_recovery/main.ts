@@ -37,7 +37,7 @@ import * as readline from "node:readline/promises";
 import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
 import { createClient, MODEL_ID } from "../lib/model";
-import { zodTool, textOf } from "../lib/tools";
+import { textOf, zodTool } from "../lib/tools";
 
 const client = createClient();
 
@@ -80,7 +80,11 @@ type Context = {
 };
 
 function assembleSystemPrompt(context: Context): string {
-  const sections = [PROMPT_SECTIONS.identity, PROMPT_SECTIONS.tools, PROMPT_SECTIONS.workspace];
+  const sections = [
+    PROMPT_SECTIONS.identity,
+    PROMPT_SECTIONS.tools,
+    PROMPT_SECTIONS.workspace,
+  ];
   if (context.memories) {
     sections.push(`Relevant memories:\n${context.memories}`);
   }
@@ -140,7 +144,10 @@ function runRead(p: string, limit?: number): string {
   try {
     let lines = fs.readFileSync(safePath(p), "utf8").split("\n");
     if (limit && limit < lines.length) {
-      lines = [...lines.slice(0, limit), `... (${lines.length - limit} more lines)`];
+      lines = [
+        ...lines.slice(0, limit),
+        `... (${lines.length - limit} more lines)`,
+      ];
     }
     return lines.join("\n");
   } catch (e) {
@@ -160,7 +167,10 @@ function runWrite(p: string, content: string): string {
 }
 
 const bashSchema = z.object({ command: z.string() });
-const readSchema = z.object({ path: z.string(), limit: z.number().int().optional() });
+const readSchema = z.object({
+  path: z.string(),
+  limit: z.number().int().optional(),
+});
 const writeSchema = z.object({ path: z.string(), content: z.string() });
 
 const tools: Anthropic.Tool[] = [
@@ -215,7 +225,10 @@ function errorStatus(e: unknown): number | undefined {
  * Exponential backoff for transient errors (429/529).
  * Non-transient errors are re-thrown for the outer handler.
  */
-async function withRetry<T>(fn: () => Promise<T>, state: RecoveryState): Promise<T> {
+async function withRetry<T>(
+  fn: () => Promise<T>,
+  state: RecoveryState,
+): Promise<T> {
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     try {
       const result = await fn();
@@ -238,7 +251,12 @@ async function withRetry<T>(fn: () => Promise<T>, state: RecoveryState): Promise
       }
 
       // 529 overloaded -> exponential backoff + fallback model
-      if (status === 529 || name.includes("overloaded") || msg.includes("overloaded") || msg.includes("529")) {
+      if (
+        status === 529 ||
+        name.includes("overloaded") ||
+        msg.includes("overloaded") ||
+        msg.includes("529")
+      ) {
         state.consecutive529 += 1;
         if (state.consecutive529 >= MAX_CONSECUTIVE_529) {
           if (FALLBACK_MODEL) {
@@ -288,8 +306,12 @@ function isPromptTooLongError(e: unknown): boolean {
  * the compacted message list. Teaching version simplifies to tail
  * retention since s08/s09 already cover LLM-based compact.
  */
-function reactiveCompact(messages: Anthropic.MessageParam[]): Anthropic.MessageParam[] {
-  console.log("  \x1b[31m[reactive compact] trimming to last 5 messages\x1b[0m");
+function reactiveCompact(
+  messages: Anthropic.MessageParam[],
+): Anthropic.MessageParam[] {
+  console.log(
+    "  \x1b[31m[reactive compact] trimming to last 5 messages\x1b[0m",
+  );
   const tail = messages.slice(-5);
   return [
     {
@@ -320,7 +342,10 @@ function updateContext(): Context {
 //  agentLoop — error recovery wrapping LLM calls
 // ═══════════════════════════════════════════════════════════
 
-async function agentLoop(messages: Anthropic.MessageParam[], context: Context): Promise<string> {
+async function agentLoop(
+  messages: Anthropic.MessageParam[],
+  context: Context,
+): Promise<string> {
   let system = getSystemPrompt(context);
   const state = new RecoveryState();
   let maxTokens = DEFAULT_MAX_TOKENS;
@@ -349,7 +374,9 @@ async function agentLoop(messages: Anthropic.MessageParam[], context: Context): 
           state.hasAttemptedReactiveCompact = true;
           continue;
         }
-        console.log("  \x1b[31m[unrecoverable] still too long after compact\x1b[0m");
+        console.log(
+          "  \x1b[31m[unrecoverable] still too long after compact\x1b[0m",
+        );
         const errText = "[Error] Context too large, cannot continue.";
         messages.push({ role: "assistant", content: errText });
         return errText;
@@ -357,7 +384,9 @@ async function agentLoop(messages: Anthropic.MessageParam[], context: Context): 
 
       // Unrecoverable
       const name = e instanceof Error ? e.name : "Error";
-      console.log(`  \x1b[31m[unrecoverable] ${name}: ${errMsg(e).slice(0, 100)}\x1b[0m`);
+      console.log(
+        `  \x1b[31m[unrecoverable] ${name}: ${errMsg(e).slice(0, 100)}\x1b[0m`,
+      );
       const errText = `[Error] ${name}: ${errMsg(e).slice(0, 200)}`;
       messages.push({ role: "assistant", content: errText });
       return errText;
@@ -401,7 +430,10 @@ async function agentLoop(messages: Anthropic.MessageParam[], context: Context): 
       console.log(`\x1b[36m> ${block.name}\x1b[0m`);
       const schema = TOOL_SCHEMAS[block.name];
       const handler = TOOL_HANDLERS[block.name];
-      const output = handler && schema ? handler(schema.parse(block.input)) : `Unknown: ${block.name}`;
+      const output =
+        handler && schema
+          ? handler(schema.parse(block.input))
+          : `Unknown: ${block.name}`;
       console.log(output.slice(0, 200));
       results.push({
         type: "tool_result",

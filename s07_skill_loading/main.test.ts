@@ -9,8 +9,8 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type Anthropic from "@anthropic-ai/sdk";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   fakeClient,
   fakeMessage,
@@ -29,9 +29,9 @@ import {
   permissionHook,
   resetNagCounter,
   runTodoWrite,
+  type SkillRegistry,
   scanSkills,
   spawnSubagent,
-  type SkillRegistry,
 } from "./main";
 
 beforeEach(() => {
@@ -46,7 +46,11 @@ const registry: SkillRegistry = {
     description: "Review a diff for bugs.",
     content: "FULL code-review content",
   },
-  pdf: { name: "pdf", description: "Work with PDFs.", content: "FULL pdf content" },
+  pdf: {
+    name: "pdf",
+    description: "Work with PDFs.",
+    content: "FULL pdf content",
+  },
 };
 
 // ── parseFrontmatter ──────────────────────────────────────
@@ -61,7 +65,9 @@ describe("parseFrontmatter", () => {
   });
 
   it("strips surrounding quotes from values", () => {
-    expect(parseFrontmatter(`---\nname: "quoted"\n---\nx`).meta.name).toBe("quoted");
+    expect(parseFrontmatter(`---\nname: "quoted"\n---\nx`).meta.name).toBe(
+      "quoted",
+    );
   });
 
   it("returns the whole text as body when there is no frontmatter", () => {
@@ -87,7 +93,10 @@ describe("scanSkills", () => {
       fs.mkdirSync(path.join(dir, name), { recursive: true });
       fs.writeFileSync(path.join(dir, name, "SKILL.md"), body);
     };
-    skill("code-review", "---\nname: code-review\ndescription: Review a diff.\n---\nbody");
+    skill(
+      "code-review",
+      "---\nname: code-review\ndescription: Review a diff.\n---\nbody",
+    );
     skill("pdf", "# PDF tools\n\nno frontmatter here");
     fs.mkdirSync(path.join(dir, "not-a-skill"), { recursive: true }); // no SKILL.md → skipped
     fs.writeFileSync(path.join(dir, "loose.txt"), "ignored"); // top-level file → skipped
@@ -152,20 +161,24 @@ describe("loadSkill", () => {
 // ── todo helpers (same as s05) ────────────────────────────
 describe("todo helpers", () => {
   it("normalizeTodos accepts an array", () => {
-    expect(normalizeTodos([{ content: "a", status: "pending" }]).error).toBeUndefined();
+    expect(
+      normalizeTodos([{ content: "a", status: "pending" }]).error,
+    ).toBeUndefined();
   });
 
   it("runTodoWrite reports the count", () => {
-    expect(runTodoWrite([{ content: "a", status: "pending" }])).toBe("Updated 1 tasks");
+    expect(runTodoWrite([{ content: "a", status: "pending" }])).toBe(
+      "Updated 1 tasks",
+    );
   });
 });
 
 // ── permissionHook (same as s06) ──────────────────────────
 describe("permissionHook", () => {
   it("denies deny-list bash commands", () => {
-    expect(permissionHook(toolUseBlock("t", "bash", { command: "sudo x" }))).toBe(
-      "Permission denied",
-    );
+    expect(
+      permissionHook(toolUseBlock("t", "bash", { command: "sudo x" })),
+    ).toBe("Permission denied");
   });
 });
 
@@ -182,7 +195,10 @@ describe("spawnSubagent", () => {
 
   it("runs its own tool loop before returning a summary", async () => {
     const client = fakeClient(
-      fakeMessage([toolUseBlock("s1", "bash", { command: "echo hi" })], "tool_use"),
+      fakeMessage(
+        [toolUseBlock("s1", "bash", { command: "echo hi" })],
+        "tool_use",
+      ),
       fakeMessage([textBlock("summary")], "end_turn"),
     );
 
@@ -194,7 +210,10 @@ describe("spawnSubagent", () => {
 
   it("falls back to a message when it never finishes", async () => {
     const rounds = Array.from({ length: 30 }, (_, i) =>
-      fakeMessage([toolUseBlock(`s${i}`, "bash", { command: "echo x" })], "tool_use"),
+      fakeMessage(
+        [toolUseBlock(`s${i}`, "bash", { command: "echo x" })],
+        "tool_use",
+      ),
     );
     const client = fakeClient(...rounds);
 
@@ -208,10 +227,15 @@ describe("spawnSubagent", () => {
 describe("agentLoop", () => {
   it("dispatches load_skill and injects the full content as the tool result", async () => {
     const client = fakeClient(
-      fakeMessage([toolUseBlock("tu_1", "load_skill", { name: "code-review" })], "tool_use"),
+      fakeMessage(
+        [toolUseBlock("tu_1", "load_skill", { name: "code-review" })],
+        "tool_use",
+      ),
       fakeMessage([textBlock("used the skill")], "end_turn"),
     );
-    const messages: Anthropic.MessageParam[] = [{ role: "user", content: "review this" }];
+    const messages: Anthropic.MessageParam[] = [
+      { role: "user", content: "review this" },
+    ];
 
     const result = await agentLoop(messages, {
       client,
@@ -228,11 +252,16 @@ describe("agentLoop", () => {
 
   it("dispatches the task tool to a subagent and keeps only its summary", async () => {
     const client = fakeClient(
-      fakeMessage([toolUseBlock("tu_1", "task", { description: "sub work" })], "tool_use"),
+      fakeMessage(
+        [toolUseBlock("tu_1", "task", { description: "sub work" })],
+        "tool_use",
+      ),
       fakeMessage([textBlock("sub result")], "end_turn"), // subagent's own turn
       fakeMessage([textBlock("parent done")], "end_turn"), // parent resumes
     );
-    const messages: Anthropic.MessageParam[] = [{ role: "user", content: "go" }];
+    const messages: Anthropic.MessageParam[] = [
+      { role: "user", content: "go" },
+    ];
 
     const result = await agentLoop(messages, {
       client,
@@ -249,10 +278,15 @@ describe("agentLoop", () => {
 
   it("executes a plain tool call", async () => {
     const client = fakeClient(
-      fakeMessage([toolUseBlock("tu_1", "bash", { command: "echo hi" })], "tool_use"),
+      fakeMessage(
+        [toolUseBlock("tu_1", "bash", { command: "echo hi" })],
+        "tool_use",
+      ),
       fakeMessage([textBlock("done")], "end_turn"),
     );
-    const messages: Anthropic.MessageParam[] = [{ role: "user", content: "go" }];
+    const messages: Anthropic.MessageParam[] = [
+      { role: "user", content: "go" },
+    ];
 
     const result = await agentLoop(messages, {
       client,

@@ -55,14 +55,14 @@ import * as path from "node:path";
 import * as readline from "node:readline/promises";
 import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
-import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
-import { zodTool, textOf } from "../lib/tools";
 import { createLogger, type SessionLogger } from "../lib/logger";
+import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
+import { textOf, zodTool } from "../lib/tools";
 import {
-  runRead as s02RunRead,
-  runWrite as s02RunWrite,
   runEdit as s02RunEdit,
   runGlob as s02RunGlob,
+  runRead as s02RunRead,
+  runWrite as s02RunWrite,
   safePath as s02SafePath,
 } from "../s02_tool_use/main";
 import { runBash as s03RunBash } from "../s03_permission/main";
@@ -108,9 +108,16 @@ export function runGlob(pattern: string): string {
 // ═══════════════════════════════════════════════════════════
 
 const bashSchema = z.object({ command: z.string() });
-const readSchema = z.object({ path: z.string(), limit: z.number().int().optional() });
+const readSchema = z.object({
+  path: z.string(),
+  limit: z.number().int().optional(),
+});
 const writeSchema = z.object({ path: z.string(), content: z.string() });
-const editSchema = z.object({ path: z.string(), old_text: z.string(), new_text: z.string() });
+const editSchema = z.object({
+  path: z.string(),
+  old_text: z.string(),
+  new_text: z.string(),
+});
 const globSchema = z.object({ pattern: z.string() });
 
 const tools: Anthropic.Tool[] = [
@@ -135,7 +142,8 @@ const TOOL_HANDLERS: Partial<Record<string, (input: any) => string>> = {
   bash: ({ command }) => runBash(command),
   read_file: ({ path, limit }) => runRead(path, limit),
   write_file: ({ path, content }) => runWrite(path, content),
-  edit_file: ({ path, old_text, new_text }) => runEdit(path, old_text, new_text),
+  edit_file: ({ path, old_text, new_text }) =>
+    runEdit(path, old_text, new_text),
   glob: ({ pattern }) => runGlob(pattern),
 };
 
@@ -174,7 +182,10 @@ export function registerHook(event: string, callback: Hook): void {
   hookLogger?.hook("register", event, callback.name);
 }
 
-export async function triggerHooks(event: string, ...args: any[]): Promise<string | null> {
+export async function triggerHooks(
+  event: string,
+  ...args: any[]
+): Promise<string | null> {
   for (const callback of HOOKS[event]) {
     hookLogger?.hook("trigger", event, callback.name);
     const result = await callback(...args);
@@ -200,20 +211,35 @@ type ToolCallInfo = Anthropic.ToolUseBlock;
 export type Confirm = (call: ToolCallInfo, warning: string) => Promise<boolean>;
 
 // s03 permission check logic, now wrapped as a hook
-const DENY_LIST = ["rm -rf /", "sudo", "shutdown", "reboot", "mkfs", "dd if=", "osascript"];
+const DENY_LIST = [
+  "rm -rf /",
+  "sudo",
+  "shutdown",
+  "reboot",
+  "mkfs",
+  "dd if=",
+  "osascript",
+];
 const DESTRUCTIVE = ["rm ", "> /etc/", "chmod 777"];
 
 // PreToolUse: s03 checkPermission() logic moved here.
 // 工厂函数：闭包捕获 confirm，返回真正的 hook（这就是给回调注入依赖的标准手法）。
 export function makePermissionHook(confirm: Confirm): Hook {
-  return async function permissionHook(call: ToolCallInfo): Promise<string | null> {
+  return async function permissionHook(
+    call: ToolCallInfo,
+  ): Promise<string | null> {
     const input = call.input as any;
     if (call.name === "bash") {
       const command: string = input.command ?? "";
       for (const pattern of DENY_LIST) {
         if (command.includes(pattern)) {
           hookLogger?.console(`⛔ Blocked: '${pattern}'`, "red");
-          hookLogger?.permission(call.name, input, `deny list: '${pattern}'`, "deny");
+          hookLogger?.permission(
+            call.name,
+            input,
+            `deny list: '${pattern}'`,
+            "deny",
+          );
           return "Permission denied by deny list";
         }
       }
@@ -237,7 +263,9 @@ export function makePermissionHook(confirm: Confirm): Hook {
 
 // PreToolUse: log every tool call.
 export function logHook(call: ToolCallInfo): null {
-  const argsPreview = JSON.stringify(Object.values((call.input as any) ?? {}).slice(0, 2)).slice(0, 60);
+  const argsPreview = JSON.stringify(
+    Object.values((call.input as any) ?? {}).slice(0, 2),
+  ).slice(0, 60);
   hookLogger?.console(`[HOOK] ${call.name}(${argsPreview})`);
   return null;
 }
@@ -245,7 +273,10 @@ export function logHook(call: ToolCallInfo): null {
 // PostToolUse: warn on large output.
 export function largeOutputHook(call: ToolCallInfo, output: string): null {
   if (output.length > 100_000) {
-    hookLogger?.console(`[HOOK] ⚠ Large output from ${call.name}: ${output.length} chars`, "yellow");
+    hookLogger?.console(
+      `[HOOK] ⚠ Large output from ${call.name}: ${output.length} chars`,
+      "yellow",
+    );
   }
   return null;
 }
@@ -261,7 +292,9 @@ export function summaryHook(messages: Anthropic.MessageParam[]): null {
   const toolCount = messages.reduce(
     (n, m) =>
       n +
-      (Array.isArray(m.content) ? m.content.filter((b) => b.type === "tool_result").length : 0),
+      (Array.isArray(m.content)
+        ? m.content.filter((b) => b.type === "tool_result").length
+        : 0),
     0,
   );
   hookLogger?.console(`[HOOK] Stop: session used ${toolCount} tool calls`);
@@ -330,7 +363,10 @@ export async function agentLoop(
 
       const schema = TOOL_SCHEMAS[block.name];
       const handler = TOOL_HANDLERS[block.name];
-      const output = handler && schema ? handler(schema.parse(block.input)) : `Unknown: ${block.name}`;
+      const output =
+        handler && schema
+          ? handler(schema.parse(block.input))
+          : `Unknown: ${block.name}`;
       logger.toolResult(block.name, output);
 
       // 特殊点 3：PostToolUse hook 拿到输出做观察（如大输出告警），不改结果。
@@ -377,7 +413,12 @@ if (import.meta.main) {
       return false; // stdin closed — nobody left to approve
     }
     const allowed = choice === "y" || choice === "yes";
-    logger.permission(call.name, call.input, warning, allowed ? "allow" : "deny");
+    logger.permission(
+      call.name,
+      call.input,
+      warning,
+      allowed ? "allow" : "deny",
+    );
     return allowed;
   };
 

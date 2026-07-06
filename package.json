@@ -9,6 +9,9 @@
     "dev": "env -u ANTHROPIC_AUTH_TOKEN tsx --env-file-if-exists=.env",
     "smoke": "env -u ANTHROPIC_AUTH_TOKEN tsx --env-file-if-exists=.env lib/smoke.ts",
     "typecheck": "tsc --noEmit",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "format": "biome format --write .",
     "test": "vitest run",
     "test:watch": "vitest"
   },
@@ -17,6 +20,7 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@biomejs/biome": "2.5.3",
     "@types/node": "^26.1.0",
     "tsx": "^4.23.0",
     "typescript": "^6.0.3",

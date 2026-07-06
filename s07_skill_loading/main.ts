@@ -37,14 +37,14 @@ import * as path from "node:path";
 import * as readline from "node:readline/promises";
 import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
-import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
-import { zodTool, textOf } from "../lib/tools";
 import { createLogger, type SessionLogger } from "../lib/logger";
+import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
+import { textOf, zodTool } from "../lib/tools";
 import {
-  runRead as s02RunRead,
-  runWrite as s02RunWrite,
   runEdit as s02RunEdit,
   runGlob as s02RunGlob,
+  runRead as s02RunRead,
+  runWrite as s02RunWrite,
   safePath as s02SafePath,
 } from "../s02_tool_use/main";
 
@@ -64,7 +64,10 @@ export type SkillRegistry = Record<string, Skill>;
 // Parse frontmatter from SKILL.md. Returns { meta, body }.
 // Note a JS gotcha vs Python: `text.split("---", 2)` in JS TRUNCATES the rest,
 // while Python keeps it in the last part — so slice by index instead.
-export function parseFrontmatter(text: string): { meta: Record<string, string>; body: string } {
+export function parseFrontmatter(text: string): {
+  meta: Record<string, string>;
+  body: string;
+} {
   if (!text.startsWith("---")) return { meta: {}, body: text };
   const end = text.indexOf("---", 3);
   if (end === -1) return { meta: {}, body: text };
@@ -97,7 +100,8 @@ export function scanSkills(dir: string): SkillRegistry {
     const raw = fs.readFileSync(manifest, "utf8");
     const { meta } = parseFrontmatter(raw);
     const name = meta.name ?? entry.name;
-    const description = meta.description ?? (raw.split("\n")[0] ?? "").replace(/^#+/, "").trim();
+    const description =
+      meta.description ?? (raw.split("\n")[0] ?? "").replace(/^#+/, "").trim();
     registry[name] = { name, description, content: raw };
   }
   return registry;
@@ -185,7 +189,10 @@ type Todo = z.infer<typeof todoItem>;
 
 let currentTodos: Todo[] = [];
 
-export function normalizeTodos(todos: unknown): { todos?: Todo[]; error?: string } {
+export function normalizeTodos(todos: unknown): {
+  todos?: Todo[];
+  error?: string;
+} {
   if (typeof todos === "string") {
     try {
       todos = JSON.parse(todos);
@@ -195,7 +202,9 @@ export function normalizeTodos(todos: unknown): { todos?: Todo[]; error?: string
   }
   const parsed = z.array(todoItem).safeParse(todos);
   if (!parsed.success) {
-    return { error: "Error: todos must be a list of {content, status} objects" };
+    return {
+      error: "Error: todos must be a list of {content, status} objects",
+    };
   }
   return { todos: parsed.data };
 }
@@ -222,11 +231,20 @@ export function runTodoWrite(todosInput: unknown): string {
 // ═══════════════════════════════════════════════════════════
 
 const bashSchema = z.object({ command: z.string() });
-const readSchema = z.object({ path: z.string(), limit: z.number().int().optional() });
+const readSchema = z.object({
+  path: z.string(),
+  limit: z.number().int().optional(),
+});
 const writeSchema = z.object({ path: z.string(), content: z.string() });
-const editSchema = z.object({ path: z.string(), old_text: z.string(), new_text: z.string() });
+const editSchema = z.object({
+  path: z.string(),
+  old_text: z.string(),
+  new_text: z.string(),
+});
 const globSchema = z.object({ pattern: z.string() });
-const todoWriteSchema = z.object({ todos: z.union([z.array(todoItem), z.string()]) });
+const todoWriteSchema = z.object({
+  todos: z.union([z.array(todoItem), z.string()]),
+});
 const taskSchema = z.object({ description: z.string() });
 const loadSkillSchema = z.object({ name: z.string() });
 
@@ -260,7 +278,11 @@ const tools: Anthropic.Tool[] = [
     taskSchema,
   ),
   // s07: skill tool (catalog is already in SYSTEM prompt, this loads full content)
-  zodTool("load_skill", "Load the full content of a skill by name.", loadSkillSchema),
+  zodTool(
+    "load_skill",
+    "Load the full content of a skill by name.",
+    loadSkillSchema,
+  ),
 ];
 
 const TOOL_SCHEMAS: Partial<Record<string, z.ZodObject>> = {
@@ -277,7 +299,8 @@ const SUB_HANDLERS: Partial<Record<string, (input: any) => string>> = {
   bash: ({ command }) => runBash(command),
   read_file: ({ path, limit }) => runRead(path, limit),
   write_file: ({ path, content }) => runWrite(path, content),
-  edit_file: ({ path, old_text, new_text }) => runEdit(path, old_text, new_text),
+  edit_file: ({ path, old_text, new_text }) =>
+    runEdit(path, old_text, new_text),
   glob: ({ pattern }) => runGlob(pattern),
 };
 
@@ -299,10 +322,15 @@ const TOOL_HANDLERS: Partial<
 //  FROM s06 (unchanged): Subagent — fresh messages[], summary only
 // ═══════════════════════════════════════════════════════════
 
-export async function spawnSubagent(description: string, deps: Deps): Promise<string> {
+export async function spawnSubagent(
+  description: string,
+  deps: Deps,
+): Promise<string> {
   const { client, logger } = deps;
   console.log(`\n\x1b[35m[Subagent spawned]\x1b[0m`);
-  const messages: Anthropic.MessageParam[] = [{ role: "user", content: description }]; // fresh context
+  const messages: Anthropic.MessageParam[] = [
+    { role: "user", content: description },
+  ]; // fresh context
   let lastText = "";
 
   for (let turn = 0; turn < 30; turn++) {
@@ -338,10 +366,15 @@ export async function spawnSubagent(description: string, deps: Deps): Promise<st
 
       const schema = FILE_SCHEMAS[block.name];
       const handler = SUB_HANDLERS[block.name];
-      const output = handler && schema ? handler(schema.parse(block.input)) : `Unknown: ${block.name}`;
+      const output =
+        handler && schema
+          ? handler(schema.parse(block.input))
+          : `Unknown: ${block.name}`;
       logger.toolResult(block.name, output);
       await triggerHooks("PostToolUse", block, output);
-      console.log(`  \x1b[90m[sub] ${block.name}: ${output.slice(0, 100)}\x1b[0m`);
+      console.log(
+        `  \x1b[90m[sub] ${block.name}: ${output.slice(0, 100)}\x1b[0m`,
+      );
       results.push({
         type: "tool_result",
         tool_use_id: block.id,
@@ -374,7 +407,10 @@ export function registerHook(event: string, callback: Hook): void {
   HOOKS[event].push(callback);
 }
 
-export async function triggerHooks(event: string, ...args: any[]): Promise<string | null> {
+export async function triggerHooks(
+  event: string,
+  ...args: any[]
+): Promise<string | null> {
   for (const callback of HOOKS[event]) {
     const result = await callback(...args);
     if (result != null) return result;
@@ -389,7 +425,15 @@ export function clearHooks(): void {
 
 type ToolCallInfo = Anthropic.ToolUseBlock;
 
-const DENY_LIST = ["rm -rf /", "sudo", "shutdown", "reboot", "mkfs", "dd if=", "osascript"];
+const DENY_LIST = [
+  "rm -rf /",
+  "sudo",
+  "shutdown",
+  "reboot",
+  "mkfs",
+  "dd if=",
+  "osascript",
+];
 
 // PreToolUse: deny list check.
 export function permissionHook(call: ToolCallInfo): string | null {
@@ -421,10 +465,14 @@ export function summaryHook(messages: Anthropic.MessageParam[]): null {
   const toolCount = messages.reduce(
     (n, m) =>
       n +
-      (Array.isArray(m.content) ? m.content.filter((b) => b.type === "tool_result").length : 0),
+      (Array.isArray(m.content)
+        ? m.content.filter((b) => b.type === "tool_result").length
+        : 0),
     0,
   );
-  console.log(`\x1b[90m[HOOK] Stop: session used ${toolCount} tool calls\x1b[0m`);
+  console.log(
+    `\x1b[90m[HOOK] Stop: session used ${toolCount} tool calls\x1b[0m`,
+  );
   return null;
 }
 
@@ -454,7 +502,10 @@ export async function agentLoop(
   while (true) {
     // s05: nag reminder
     if (roundsSinceTodo >= 3 && messages.length) {
-      messages.push({ role: "user", content: "<reminder>Update your todos.</reminder>" });
+      messages.push({
+        role: "user",
+        content: "<reminder>Update your todos.</reminder>",
+      });
       roundsSinceTodo = 0;
     }
 
@@ -552,7 +603,12 @@ if (import.meta.main) {
     logger.userInput(query);
     await triggerHooks("UserPromptSubmit", query);
     history.push({ role: "user", content: query });
-    const finalText = await agentLoop(history, { client, logger, skills, system });
+    const finalText = await agentLoop(history, {
+      client,
+      logger,
+      skills,
+      system,
+    });
     console.log(finalText);
     console.log();
   }

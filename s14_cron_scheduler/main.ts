@@ -37,7 +37,7 @@ import { promisify } from "node:util";
 import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
 import { createClient, MODEL_ID } from "../lib/model";
-import { zodTool, textOf } from "../lib/tools";
+import { textOf, zodTool } from "../lib/tools";
 
 const client = createClient();
 
@@ -69,7 +69,11 @@ type Task = {
 
 const taskPath = (taskId: string) => path.join(TASKS_DIR, `${taskId}.json`);
 
-function createTask(subject: string, description = "", blockedBy: string[] = []): Task {
+function createTask(
+  subject: string,
+  description = "",
+  blockedBy: string[] = [],
+): Task {
   const task: Task = {
     id: `task_${Math.floor(Date.now() / 1000)}_${String(Math.floor(Math.random() * 10_000)).padStart(4, "0")}`,
     subject,
@@ -95,7 +99,10 @@ function listTasks(): Task[] {
     .readdirSync(TASKS_DIR)
     .filter((f) => f.startsWith("task_") && f.endsWith(".json"))
     .sort()
-    .map((f) => JSON.parse(fs.readFileSync(path.join(TASKS_DIR, f), "utf8")) as Task);
+    .map(
+      (f) =>
+        JSON.parse(fs.readFileSync(path.join(TASKS_DIR, f), "utf8")) as Task,
+    );
 }
 
 // Return full task details as JSON.
@@ -130,7 +137,9 @@ function claimTask(taskId: string, owner = "agent"): string {
   task.owner = owner;
   task.status = "in_progress";
   saveTask(task);
-  console.log(`  \x1b[36m[claim] ${task.subject} → in_progress (owner: ${owner})\x1b[0m`);
+  console.log(
+    `  \x1b[36m[claim] ${task.subject} → in_progress (owner: ${owner})\x1b[0m`,
+  );
   return `Claimed ${task.id} (${task.subject})`;
 }
 
@@ -142,7 +151,9 @@ function completeTask(taskId: string): string {
   task.status = "completed";
   saveTask(task);
   const unblocked = listTasks()
-    .filter((t) => t.status === "pending" && t.blockedBy.length > 0 && canStart(t.id))
+    .filter(
+      (t) => t.status === "pending" && t.blockedBy.length > 0 && canStart(t.id),
+    )
     .map((t) => t.subject);
   console.log(`  \x1b[32m[complete] ${task.subject} ✓\x1b[0m`);
   let msg = `Completed ${task.id} (${task.subject})`;
@@ -174,7 +185,11 @@ type Context = {
 };
 
 function assembleSystemPrompt(context: Context): string {
-  const sections = [PROMPT_SECTIONS.identity, PROMPT_SECTIONS.tools, PROMPT_SECTIONS.workspace];
+  const sections = [
+    PROMPT_SECTIONS.identity,
+    PROMPT_SECTIONS.tools,
+    PROMPT_SECTIONS.workspace,
+  ];
   if (context.memories) {
     sections.push(`Relevant memories:\n${context.memories}`);
   }
@@ -248,7 +263,10 @@ function runRead(p: string, limit?: number): string {
   try {
     let lines = fs.readFileSync(safePath(p), "utf8").split("\n");
     if (limit && limit < lines.length) {
-      lines = [...lines.slice(0, limit), `... (${lines.length - limit} more lines)`];
+      lines = [
+        ...lines.slice(0, limit),
+        `... (${lines.length - limit} more lines)`,
+      ];
     }
     return lines.join("\n");
   } catch (e) {
@@ -269,7 +287,11 @@ function runWrite(p: string, content: string): string {
 
 // ── Task tools ──
 
-function runCreateTask(subject: string, description = "", blockedBy?: string[]): string {
+function runCreateTask(
+  subject: string,
+  description = "",
+  blockedBy?: string[],
+): string {
   const task = createTask(subject, description, blockedBy ?? []);
   const deps = blockedBy?.length ? ` (blockedBy: ${blockedBy.join(", ")})` : "";
   console.log(`  \x1b[34m[create] ${task.subject}${deps}\x1b[0m`);
@@ -287,7 +309,9 @@ function runListTasks(): string {
   return tasks
     .map((t) => {
       const icon = icons[t.status] ?? "?";
-      const deps = t.blockedBy.length ? ` (blockedBy: ${t.blockedBy.join(", ")})` : "";
+      const deps = t.blockedBy.length
+        ? ` (blockedBy: ${t.blockedBy.join(", ")})`
+        : "";
       const owner = t.owner ? ` [${t.owner}]` : "";
       return `  ${icon} ${t.id}: ${t.subject} [${t.status}]${owner}${deps}`;
     })
@@ -315,7 +339,11 @@ function runCompleteTask(taskId: string): string {
 // ═══════════════════════════════════════════════════════════
 
 let bgCounter = 0;
-type BgTask = { toolCallId: string; command: string; status: "running" | "completed" };
+type BgTask = {
+  toolCallId: string;
+  command: string;
+  status: "running" | "completed";
+};
 const backgroundTasks: Record<string, BgTask> = {};
 const backgroundResults: Record<string, string> = {};
 
@@ -353,7 +381,11 @@ function executeTool(toolName: string, input: any): string {
 }
 
 // Run tool in a detached async worker. Returns background task ID.
-function startBackgroundTask(toolName: string, toolCallId: string, input: any): string {
+function startBackgroundTask(
+  toolName: string,
+  toolCallId: string,
+  input: any,
+): string {
   bgCounter += 1;
   const bgId = `bg_${String(bgCounter).padStart(4, "0")}`;
   const cmd = String(input.command ?? toolName);
@@ -368,7 +400,9 @@ function startBackgroundTask(toolName: string, toolCallId: string, input: any): 
     backgroundResults[bgId] = result;
   })();
 
-  console.log(`  \x1b[33m[background] dispatched ${bgId}: ${cmd.slice(0, 40)}\x1b[0m`);
+  console.log(
+    `  \x1b[33m[background] dispatched ${bgId}: ${cmd.slice(0, 40)}\x1b[0m`,
+  );
   return bgId;
 }
 
@@ -431,7 +465,9 @@ function cronFieldMatches(field: string, value: number): boolean {
   }
   if (field.includes("-")) {
     const i = field.indexOf("-");
-    return Number(field.slice(0, i)) <= value && value <= Number(field.slice(i + 1));
+    return (
+      Number(field.slice(0, i)) <= value && value <= Number(field.slice(i + 1))
+    );
   }
   return value === Number(field);
 }
@@ -464,7 +500,11 @@ function cronMatches(cronExpr: string, dt: Date): boolean {
 }
 
 // Validate a single cron field value is within [lo, hi].
-function validateCronField(field: string, lo: number, hi: number): string | null {
+function validateCronField(
+  field: string,
+  lo: number,
+  hi: number,
+): string | null {
   if (field === "*") return null;
   if (field.startsWith("*/")) {
     const stepStr = field.slice(2);
@@ -486,7 +526,8 @@ function validateCronField(field: string, lo: number, hi: number): string | null
     if (!isDigits(loStr) || !isDigits(hiStr)) return `Invalid range: ${field}`;
     const a = Number(loStr);
     const b = Number(hiStr);
-    if (a < lo || a > hi || b < lo || b > hi) return `Range ${field} out of bounds [${lo}-${hi}]`;
+    if (a < lo || a > hi || b < lo || b > hi)
+      return `Range ${field} out of bounds [${lo}-${hi}]`;
     if (a > b) return `Range start > end: ${field}`;
     return null;
   }
@@ -530,7 +571,9 @@ function loadDurableJobs(): void {
     for (const job of jobs) {
       const err = validateCron(job.cron);
       if (err) {
-        console.log(`  \x1b[31m[cron] skipping invalid job ${job.id}: ${err}\x1b[0m`);
+        console.log(
+          `  \x1b[31m[cron] skipping invalid job ${job.id}: ${err}\x1b[0m`,
+        );
         continue;
       }
       scheduledJobs.set(job.id, job);
@@ -545,7 +588,12 @@ function loadDurableJobs(): void {
 }
 
 // Register a new cron job. Returns CronJob or error string.
-function scheduleJob(cron: string, prompt: string, recurring = true, durable = true): CronJob | string {
+function scheduleJob(
+  cron: string,
+  prompt: string,
+  recurring = true,
+  durable = true,
+): CronJob | string {
   const err = validateCron(cron);
   if (err) return err;
   const job: CronJob = {
@@ -557,7 +605,9 @@ function scheduleJob(cron: string, prompt: string, recurring = true, durable = t
   };
   scheduledJobs.set(job.id, job);
   if (durable) saveDurableJobs();
-  console.log(`  \x1b[35m[cron register] ${job.id} '${cron}' → ${prompt.slice(0, 40)}\x1b[0m`);
+  console.log(
+    `  \x1b[35m[cron register] ${job.id} '${cron}' → ${prompt.slice(0, 40)}\x1b[0m`,
+  );
   return job;
 }
 
@@ -590,7 +640,9 @@ function startCronScheduler(): void {
           if (lastFiredAt.get(job.id) !== minuteMarker) {
             cronQueue.push(job);
             lastFiredAt.set(job.id, minuteMarker);
-            console.log(`  \x1b[35m[cron fire] ${job.id} → ${job.prompt.slice(0, 40)}\x1b[0m`);
+            console.log(
+              `  \x1b[35m[cron fire] ${job.id} → ${job.prompt.slice(0, 40)}\x1b[0m`,
+            );
           }
           if (!job.recurring) {
             scheduledJobs.delete(job.id);
@@ -623,7 +675,12 @@ console.log("  \x1b[35m[cron] scheduler timer started\x1b[0m");
 
 // ── Cron tools ──
 
-function runScheduleCron(cron: string, prompt: string, recurring = true, durable = true): string {
+function runScheduleCron(
+  cron: string,
+  prompt: string,
+  recurring = true,
+  durable = true,
+): string {
   const result = scheduleJob(cron, prompt, recurring, durable);
   if (typeof result === "string") {
     return `Error: ${result}`;
@@ -653,7 +710,10 @@ const bashSchema = z.object({
   command: z.string(),
   run_in_background: z.boolean().optional(),
 });
-const readSchema = z.object({ path: z.string(), limit: z.number().int().optional() });
+const readSchema = z.object({
+  path: z.string(),
+  limit: z.number().int().optional(),
+});
 const writeSchema = z.object({ path: z.string(), content: z.string() });
 const createTaskSchema = z.object({
   subject: z.string(),
@@ -682,8 +742,16 @@ const tools: Anthropic.Tool[] = [
     "Create a new task with optional blockedBy dependencies.",
     createTaskSchema,
   ),
-  zodTool("list_tasks", "List all tasks with status, owner, and dependencies.", listTasksSchema),
-  zodTool("get_task", "Get full details of a specific task by ID.", getTaskSchema),
+  zodTool(
+    "list_tasks",
+    "List all tasks with status, owner, and dependencies.",
+    listTasksSchema,
+  ),
+  zodTool(
+    "get_task",
+    "Get full details of a specific task by ID.",
+    getTaskSchema,
+  ),
   zodTool(
     "claim_task",
     "Claim a pending task. Sets owner, changes status to in_progress.",
@@ -755,7 +823,10 @@ function updateContext(): Context {
 // startCronScheduler produces work; startQueueProcessor wakes this loop when
 // queued work exists and no other agent turn is running.
 
-async function agentLoop(messages: Anthropic.MessageParam[], context: Context): Promise<string> {
+async function agentLoop(
+  messages: Anthropic.MessageParam[],
+  context: Context,
+): Promise<string> {
   let system = getSystemPrompt(context);
   while (true) {
     // Layer 4: consume fired cron jobs → inject as messages
@@ -765,7 +836,7 @@ async function agentLoop(messages: Anthropic.MessageParam[], context: Context): 
       console.log(`  \x1b[35m[inject cron] ${job.prompt.slice(0, 50)}\x1b[0m`);
     }
 
-    let response;
+    let response: Anthropic.Message;
     try {
       response = await client.messages.create({
         model: MODEL_ID,
@@ -850,7 +921,9 @@ function startQueueProcessor(): void {
     agentBusy = true;
     try {
       if (!hasCronQueue()) return;
-      console.log("\n  \x1b[35m[queue processor] delivering scheduled work\x1b[0m");
+      console.log(
+        "\n  \x1b[35m[queue processor] delivering scheduled work\x1b[0m",
+      );
       await runAgentTurnLocked();
     } finally {
       agentBusy = false;

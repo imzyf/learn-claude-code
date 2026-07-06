@@ -6,8 +6,9 @@
  * agentLoop 通过 task 工具分发到 subagent——父子共用同一个注入的 client，
  * fake client 按序弹出「父→子→父」的响应即可验证隔离。
  */
-import { beforeEach, describe, expect, it } from "vitest";
+
 import type Anthropic from "@anthropic-ai/sdk";
+import { beforeEach, describe, expect, it } from "vitest";
 import {
   fakeClient,
   fakeMessage,
@@ -33,20 +34,24 @@ beforeEach(() => {
 // ── todo helpers (same as s05) ────────────────────────────
 describe("todo helpers", () => {
   it("normalizeTodos accepts an array", () => {
-    expect(normalizeTodos([{ content: "a", status: "pending" }]).error).toBeUndefined();
+    expect(
+      normalizeTodos([{ content: "a", status: "pending" }]).error,
+    ).toBeUndefined();
   });
 
   it("runTodoWrite reports the count", () => {
-    expect(runTodoWrite([{ content: "a", status: "pending" }])).toBe("Updated 1 tasks");
+    expect(runTodoWrite([{ content: "a", status: "pending" }])).toBe(
+      "Updated 1 tasks",
+    );
   });
 });
 
 // ── permissionHook ────────────────────────────────────────
 describe("permissionHook", () => {
   it("denies deny-list bash commands", () => {
-    expect(permissionHook(toolUseBlock("t", "bash", { command: "sudo x" }))).toBe(
-      "Permission denied",
-    );
+    expect(
+      permissionHook(toolUseBlock("t", "bash", { command: "sudo x" })),
+    ).toBe("Permission denied");
   });
 });
 
@@ -63,7 +68,10 @@ describe("spawnSubagent", () => {
 
   it("runs its own tool loop before returning a summary", async () => {
     const client = fakeClient(
-      fakeMessage([toolUseBlock("s1", "bash", { command: "echo hi" })], "tool_use"),
+      fakeMessage(
+        [toolUseBlock("s1", "bash", { command: "echo hi" })],
+        "tool_use",
+      ),
       fakeMessage([textBlock("summary")], "end_turn"),
     );
 
@@ -76,7 +84,10 @@ describe("spawnSubagent", () => {
   it("falls back to a message when it never finishes", async () => {
     // 30 个 tool_use 响应，永不 end_turn → 触发安全上限兜底
     const rounds = Array.from({ length: 30 }, (_, i) =>
-      fakeMessage([toolUseBlock(`s${i}`, "bash", { command: "echo x" })], "tool_use"),
+      fakeMessage(
+        [toolUseBlock(`s${i}`, "bash", { command: "echo x" })],
+        "tool_use",
+      ),
     );
     const client = fakeClient(...rounds);
 
@@ -90,11 +101,16 @@ describe("spawnSubagent", () => {
 describe("agentLoop", () => {
   it("dispatches the task tool to a subagent and keeps only its summary", async () => {
     const client = fakeClient(
-      fakeMessage([toolUseBlock("tu_1", "task", { description: "sub work" })], "tool_use"),
+      fakeMessage(
+        [toolUseBlock("tu_1", "task", { description: "sub work" })],
+        "tool_use",
+      ),
       fakeMessage([textBlock("sub result")], "end_turn"), // subagent's own turn
       fakeMessage([textBlock("parent done")], "end_turn"), // parent resumes
     );
-    const messages: Anthropic.MessageParam[] = [{ role: "user", content: "go" }];
+    const messages: Anthropic.MessageParam[] = [
+      { role: "user", content: "go" },
+    ];
 
     const result = await agentLoop(messages, { client, logger: noopLogger });
 
@@ -107,10 +123,15 @@ describe("agentLoop", () => {
 
   it("executes a plain tool call", async () => {
     const client = fakeClient(
-      fakeMessage([toolUseBlock("tu_1", "bash", { command: "echo hi" })], "tool_use"),
+      fakeMessage(
+        [toolUseBlock("tu_1", "bash", { command: "echo hi" })],
+        "tool_use",
+      ),
       fakeMessage([textBlock("done")], "end_turn"),
     );
-    const messages: Anthropic.MessageParam[] = [{ role: "user", content: "go" }];
+    const messages: Anthropic.MessageParam[] = [
+      { role: "user", content: "go" },
+    ];
 
     const result = await agentLoop(messages, { client, logger: noopLogger });
 

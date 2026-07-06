@@ -33,14 +33,14 @@ import * as path from "node:path";
 import * as readline from "node:readline/promises";
 import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
-import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
-import { zodTool, textOf } from "../lib/tools";
 import { createLogger, type SessionLogger } from "../lib/logger";
+import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
+import { textOf, zodTool } from "../lib/tools";
 import {
-  runRead as s02RunRead,
-  runWrite as s02RunWrite,
   runEdit as s02RunEdit,
   runGlob as s02RunGlob,
+  runRead as s02RunRead,
+  runWrite as s02RunWrite,
   safePath as s02SafePath,
 } from "../s02_tool_use/main";
 
@@ -95,9 +95,16 @@ export function runGlob(pattern: string): string {
 // ═══════════════════════════════════════════════════════════
 
 const bashSchema = z.object({ command: z.string() });
-const readSchema = z.object({ path: z.string(), limit: z.number().int().optional() });
+const readSchema = z.object({
+  path: z.string(),
+  limit: z.number().int().optional(),
+});
 const writeSchema = z.object({ path: z.string(), content: z.string() });
-const editSchema = z.object({ path: z.string(), old_text: z.string(), new_text: z.string() });
+const editSchema = z.object({
+  path: z.string(),
+  old_text: z.string(),
+  new_text: z.string(),
+});
 const globSchema = z.object({ pattern: z.string() });
 
 const tools: Anthropic.Tool[] = [
@@ -122,7 +129,8 @@ const TOOL_HANDLERS: Partial<Record<string, (input: any) => string>> = {
   bash: ({ command }) => runBash(command),
   read_file: ({ path, limit }) => runRead(path, limit),
   write_file: ({ path, content }) => runWrite(path, content),
-  edit_file: ({ path, old_text, new_text }) => runEdit(path, old_text, new_text),
+  edit_file: ({ path, old_text, new_text }) =>
+    runEdit(path, old_text, new_text),
   glob: ({ pattern }) => runGlob(pattern),
 };
 
@@ -131,7 +139,16 @@ const TOOL_HANDLERS: Partial<Record<string, (input: any) => string>> = {
 // ═══════════════════════════════════════════════════════════
 
 // Gate 1: Hard deny list — always forbidden
-const DENY_LIST = ["rm -rf /", "sudo", "shutdown", "reboot", "mkfs", "dd if=", "> /dev/sda", "osascript"];
+const DENY_LIST = [
+  "rm -rf /",
+  "sudo",
+  "shutdown",
+  "reboot",
+  "mkfs",
+  "dd if=",
+  "> /dev/sda",
+  "osascript",
+];
 
 export function checkDenyList(command: string): string | null {
   for (const pattern of DENY_LIST) {
@@ -143,7 +160,11 @@ export function checkDenyList(command: string): string | null {
 }
 
 // Gate 2: Rule matching — context-dependent checks
-const PERMISSION_RULES: { tools: string[]; check: (args: any) => boolean; message: string }[] = [
+const PERMISSION_RULES: {
+  tools: string[];
+  check: (args: any) => boolean;
+  message: string;
+}[] = [
   {
     tools: ["write_file", "edit_file"],
     check: (args) => {
@@ -154,7 +175,10 @@ const PERMISSION_RULES: { tools: string[]; check: (args: any) => boolean; messag
   },
   {
     tools: ["bash"],
-    check: (args) => ["rm ", "> /etc/", "chmod 777"].some((kw) => (args.command ?? "").includes(kw)),
+    check: (args) =>
+      ["rm ", "> /etc/", "chmod 777"].some((kw) =>
+        (args.command ?? "").includes(kw),
+      ),
     message: "Potentially destructive command",
   },
 ];
@@ -243,7 +267,10 @@ export async function agentLoop(
 
       const schema = TOOL_SCHEMAS[block.name];
       const handler = TOOL_HANDLERS[block.name];
-      const output = handler && schema ? handler(schema.parse(block.input)) : `Unknown: ${block.name}`;
+      const output =
+        handler && schema
+          ? handler(schema.parse(block.input))
+          : `Unknown: ${block.name}`;
       console.log(output.slice(0, 200));
       logger.toolResult(block.name, output);
       results.push({
@@ -288,7 +315,9 @@ if (import.meta.main) {
   };
 
   console.log("s03: Permission");
-  console.log("输入问题，回车发送。输入 q 退出。e.g., delete the README.md file\n");
+  console.log(
+    "输入问题，回车发送。输入 q 退出。e.g., delete the README.md file\n",
+  );
 
   const history: Anthropic.MessageParam[] = [];
   while (true) {

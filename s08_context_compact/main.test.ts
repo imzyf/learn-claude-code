@@ -6,8 +6,9 @@
  * 直接单测最合适；summarizeHistory 用 fake client 验证摘要提取。
  * agentLoop 复用 s07 的分发骨架：load_skill / task / 普通工具。
  */
-import { beforeEach, describe, expect, it } from "vitest";
+
 import type Anthropic from "@anthropic-ai/sdk";
+import { beforeEach, describe, expect, it } from "vitest";
 import {
   fakeClient,
   fakeMessage,
@@ -26,12 +27,12 @@ import {
   parseFrontmatter,
   permissionHook,
   persistLargeOutput,
+  type SkillRegistry,
   setMessages,
   snipCompact,
   spawnSubagent,
   summarizeHistory,
   toolResultBudget,
-  type SkillRegistry,
 } from "./main";
 
 beforeEach(() => {
@@ -49,15 +50,23 @@ const registry: SkillRegistry = {
 // tool_use / tool_result 成对的一轮，供压缩函数构造测试消息。
 function toolRound(id: string, output: string): Anthropic.MessageParam[] {
   return [
-    { role: "assistant", content: [toolUseBlock(id, "bash", { command: "echo" })] },
-    { role: "user", content: [{ type: "tool_result", tool_use_id: id, content: output }] },
+    {
+      role: "assistant",
+      content: [toolUseBlock(id, "bash", { command: "echo" })],
+    },
+    {
+      role: "user",
+      content: [{ type: "tool_result", tool_use_id: id, content: output }],
+    },
   ];
 }
 
 // ── skill catalog (same as s07) ───────────────────────────
 describe("skill catalog", () => {
   it("parses frontmatter and keeps a later '---' in the body", () => {
-    const { meta, body } = parseFrontmatter("---\nname: x\n---\nabove\n---\nbelow");
+    const { meta, body } = parseFrontmatter(
+      "---\nname: x\n---\nabove\n---\nbelow",
+    );
     expect(meta.name).toBe("x");
     expect(body).toBe("above\n---\nbelow");
   });
@@ -75,15 +84,20 @@ describe("skill catalog", () => {
 // ── compaction preprocessors (pure, no I/O) ───────────────
 describe("snipCompact", () => {
   it("leaves short histories untouched", () => {
-    const messages: Anthropic.MessageParam[] = [{ role: "user", content: "hi" }];
+    const messages: Anthropic.MessageParam[] = [
+      { role: "user", content: "hi" },
+    ];
     expect(snipCompact(messages, 50)).toBe(messages);
   });
 
   it("trims the middle when over the limit, keeping head and tail", () => {
-    const messages: Anthropic.MessageParam[] = Array.from({ length: 20 }, (_, i) => ({
-      role: "user",
-      content: `m${i}`,
-    }));
+    const messages: Anthropic.MessageParam[] = Array.from(
+      { length: 20 },
+      (_, i) => ({
+        role: "user",
+        content: `m${i}`,
+      }),
+    );
     const out = snipCompact(messages, 10);
     expect(out.length).toBe(11); // head(3) + 1 placeholder + tail(7)
     expect(out[0]).toBe(messages[0]); // head kept
@@ -102,7 +116,9 @@ describe("microCompact", () => {
     ];
     microCompact(messages);
     const results = collectToolResults(messages);
-    expect(results[0].content).toBe("[Earlier tool result compacted. Re-run if needed.]");
+    expect(results[0].content).toBe(
+      "[Earlier tool result compacted. Re-run if needed.]",
+    );
     expect(results[3].content).toBe("recent-3"); // within KEEP_RECENT
   });
 
@@ -134,7 +150,9 @@ describe("estimateSize / setMessages", () => {
   });
 
   it("setMessages replaces contents in place (same reference)", () => {
-    const messages: Anthropic.MessageParam[] = [{ role: "user", content: "old" }];
+    const messages: Anthropic.MessageParam[] = [
+      { role: "user", content: "old" },
+    ];
     setMessages(messages, [{ role: "user", content: "new" }]);
     expect(messages).toEqual([{ role: "user", content: "new" }]);
   });
@@ -143,12 +161,17 @@ describe("estimateSize / setMessages", () => {
 // ── summarizeHistory (LLM summary, fake client) ───────────
 describe("summarizeHistory", () => {
   it("returns the model's summary text", async () => {
-    const client = fakeClient(fakeMessage([textBlock("a compact summary")], "end_turn"));
+    const client = fakeClient(
+      fakeMessage([textBlock("a compact summary")], "end_turn"),
+    );
 
-    const summary = await summarizeHistory([{ role: "user", content: "long history" }], {
-      client,
-      logger: noopLogger,
-    });
+    const summary = await summarizeHistory(
+      [{ role: "user", content: "long history" }],
+      {
+        client,
+        logger: noopLogger,
+      },
+    );
 
     expect(summary).toBe("a compact summary");
   });
@@ -168,9 +191,9 @@ describe("summarizeHistory", () => {
 // ── permissionHook ────────────────────────────────────────
 describe("permissionHook", () => {
   it("denies deny-list bash commands", () => {
-    expect(permissionHook(toolUseBlock("t", "bash", { command: "sudo rm" }))).toBe(
-      "Permission denied",
-    );
+    expect(
+      permissionHook(toolUseBlock("t", "bash", { command: "sudo rm" })),
+    ).toBe("Permission denied");
   });
 });
 
@@ -187,7 +210,10 @@ describe("spawnSubagent", () => {
 
   it("falls back to a message when it never finishes", async () => {
     const rounds = Array.from({ length: 30 }, (_, i) =>
-      fakeMessage([toolUseBlock(`s${i}`, "bash", { command: "echo x" })], "tool_use"),
+      fakeMessage(
+        [toolUseBlock(`s${i}`, "bash", { command: "echo x" })],
+        "tool_use",
+      ),
     );
     const client = fakeClient(...rounds);
 
@@ -199,14 +225,24 @@ describe("spawnSubagent", () => {
 
 // ── agentLoop dispatch ────────────────────────────────────
 describe("agentLoop", () => {
-  const loopDeps = { client: undefined as never, logger: noopLogger, skills: registry, system: "S" };
+  const loopDeps = {
+    client: undefined as never,
+    logger: noopLogger,
+    skills: registry,
+    system: "S",
+  };
 
   it("dispatches load_skill and injects the full content", async () => {
     const client = fakeClient(
-      fakeMessage([toolUseBlock("tu_1", "load_skill", { name: "code-review" })], "tool_use"),
+      fakeMessage(
+        [toolUseBlock("tu_1", "load_skill", { name: "code-review" })],
+        "tool_use",
+      ),
       fakeMessage([textBlock("used it")], "end_turn"),
     );
-    const messages: Anthropic.MessageParam[] = [{ role: "user", content: "review" }];
+    const messages: Anthropic.MessageParam[] = [
+      { role: "user", content: "review" },
+    ];
 
     const result = await agentLoop(messages, { ...loopDeps, client });
 
@@ -218,13 +254,22 @@ describe("agentLoop", () => {
 
   it("dispatches task to a subagent and keeps only its summary", async () => {
     const client = fakeClient(
-      fakeMessage([toolUseBlock("tu_1", "task", { description: "sub work" })], "tool_use"),
+      fakeMessage(
+        [toolUseBlock("tu_1", "task", { description: "sub work" })],
+        "tool_use",
+      ),
       fakeMessage([textBlock("sub result")], "end_turn"),
       fakeMessage([textBlock("parent done")], "end_turn"),
     );
-    const messages: Anthropic.MessageParam[] = [{ role: "user", content: "go" }];
+    const messages: Anthropic.MessageParam[] = [
+      { role: "user", content: "go" },
+    ];
 
-    const result = await agentLoop(messages, { ...loopDeps, client, skills: {} });
+    const result = await agentLoop(messages, {
+      ...loopDeps,
+      client,
+      skills: {},
+    });
 
     expect(result).toBe("parent done");
     const toolResults = messages[2].content as Anthropic.ToolResultBlockParam[];
@@ -233,12 +278,21 @@ describe("agentLoop", () => {
 
   it("executes a plain tool call", async () => {
     const client = fakeClient(
-      fakeMessage([toolUseBlock("tu_1", "bash", { command: "echo hi" })], "tool_use"),
+      fakeMessage(
+        [toolUseBlock("tu_1", "bash", { command: "echo hi" })],
+        "tool_use",
+      ),
       fakeMessage([textBlock("done")], "end_turn"),
     );
-    const messages: Anthropic.MessageParam[] = [{ role: "user", content: "go" }];
+    const messages: Anthropic.MessageParam[] = [
+      { role: "user", content: "go" },
+    ];
 
-    const result = await agentLoop(messages, { ...loopDeps, client, skills: {} });
+    const result = await agentLoop(messages, {
+      ...loopDeps,
+      client,
+      skills: {},
+    });
 
     expect(result).toBe("done");
     const toolResults = messages[2].content as Anthropic.ToolResultBlockParam[];

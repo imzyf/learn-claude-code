@@ -27,7 +27,7 @@ import * as readline from "node:readline/promises";
 import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
 import { createClient, MODEL_ID } from "../lib/model";
-import { zodTool, textOf } from "../lib/tools";
+import { textOf, zodTool } from "../lib/tools";
 
 const client = createClient();
 
@@ -57,7 +57,11 @@ type Task = {
 
 const taskPath = (taskId: string) => path.join(TASKS_DIR, `${taskId}.json`);
 
-function createTask(subject: string, description = "", blockedBy: string[] = []): Task {
+function createTask(
+  subject: string,
+  description = "",
+  blockedBy: string[] = [],
+): Task {
   const task: Task = {
     id: `task_${Math.floor(Date.now() / 1000)}_${String(Math.floor(Math.random() * 10_000)).padStart(4, "0")}`,
     subject,
@@ -83,7 +87,10 @@ function listTasks(): Task[] {
     .readdirSync(TASKS_DIR)
     .filter((f) => f.startsWith("task_") && f.endsWith(".json"))
     .sort()
-    .map((f) => JSON.parse(fs.readFileSync(path.join(TASKS_DIR, f), "utf8")) as Task);
+    .map(
+      (f) =>
+        JSON.parse(fs.readFileSync(path.join(TASKS_DIR, f), "utf8")) as Task,
+    );
 }
 
 // Return full task details as JSON.
@@ -118,7 +125,9 @@ function claimTask(taskId: string, owner = "agent"): string {
   task.owner = owner;
   task.status = "in_progress";
   saveTask(task);
-  console.log(`  \x1b[36m[claim] ${task.subject} → in_progress (owner: ${owner})\x1b[0m`);
+  console.log(
+    `  \x1b[36m[claim] ${task.subject} → in_progress (owner: ${owner})\x1b[0m`,
+  );
   return `Claimed ${task.id} (${task.subject})`;
 }
 
@@ -130,7 +139,9 @@ function completeTask(taskId: string): string {
   task.status = "completed";
   saveTask(task);
   const unblocked = listTasks()
-    .filter((t) => t.status === "pending" && t.blockedBy.length > 0 && canStart(t.id))
+    .filter(
+      (t) => t.status === "pending" && t.blockedBy.length > 0 && canStart(t.id),
+    )
     .map((t) => t.subject);
   console.log(`  \x1b[32m[complete] ${task.subject} ✓\x1b[0m`);
   let msg = `Completed ${task.id} (${task.subject})`;
@@ -161,7 +172,11 @@ type Context = {
 };
 
 function assembleSystemPrompt(context: Context): string {
-  const sections = [PROMPT_SECTIONS.identity, PROMPT_SECTIONS.tools, PROMPT_SECTIONS.workspace];
+  const sections = [
+    PROMPT_SECTIONS.identity,
+    PROMPT_SECTIONS.tools,
+    PROMPT_SECTIONS.workspace,
+  ];
   if (context.memories) {
     sections.push(`Relevant memories:\n${context.memories}`);
   }
@@ -216,7 +231,10 @@ function runRead(p: string, limit?: number): string {
   try {
     let lines = fs.readFileSync(safePath(p), "utf8").split("\n");
     if (limit && limit < lines.length) {
-      lines = [...lines.slice(0, limit), `... (${lines.length - limit} more lines)`];
+      lines = [
+        ...lines.slice(0, limit),
+        `... (${lines.length - limit} more lines)`,
+      ];
     }
     return lines.join("\n");
   } catch (e) {
@@ -237,7 +255,11 @@ function runWrite(p: string, content: string): string {
 
 // ── Task tools ──
 
-function runCreateTask(subject: string, description = "", blockedBy?: string[]): string {
+function runCreateTask(
+  subject: string,
+  description = "",
+  blockedBy?: string[],
+): string {
   const task = createTask(subject, description, blockedBy ?? []);
   const deps = blockedBy?.length ? ` (blockedBy: ${blockedBy.join(", ")})` : "";
   console.log(`  \x1b[34m[create] ${task.subject}${deps}\x1b[0m`);
@@ -255,7 +277,9 @@ function runListTasks(): string {
   return tasks
     .map((t) => {
       const icon = icons[t.status] ?? "?";
-      const deps = t.blockedBy.length ? ` (blockedBy: ${t.blockedBy.join(", ")})` : "";
+      const deps = t.blockedBy.length
+        ? ` (blockedBy: ${t.blockedBy.join(", ")})`
+        : "";
       const owner = t.owner ? ` [${t.owner}]` : "";
       return `  ${icon} ${t.id}: ${t.subject} [${t.status}]${owner}${deps}`;
     })
@@ -281,7 +305,10 @@ function runCompleteTask(taskId: string): string {
 // ── Tool definitions ──
 
 const bashSchema = z.object({ command: z.string() });
-const readSchema = z.object({ path: z.string(), limit: z.number().int().optional() });
+const readSchema = z.object({
+  path: z.string(),
+  limit: z.number().int().optional(),
+});
 const writeSchema = z.object({ path: z.string(), content: z.string() });
 const createTaskSchema = z.object({
   subject: z.string(),
@@ -302,8 +329,16 @@ const tools: Anthropic.Tool[] = [
     "Create a new task with optional blockedBy dependencies.",
     createTaskSchema,
   ),
-  zodTool("list_tasks", "List all tasks with status, owner, and dependencies.", listTasksSchema),
-  zodTool("get_task", "Get full details of a specific task by ID.", getTaskSchema),
+  zodTool(
+    "list_tasks",
+    "List all tasks with status, owner, and dependencies.",
+    listTasksSchema,
+  ),
+  zodTool(
+    "get_task",
+    "Get full details of a specific task by ID.",
+    getTaskSchema,
+  ),
   zodTool(
     "claim_task",
     "Claim a pending task. Sets owner, changes status to in_progress.",
@@ -358,10 +393,13 @@ function updateContext(): Context {
 //  agentLoop — simplified, focused on task system
 // ═══════════════════════════════════════════════════════════
 
-async function agentLoop(messages: Anthropic.MessageParam[], context: Context): Promise<string> {
+async function agentLoop(
+  messages: Anthropic.MessageParam[],
+  context: Context,
+): Promise<string> {
   let system = getSystemPrompt(context);
   while (true) {
-    let response;
+    let response: Anthropic.Message;
     try {
       response = await client.messages.create({
         model: MODEL_ID,
@@ -387,7 +425,10 @@ async function agentLoop(messages: Anthropic.MessageParam[], context: Context): 
       console.log(`\x1b[36m> ${block.name}\x1b[0m`);
       const schema = TOOL_SCHEMAS[block.name];
       const handler = TOOL_HANDLERS[block.name];
-      const output = handler && schema ? handler(schema.parse(block.input)) : `Unknown: ${block.name}`;
+      const output =
+        handler && schema
+          ? handler(schema.parse(block.input))
+          : `Unknown: ${block.name}`;
       console.log(output.slice(0, 300));
       results.push({
         type: "tool_result",

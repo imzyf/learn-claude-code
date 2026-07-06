@@ -32,9 +32,9 @@ import { spawnSync } from "node:child_process";
 import * as readline from "node:readline/promises";
 import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
-import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
-import { zodTool, textOf } from "../lib/tools";
 import { createLogger, type SessionLogger } from "../lib/logger";
+import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
+import { textOf, zodTool } from "../lib/tools";
 
 const SYSTEM = `You are a coding agent at ${process.cwd()}. Use bash to solve tasks. Act, don't explain.`;
 
@@ -102,9 +102,11 @@ export async function agentLoop(
       if (block.type !== "tool_use") continue;
       const input = bashSchema.parse(block.input);
       console.log(`\x1b[33m$ ${input.command}\x1b[0m`);
+
       const output = runBash(input.command);
       console.log(output.slice(0, 200));
       logger.toolResult(input.command, output);
+
       results.push({
         type: "tool_result",
         tool_use_id: block.id,

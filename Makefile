@@ -1,4 +1,4 @@
-.PHONY: help setup sync sync-force smoke test test-watch typecheck \
+.PHONY: help setup sync sync-force smoke test test-watch typecheck lint lint-check \
 	s01 s02 s03 s04 s05 s06 s07 s08 s09 s10 \
 	s11 s12 s13 s14 s15 s16 s17 s18 s19 s20
 
@@ -27,6 +27,12 @@ test-watch: ## Run the test suite in watch mode
 
 typecheck: ## Type-check without emitting
 	pnpm typecheck
+
+lint: ## Lint and auto-fix with Biome
+	pnpm lint:fix
+
+lint-check: ## Check lint and formatting without writing (used by CI)
+	pnpm lint
 
 ##@ Sync
 

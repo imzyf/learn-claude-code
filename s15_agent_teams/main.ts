@@ -34,7 +34,7 @@ import { promisify } from "node:util";
 import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
 import { createClient, MODEL_ID } from "../lib/model";
-import { zodTool, textOf } from "../lib/tools";
+import { textOf, zodTool } from "../lib/tools";
 
 const client = createClient();
 
@@ -65,7 +65,11 @@ type Task = {
 
 const taskPath = (taskId: string) => path.join(TASKS_DIR, `${taskId}.json`);
 
-function createTask(subject: string, description = "", blockedBy: string[] = []): Task {
+function createTask(
+  subject: string,
+  description = "",
+  blockedBy: string[] = [],
+): Task {
   const task: Task = {
     id: `task_${Math.floor(Date.now() / 1000)}_${String(Math.floor(Math.random() * 10_000)).padStart(4, "0")}`,
     subject,
@@ -91,7 +95,10 @@ function listTasks(): Task[] {
     .readdirSync(TASKS_DIR)
     .filter((f) => f.startsWith("task_") && f.endsWith(".json"))
     .sort()
-    .map((f) => JSON.parse(fs.readFileSync(path.join(TASKS_DIR, f), "utf8")) as Task);
+    .map(
+      (f) =>
+        JSON.parse(fs.readFileSync(path.join(TASKS_DIR, f), "utf8")) as Task,
+    );
 }
 
 // Return full task details as JSON.
@@ -126,7 +133,9 @@ function claimTask(taskId: string, owner = "agent"): string {
   task.owner = owner;
   task.status = "in_progress";
   saveTask(task);
-  console.log(`  \x1b[36m[claim] ${task.subject} → in_progress (owner: ${owner})\x1b[0m`);
+  console.log(
+    `  \x1b[36m[claim] ${task.subject} → in_progress (owner: ${owner})\x1b[0m`,
+  );
   return `Claimed ${task.id} (${task.subject})`;
 }
 
@@ -138,7 +147,9 @@ function completeTask(taskId: string): string {
   task.status = "completed";
   saveTask(task);
   const unblocked = listTasks()
-    .filter((t) => t.status === "pending" && t.blockedBy.length > 0 && canStart(t.id))
+    .filter(
+      (t) => t.status === "pending" && t.blockedBy.length > 0 && canStart(t.id),
+    )
     .map((t) => t.subject);
   console.log(`  \x1b[32m[complete] ${task.subject} ✓\x1b[0m`);
   let msg = `Completed ${task.id} (${task.subject})`;
@@ -171,7 +182,11 @@ type Context = {
 };
 
 function assembleSystemPrompt(context: Context): string {
-  const sections = [PROMPT_SECTIONS.identity, PROMPT_SECTIONS.tools, PROMPT_SECTIONS.workspace];
+  const sections = [
+    PROMPT_SECTIONS.identity,
+    PROMPT_SECTIONS.tools,
+    PROMPT_SECTIONS.workspace,
+  ];
   if (context.memories) {
     sections.push(`Relevant memories:\n${context.memories}`);
   }
@@ -245,7 +260,10 @@ function runRead(p: string, limit?: number): string {
   try {
     let lines = fs.readFileSync(safePath(p), "utf8").split("\n");
     if (limit && limit < lines.length) {
-      lines = [...lines.slice(0, limit), `... (${lines.length - limit} more lines)`];
+      lines = [
+        ...lines.slice(0, limit),
+        `... (${lines.length - limit} more lines)`,
+      ];
     }
     return lines.join("\n");
   } catch (e) {
@@ -266,7 +284,11 @@ function runWrite(p: string, content: string): string {
 
 // ── Task tools ──
 
-function runCreateTask(subject: string, description = "", blockedBy?: string[]): string {
+function runCreateTask(
+  subject: string,
+  description = "",
+  blockedBy?: string[],
+): string {
   const task = createTask(subject, description, blockedBy ?? []);
   const deps = blockedBy?.length ? ` (blockedBy: ${blockedBy.join(", ")})` : "";
   console.log(`  \x1b[34m[create] ${task.subject}${deps}\x1b[0m`);
@@ -284,7 +306,9 @@ function runListTasks(): string {
   return tasks
     .map((t) => {
       const icon = icons[t.status] ?? "?";
-      const deps = t.blockedBy.length ? ` (blockedBy: ${t.blockedBy.join(", ")})` : "";
+      const deps = t.blockedBy.length
+        ? ` (blockedBy: ${t.blockedBy.join(", ")})`
+        : "";
       const owner = t.owner ? ` [${t.owner}]` : "";
       return `  ${icon} ${t.id}: ${t.subject} [${t.status}]${owner}${deps}`;
     })
@@ -312,7 +336,11 @@ function runCompleteTask(taskId: string): string {
 // ═══════════════════════════════════════════════════════════
 
 let bgCounter = 0;
-type BgTask = { toolCallId: string; command: string; status: "running" | "completed" };
+type BgTask = {
+  toolCallId: string;
+  command: string;
+  status: "running" | "completed";
+};
 const backgroundTasks: Record<string, BgTask> = {};
 const backgroundResults: Record<string, string> = {};
 
@@ -350,7 +378,11 @@ function executeTool(toolName: string, input: any): string {
 }
 
 // Run tool in a detached async worker. Returns background task ID.
-function startBackgroundTask(toolName: string, toolCallId: string, input: any): string {
+function startBackgroundTask(
+  toolName: string,
+  toolCallId: string,
+  input: any,
+): string {
   bgCounter += 1;
   const bgId = `bg_${String(bgCounter).padStart(4, "0")}`;
   const cmd = String(input.command ?? toolName);
@@ -365,7 +397,9 @@ function startBackgroundTask(toolName: string, toolCallId: string, input: any): 
     backgroundResults[bgId] = result;
   })();
 
-  console.log(`  \x1b[33m[background] dispatched ${bgId}: ${cmd.slice(0, 40)}\x1b[0m`);
+  console.log(
+    `  \x1b[33m[background] dispatched ${bgId}: ${cmd.slice(0, 40)}\x1b[0m`,
+  );
   return bgId;
 }
 
@@ -434,7 +468,9 @@ function cronFieldMatches(field: string, value: number): boolean {
   }
   if (field.includes("-")) {
     const i = field.indexOf("-");
-    return Number(field.slice(0, i)) <= value && value <= Number(field.slice(i + 1));
+    return (
+      Number(field.slice(0, i)) <= value && value <= Number(field.slice(i + 1))
+    );
   }
   return value === Number(field);
 }
@@ -467,7 +503,11 @@ function cronMatches(cronExpr: string, dt: Date): boolean {
 }
 
 // Validate a single cron field value is within [lo, hi].
-function validateCronField(field: string, lo: number, hi: number): string | null {
+function validateCronField(
+  field: string,
+  lo: number,
+  hi: number,
+): string | null {
   if (field === "*") return null;
   if (field.startsWith("*/")) {
     const stepStr = field.slice(2);
@@ -489,7 +529,8 @@ function validateCronField(field: string, lo: number, hi: number): string | null
     if (!isDigits(loStr) || !isDigits(hiStr)) return `Invalid range: ${field}`;
     const a = Number(loStr);
     const b = Number(hiStr);
-    if (a < lo || a > hi || b < lo || b > hi) return `Range ${field} out of bounds [${lo}-${hi}]`;
+    if (a < lo || a > hi || b < lo || b > hi)
+      return `Range ${field} out of bounds [${lo}-${hi}]`;
     if (a > b) return `Range start > end: ${field}`;
     return null;
   }
@@ -533,7 +574,9 @@ function loadDurableJobs(): void {
     for (const job of jobs) {
       const err = validateCron(job.cron);
       if (err) {
-        console.log(`  \x1b[31m[cron] skipping invalid job ${job.id}: ${err}\x1b[0m`);
+        console.log(
+          `  \x1b[31m[cron] skipping invalid job ${job.id}: ${err}\x1b[0m`,
+        );
         continue;
       }
       scheduledJobs.set(job.id, job);
@@ -548,7 +591,12 @@ function loadDurableJobs(): void {
 }
 
 // Register a new cron job. Returns CronJob or error string.
-function scheduleJob(cron: string, prompt: string, recurring = true, durable = true): CronJob | string {
+function scheduleJob(
+  cron: string,
+  prompt: string,
+  recurring = true,
+  durable = true,
+): CronJob | string {
   const err = validateCron(cron);
   if (err) return err;
   const job: CronJob = {
@@ -560,7 +608,9 @@ function scheduleJob(cron: string, prompt: string, recurring = true, durable = t
   };
   scheduledJobs.set(job.id, job);
   if (durable) saveDurableJobs();
-  console.log(`  \x1b[35m[cron register] ${job.id} '${cron}' → ${prompt.slice(0, 40)}\x1b[0m`);
+  console.log(
+    `  \x1b[35m[cron register] ${job.id} '${cron}' → ${prompt.slice(0, 40)}\x1b[0m`,
+  );
   return job;
 }
 
@@ -593,7 +643,9 @@ function startCronScheduler(): void {
           if (lastFiredAt.get(job.id) !== minuteMarker) {
             cronQueue.push(job);
             lastFiredAt.set(job.id, minuteMarker);
-            console.log(`  \x1b[35m[cron fire] ${job.id} → ${job.prompt.slice(0, 40)}\x1b[0m`);
+            console.log(
+              `  \x1b[35m[cron fire] ${job.id} → ${job.prompt.slice(0, 40)}\x1b[0m`,
+            );
           }
           if (!job.recurring) {
             scheduledJobs.delete(job.id);
@@ -621,7 +673,12 @@ console.log("  \x1b[35m[cron] scheduler timer started\x1b[0m");
 
 // ── Cron tools ──
 
-function runScheduleCron(cron: string, prompt: string, recurring = true, durable = true): string {
+function runScheduleCron(
+  cron: string,
+  prompt: string,
+  recurring = true,
+  durable = true,
+): string {
   const result = scheduleJob(cron, prompt, recurring, durable);
   if (typeof result === "string") {
     return `Error: ${result}`;
@@ -668,7 +725,12 @@ type BusMessage = {
  * Teaching version: no file locking; real CC uses proper-lockfile.
  */
 class MessageBus {
-  send(fromAgent: string, toAgent: string, content: string, msgType = "message"): void {
+  send(
+    fromAgent: string,
+    toAgent: string,
+    content: string,
+    msgType = "message",
+  ): void {
     const msg: BusMessage = {
       from: fromAgent,
       to: toAgent,
@@ -676,8 +738,13 @@ class MessageBus {
       type: msgType,
       ts: Date.now() / 1000,
     };
-    fs.appendFileSync(path.join(MAILBOX_DIR, `${toAgent}.jsonl`), JSON.stringify(msg) + "\n");
-    console.log(`  \x1b[33m[bus] ${fromAgent} → ${toAgent}: ${content.slice(0, 50)}\x1b[0m`);
+    fs.appendFileSync(
+      path.join(MAILBOX_DIR, `${toAgent}.jsonl`),
+      `${JSON.stringify(msg)}\n`,
+    );
+    console.log(
+      `  \x1b[33m[bus] ${fromAgent} → ${toAgent}: ${content.slice(0, 50)}\x1b[0m`,
+    );
   }
 
   readInbox(agent: string): BusMessage[] {
@@ -716,7 +783,11 @@ const activeTeammates = new Set<string>();
  * Real CC: teammates use idle loop (wait for inbox, work, repeat)
  * until shutdown_request.
  */
-function spawnTeammateThread(name: string, role: string, prompt: string): string {
+function spawnTeammateThread(
+  name: string,
+  role: string,
+  prompt: string,
+): string {
   if (activeTeammates.has(name)) {
     return `Teammate '${name}' already exists`;
   }
@@ -728,13 +799,20 @@ function spawnTeammateThread(name: string, role: string, prompt: string): string
   const subBashSchema = z.object({ command: z.string() });
   const subReadSchema = z.object({ path: z.string() });
   const subWriteSchema = z.object({ path: z.string(), content: z.string() });
-  const subSendMessageSchema = z.object({ to: z.string(), content: z.string() });
+  const subSendMessageSchema = z.object({
+    to: z.string(),
+    content: z.string(),
+  });
 
   const subTools: Anthropic.Tool[] = [
     zodTool("bash", "Run a shell command.", subBashSchema),
     zodTool("read_file", "Read file contents.", subReadSchema),
     zodTool("write_file", "Write content to a file.", subWriteSchema),
-    zodTool("send_message", "Send a message to another agent.", subSendMessageSchema),
+    zodTool(
+      "send_message",
+      "Send a message to another agent.",
+      subSendMessageSchema,
+    ),
   ];
   const subSchemas: Partial<Record<string, z.ZodObject>> = {
     bash: subBashSchema,
@@ -753,15 +831,20 @@ function spawnTeammateThread(name: string, role: string, prompt: string): string
   };
 
   const run = async () => {
-    const messages: Anthropic.MessageParam[] = [{ role: "user", content: prompt }];
+    const messages: Anthropic.MessageParam[] = [
+      { role: "user", content: prompt },
+    ];
     let lastText = "";
 
     for (let round = 0; round < 10; round++) {
       const inbox = BUS.readInbox(name);
       if (inbox.length) {
-        messages.push({ role: "user", content: `<inbox>${JSON.stringify(inbox)}</inbox>` });
+        messages.push({
+          role: "user",
+          content: `<inbox>${JSON.stringify(inbox)}</inbox>`,
+        });
       }
-      let response;
+      let response: Anthropic.Message;
       try {
         response = await client.messages.create({
           model: MODEL_ID,
@@ -785,7 +868,8 @@ function spawnTeammateThread(name: string, role: string, prompt: string): string
         if (block.type !== "tool_use") continue;
         const schema = subSchemas[block.name];
         const handler = subHandlers[block.name];
-        const output = handler && schema ? handler(schema.parse(block.input)) : "Unknown";
+        const output =
+          handler && schema ? handler(schema.parse(block.input)) : "Unknown";
         results.push({
           type: "tool_result",
           tool_use_id: block.id,
@@ -830,7 +914,10 @@ const bashSchema = z.object({
   command: z.string(),
   run_in_background: z.boolean().optional(),
 });
-const readSchema = z.object({ path: z.string(), limit: z.number().int().optional() });
+const readSchema = z.object({
+  path: z.string(),
+  limit: z.number().int().optional(),
+});
 const writeSchema = z.object({ path: z.string(), content: z.string() });
 const createTaskSchema = z.object({
   subject: z.string(),
@@ -866,8 +953,16 @@ const tools: Anthropic.Tool[] = [
     "Create a new task with optional blockedBy dependencies.",
     createTaskSchema,
   ),
-  zodTool("list_tasks", "List all tasks with status, owner, and dependencies.", listTasksSchema),
-  zodTool("get_task", "Get full details of a specific task by ID.", getTaskSchema),
+  zodTool(
+    "list_tasks",
+    "List all tasks with status, owner, and dependencies.",
+    listTasksSchema,
+  ),
+  zodTool(
+    "get_task",
+    "Get full details of a specific task by ID.",
+    getTaskSchema,
+  ),
   zodTool(
     "claim_task",
     "Claim a pending task. Sets owner, changes status to in_progress.",
@@ -885,9 +980,21 @@ const tools: Anthropic.Tool[] = [
   ),
   zodTool("list_crons", "List all registered cron jobs.", listCronsSchema),
   zodTool("cancel_cron", "Cancel a cron job by ID.", cancelCronSchema),
-  zodTool("spawn_teammate", "Spawn a teammate agent in the background.", spawnTeammateSchema),
-  zodTool("send_message", "Send a message to a teammate via MessageBus.", sendMessageSchema),
-  zodTool("check_inbox", "Check Lead's inbox for teammate messages.", checkInboxSchema),
+  zodTool(
+    "spawn_teammate",
+    "Spawn a teammate agent in the background.",
+    spawnTeammateSchema,
+  ),
+  zodTool(
+    "send_message",
+    "Send a message to a teammate via MessageBus.",
+    sendMessageSchema,
+  ),
+  zodTool(
+    "check_inbox",
+    "Check Lead's inbox for teammate messages.",
+    checkInboxSchema,
+  ),
 ];
 
 const TOOL_SCHEMAS: Partial<Record<string, z.ZodObject>> = {
@@ -921,7 +1028,8 @@ const TOOL_HANDLERS: Partial<Record<string, (input: any) => string>> = {
     runScheduleCron(cron, prompt, recurring ?? true, durable ?? true),
   list_crons: () => runListCrons(),
   cancel_cron: ({ job_id }) => runCancelCron(job_id),
-  spawn_teammate: ({ name, role, prompt }) => runSpawnTeammate(name, role, prompt),
+  spawn_teammate: ({ name, role, prompt }) =>
+    runSpawnTeammate(name, role, prompt),
   send_message: ({ to, content }) => runSendMessage(to, content),
   check_inbox: () => runCheckInbox(),
 };
@@ -948,7 +1056,10 @@ function updateContext(): Context {
 // Cron queue is consumed when agentLoop is called; real CC auto-wakes via
 // queue processor (useQueueProcessor.ts) when items arrive.
 
-async function agentLoop(messages: Anthropic.MessageParam[], context: Context): Promise<string> {
+async function agentLoop(
+  messages: Anthropic.MessageParam[],
+  context: Context,
+): Promise<string> {
   let system = getSystemPrompt(context);
   while (true) {
     // Consume fired cron jobs → inject as messages
@@ -958,7 +1069,7 @@ async function agentLoop(messages: Anthropic.MessageParam[], context: Context): 
       console.log(`  \x1b[35m[inject cron] ${job.prompt.slice(0, 50)}\x1b[0m`);
     }
 
-    let response;
+    let response: Anthropic.Message;
     try {
       response = await client.messages.create({
         model: MODEL_ID,
@@ -1094,7 +1205,10 @@ while (true) {
     const inbox = BUS.readInbox("lead");
     if (inbox.length) {
       parts.push(
-        "[Inbox]\n" + inbox.map((m) => `From ${m.from}: ${m.content.slice(0, 200)}`).join("\n"),
+        "[Inbox]\n" +
+          inbox
+            .map((m) => `From ${m.from}: ${m.content.slice(0, 200)}`)
+            .join("\n"),
       );
     }
     const bg = collectBackgroundResults();

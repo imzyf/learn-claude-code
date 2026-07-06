@@ -6,8 +6,9 @@
  * 测试用 fake 确认函数覆盖 allow / deny，无需真实 stdin。
  * clearHooks 在每个用例前重置全局注册表，隔离用例。
  */
-import { beforeEach, describe, expect, it, vi } from "vitest";
+
 import type Anthropic from "@anthropic-ai/sdk";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   fakeClient,
   fakeMessage,
@@ -17,6 +18,7 @@ import {
 } from "../lib/testing";
 import {
   agentLoop,
+  type Confirm,
   clearHooks,
   contextInjectHook,
   largeOutputHook,
@@ -25,7 +27,6 @@ import {
   registerHook,
   summaryHook,
   triggerHooks,
-  type Confirm,
 } from "./main";
 
 const grant: Confirm = async () => true;
@@ -128,7 +129,10 @@ describe("agentLoop", () => {
   it("blocks a tool call when a PreToolUse hook returns a message", async () => {
     registerHook("PreToolUse", makePermissionHook(grant));
     const client = fakeClient(
-      fakeMessage([toolUseBlock("tu_1", "bash", { command: "sudo ls" })], "tool_use"),
+      fakeMessage(
+        [toolUseBlock("tu_1", "bash", { command: "sudo ls" })],
+        "tool_use",
+      ),
       fakeMessage([textBlock("stopped")], "end_turn"),
     );
     const messages: Anthropic.MessageParam[] = [
@@ -146,7 +150,10 @@ describe("agentLoop", () => {
     const post = vi.fn(() => null);
     registerHook("PostToolUse", post);
     const client = fakeClient(
-      fakeMessage([toolUseBlock("tu_1", "bash", { command: "echo hi" })], "tool_use"),
+      fakeMessage(
+        [toolUseBlock("tu_1", "bash", { command: "echo hi" })],
+        "tool_use",
+      ),
       fakeMessage([textBlock("done")], "end_turn"),
     );
     const messages: Anthropic.MessageParam[] = [

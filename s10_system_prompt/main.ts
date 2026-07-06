@@ -21,9 +21,9 @@ import * as path from "node:path";
 import * as readline from "node:readline/promises";
 import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
-import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
-import { zodTool, textOf } from "../lib/tools";
 import { createLogger, type SessionLogger } from "../lib/logger";
+import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
+import { textOf, zodTool } from "../lib/tools";
 
 const WORKDIR = process.cwd();
 const MEMORY_DIR = path.join(WORKDIR, ".memory");
@@ -140,7 +140,10 @@ export function runRead(p: string, limit?: number): string {
   try {
     let lines = fs.readFileSync(safePath(p), "utf8").split("\n");
     if (limit && limit < lines.length) {
-      lines = [...lines.slice(0, limit), `... (${lines.length - limit} more lines)`];
+      lines = [
+        ...lines.slice(0, limit),
+        `... (${lines.length - limit} more lines)`,
+      ];
     }
     return lines.join("\n");
   } catch (e) {
@@ -160,7 +163,10 @@ export function runWrite(p: string, content: string): string {
 }
 
 const bashSchema = z.object({ command: z.string() });
-const readSchema = z.object({ path: z.string(), limit: z.number().int().optional() });
+const readSchema = z.object({
+  path: z.string(),
+  limit: z.number().int().optional(),
+});
 const writeSchema = z.object({ path: z.string(), content: z.string() });
 
 const tools: Anthropic.Tool[] = [
@@ -230,7 +236,10 @@ export async function agentLoop(
       console.log(`\x1b[36m> ${block.name}\x1b[0m`);
       const schema = TOOL_SCHEMAS[block.name];
       const handler = TOOL_HANDLERS[block.name];
-      const output = handler && schema ? handler(schema.parse(block.input)) : `Unknown: ${block.name}`;
+      const output =
+        handler && schema
+          ? handler(schema.parse(block.input))
+          : `Unknown: ${block.name}`;
       logger.toolResult(block.name, output);
       console.log(output.slice(0, 200));
       results.push({
@@ -280,7 +289,11 @@ if (import.meta.main) {
 
     logger.userInput(query);
     history.push({ role: "user", content: query });
-    const finalText = await agentLoop(history, context, { client, logger, memoryIndex: MEMORY_INDEX });
+    const finalText = await agentLoop(history, context, {
+      client,
+      logger,
+      memoryIndex: MEMORY_INDEX,
+    });
     context = updateContext(MEMORY_INDEX);
     console.log(finalText);
     console.log();

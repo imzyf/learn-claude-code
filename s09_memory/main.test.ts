@@ -9,8 +9,8 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type Anthropic from "@anthropic-ai/sdk";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   fakeClient,
   fakeMessage,
@@ -20,11 +20,11 @@ import {
 } from "../lib/testing";
 import {
   agentLoop,
+  collectToolResults,
   listMemoryFiles,
   memoryFilenames,
   messageText,
   microCompact,
-  collectToolResults,
   parseFrontmatter,
   readMemoryFile,
   readMemoryIndex,
@@ -49,7 +49,9 @@ afterEach(() => {
 // ── parseFrontmatter / messageText (pure) ─────────────────
 describe("pure helpers", () => {
   it("parseFrontmatter keeps a later '---' in the body", () => {
-    const { meta, body } = parseFrontmatter("---\nname: x\n---\nabove\n---\nbelow");
+    const { meta, body } = parseFrontmatter(
+      "---\nname: x\n---\nabove\n---\nbelow",
+    );
     expect(meta.name).toBe("x");
     expect(body).toBe("above\n---\nbelow");
   });
@@ -57,7 +59,10 @@ describe("pure helpers", () => {
   it("messageText reads string content and text blocks", () => {
     expect(messageText({ role: "user", content: "plain" })).toBe("plain");
     expect(
-      messageText({ role: "assistant", content: [textBlock("a"), textBlock("b")] }),
+      messageText({
+        role: "assistant",
+        content: [textBlock("a"), textBlock("b")],
+      }),
     ).toBe("a b");
   });
 });
@@ -65,14 +70,28 @@ describe("pure helpers", () => {
 // ── memory file round-trip (real temp dir) ────────────────
 describe("memory files", () => {
   it("writes a file, rebuilds the index, and reads it back", () => {
-    writeMemoryFile(tmp, "User Tabs", "user", "prefers tabs over spaces", "Use tabs everywhere.");
+    writeMemoryFile(
+      tmp,
+      "User Tabs",
+      "user",
+      "prefers tabs over spaces",
+      "Use tabs everywhere.",
+    );
 
     expect(memoryFilenames(tmp)).toEqual(["user-tabs.md"]); // slug, excludes MEMORY.md
-    expect(readMemoryIndex(tmp)).toContain("- [User Tabs](user-tabs.md) — prefers tabs over spaces");
+    expect(readMemoryIndex(tmp)).toContain(
+      "- [User Tabs](user-tabs.md) — prefers tabs over spaces",
+    );
 
     const [file] = listMemoryFiles(tmp);
-    expect(file).toMatchObject({ name: "User Tabs", description: "prefers tabs over spaces", type: "user" });
-    expect(readMemoryFile(tmp, "user-tabs.md")).toContain("Use tabs everywhere.");
+    expect(file).toMatchObject({
+      name: "User Tabs",
+      description: "prefers tabs over spaces",
+      type: "user",
+    });
+    expect(readMemoryFile(tmp, "user-tabs.md")).toContain(
+      "Use tabs everywhere.",
+    );
   });
 
   it("returns null for a missing file and empty index for an empty dir", () => {
@@ -85,7 +104,13 @@ describe("memory files", () => {
 // ── selectRelevantMemories (LLM pick + keyword fallback) ──
 describe("selectRelevantMemories", () => {
   beforeEach(() => {
-    writeMemoryFile(tmp, "database-config", "project", "postgres connection settings", "...");
+    writeMemoryFile(
+      tmp,
+      "database-config",
+      "project",
+      "postgres connection settings",
+      "...",
+    );
     writeMemoryFile(tmp, "editor-prefs", "user", "tabs not spaces", "...");
   });
 
@@ -115,7 +140,9 @@ describe("selectRelevantMemories", () => {
 
   it("returns nothing when there are no memory files", async () => {
     const client = fakeClient();
-    const empty = fs.mkdtempSync(path.join(process.cwd(), ".tmp", "s09-empty-"));
+    const empty = fs.mkdtempSync(
+      path.join(process.cwd(), ".tmp", "s09-empty-"),
+    );
 
     const selected = await selectRelevantMemories(
       empty,
@@ -132,14 +159,22 @@ describe("selectRelevantMemories", () => {
 // ── compaction preprocessors (pure) ───────────────────────
 describe("compaction", () => {
   it("snipCompact leaves short histories untouched", () => {
-    const messages: Anthropic.MessageParam[] = [{ role: "user", content: "hi" }];
+    const messages: Anthropic.MessageParam[] = [
+      { role: "user", content: "hi" },
+    ];
     expect(snipCompact(messages, 50)).toBe(messages);
   });
 
   it("microCompact compacts old long results, keeps recent ones", () => {
     const round = (id: string, out: string): Anthropic.MessageParam[] => [
-      { role: "assistant", content: [toolUseBlock(id, "bash", { command: "echo" })] },
-      { role: "user", content: [{ type: "tool_result", tool_use_id: id, content: out }] },
+      {
+        role: "assistant",
+        content: [toolUseBlock(id, "bash", { command: "echo" })],
+      },
+      {
+        role: "user",
+        content: [{ type: "tool_result", tool_use_id: id, content: out }],
+      },
     ];
     const messages: Anthropic.MessageParam[] = [
       ...round("t1", "x".repeat(200)),
@@ -157,11 +192,16 @@ describe("compaction", () => {
 // ── summarizeHistory (fake client) ────────────────────────
 describe("summarizeHistory", () => {
   it("returns the model's summary text", async () => {
-    const client = fakeClient(fakeMessage([textBlock("short summary")], "end_turn"));
-    const summary = await summarizeHistory([{ role: "user", content: "history" }], {
-      client,
-      logger: noopLogger,
-    });
+    const client = fakeClient(
+      fakeMessage([textBlock("short summary")], "end_turn"),
+    );
+    const summary = await summarizeHistory(
+      [{ role: "user", content: "history" }],
+      {
+        client,
+        logger: noopLogger,
+      },
+    );
     expect(summary).toBe("short summary");
   });
 });
@@ -179,13 +219,22 @@ describe("spawnSubagent", () => {
 describe("agentLoop", () => {
   it("executes a plain tool call, then extraction finds nothing new", async () => {
     const client = fakeClient(
-      fakeMessage([toolUseBlock("tu_1", "bash", { command: "echo hi" })], "tool_use"),
+      fakeMessage(
+        [toolUseBlock("tu_1", "bash", { command: "echo hi" })],
+        "tool_use",
+      ),
       fakeMessage([textBlock("done")], "end_turn"),
       fakeMessage([textBlock("[]")], "end_turn"), // extractMemories → nothing
     );
-    const messages: Anthropic.MessageParam[] = [{ role: "user", content: "go" }];
+    const messages: Anthropic.MessageParam[] = [
+      { role: "user", content: "go" },
+    ];
 
-    const result = await agentLoop(messages, { client, logger: noopLogger, memoryDir: tmp });
+    const result = await agentLoop(messages, {
+      client,
+      logger: noopLogger,
+      memoryDir: tmp,
+    });
 
     expect(result).toBe("done");
     expect(client.messages.create).toHaveBeenCalledTimes(3);
@@ -196,14 +245,23 @@ describe("agentLoop", () => {
 
   it("dispatches task to a subagent and keeps only its summary", async () => {
     const client = fakeClient(
-      fakeMessage([toolUseBlock("tu_1", "task", { description: "sub work" })], "tool_use"),
+      fakeMessage(
+        [toolUseBlock("tu_1", "task", { description: "sub work" })],
+        "tool_use",
+      ),
       fakeMessage([textBlock("sub result")], "end_turn"),
       fakeMessage([textBlock("parent done")], "end_turn"),
       fakeMessage([textBlock("[]")], "end_turn"), // extractMemories
     );
-    const messages: Anthropic.MessageParam[] = [{ role: "user", content: "go" }];
+    const messages: Anthropic.MessageParam[] = [
+      { role: "user", content: "go" },
+    ];
 
-    const result = await agentLoop(messages, { client, logger: noopLogger, memoryDir: tmp });
+    const result = await agentLoop(messages, {
+      client,
+      logger: noopLogger,
+      memoryDir: tmp,
+    });
 
     expect(result).toBe("parent done");
     const toolResults = messages[2].content as Anthropic.ToolResultBlockParam[];

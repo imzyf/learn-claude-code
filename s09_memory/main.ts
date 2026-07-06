@@ -37,9 +37,9 @@ import * as path from "node:path";
 import * as readline from "node:readline/promises";
 import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
-import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
-import { zodTool, textOf } from "../lib/tools";
 import { createLogger, type SessionLogger } from "../lib/logger";
+import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
+import { textOf, zodTool } from "../lib/tools";
 
 const WORKDIR = process.cwd();
 const MEMORY_DIR = path.join(WORKDIR, ".memory");
@@ -72,7 +72,10 @@ export type MemoryFile = {
 
 // Note a JS gotcha vs Python: `text.split("---", 2)` in JS TRUNCATES the rest,
 // while Python keeps it in the last part — so slice by index instead.
-export function parseFrontmatter(text: string): { meta: Record<string, string>; body: string } {
+export function parseFrontmatter(text: string): {
+  meta: Record<string, string>;
+  body: string;
+} {
   if (!text.startsWith("---")) return { meta: {}, body: text };
   const end = text.indexOf("---", 3);
   if (end === -1) return { meta: {}, body: text };
@@ -125,7 +128,10 @@ export function rebuildIndex(dir: string): void {
     const desc = meta.description ?? (body.split("\n")[0] ?? "").slice(0, 80);
     lines.push(`- [${name}](${filename}) — ${desc}`);
   }
-  fs.writeFileSync(memoryIndexPath(dir), lines.length ? lines.join("\n") + "\n" : "");
+  fs.writeFileSync(
+    memoryIndexPath(dir),
+    lines.length ? `${lines.join("\n")}\n` : "",
+  );
 }
 
 // Read MEMORY.md index (injected into SYSTEM every turn).
@@ -188,7 +194,9 @@ export async function selectRelevantMemories(
   if (!recent.trim()) return [];
 
   // Build catalog of name + description for the LLM to choose from
-  const catalog = files.map((f, i) => `${i}: ${f.name} — ${f.description}`).join("\n");
+  const catalog = files
+    .map((f, i) => `${i}: ${f.name} — ${f.description}`)
+    .join("\n");
 
   const prompt =
     "Given the recent conversation and the memory catalog below, " +
@@ -199,7 +207,9 @@ export async function selectRelevantMemories(
     `Memory catalog:\n${catalog}`;
 
   try {
-    const request: Anthropic.MessageParam[] = [{ role: "user", content: prompt }];
+    const request: Anthropic.MessageParam[] = [
+      { role: "user", content: prompt },
+    ];
     logger.request(request);
     const response = await client.messages.create({
       model: MODEL_ID,
@@ -258,7 +268,12 @@ export async function loadMemories(
   return parts.join("\n\n");
 }
 
-type ExtractedMemory = { name?: string; type?: string; description?: string; body?: string };
+type ExtractedMemory = {
+  name?: string;
+  type?: string;
+  description?: string;
+  body?: string;
+};
 
 // Extract new memories from recent dialogue. Runs after each turn.
 export async function extractMemories(
@@ -294,7 +309,9 @@ export async function extractMemories(
     `Dialogue:\n${dialogue.slice(0, 4000)}`;
 
   try {
-    const request: Anthropic.MessageParam[] = [{ role: "user", content: prompt }];
+    const request: Anthropic.MessageParam[] = [
+      { role: "user", content: prompt },
+    ];
     logger.request(request);
     const response = await client.messages.create({
       model: MODEL_ID,
@@ -316,7 +333,8 @@ export async function extractMemories(
         count += 1;
       }
     }
-    if (count) console.log(`\n\x1b[33m[Memory: extracted ${count} new memories]\x1b[0m`);
+    if (count)
+      console.log(`\n\x1b[33m[Memory: extracted ${count} new memories]\x1b[0m`);
   } catch {
     // extraction is best-effort; never break the main loop
   }
@@ -325,13 +343,19 @@ export async function extractMemories(
 const CONSOLIDATE_THRESHOLD = 10;
 
 // Merge duplicate/stale memories. Triggered when file count ≥ threshold.
-export async function consolidateMemories(dir: string, deps: Deps): Promise<void> {
+export async function consolidateMemories(
+  dir: string,
+  deps: Deps,
+): Promise<void> {
   const { client, logger } = deps;
   const files = listMemoryFiles(dir);
   if (files.length < CONSOLIDATE_THRESHOLD) return;
 
   const catalog = files
-    .map((f) => `## ${f.filename}\nname: ${f.name}\ndescription: ${f.description}\n${f.body}`)
+    .map(
+      (f) =>
+        `## ${f.filename}\nname: ${f.name}\ndescription: ${f.description}\n${f.body}`,
+    )
     .join("\n\n");
 
   const prompt =
@@ -344,7 +368,9 @@ export async function consolidateMemories(dir: string, deps: Deps): Promise<void
     catalog.slice(0, 16_000);
 
   try {
-    const request: Anthropic.MessageParam[] = [{ role: "user", content: prompt }];
+    const request: Anthropic.MessageParam[] = [
+      { role: "user", content: prompt },
+    ];
     logger.request(request);
     const response = await client.messages.create({
       model: MODEL_ID,
@@ -365,10 +391,18 @@ export async function consolidateMemories(dir: string, deps: Deps): Promise<void
     for (const mem of items) {
       const name = mem.name ?? `memory_${Math.floor(Date.now() / 1000)}`;
       if (mem.description && mem.body) {
-        writeMemoryFile(dir, name, mem.type ?? "user", mem.description, mem.body);
+        writeMemoryFile(
+          dir,
+          name,
+          mem.type ?? "user",
+          mem.description,
+          mem.body,
+        );
       }
     }
-    console.log(`\n\x1b[33m[Memory: consolidated ${files.length} → ${items.length} memories]\x1b[0m`);
+    console.log(
+      `\n\x1b[33m[Memory: consolidated ${files.length} → ${items.length} memories]\x1b[0m`,
+    );
   } catch {
     // consolidation is best-effort; never break the main loop
   }
@@ -446,7 +480,10 @@ export function runEdit(p: string, oldText: string, newText: string): string {
     // `$&`-style patterns in newText as special replacement syntax.
     const i = text.indexOf(oldText);
     if (i === -1) return `Error: text not found in ${p}`;
-    fs.writeFileSync(filePath, text.slice(0, i) + newText + text.slice(i + oldText.length));
+    fs.writeFileSync(
+      filePath,
+      text.slice(0, i) + newText + text.slice(i + oldText.length),
+    );
     return `Edited ${p}`;
   } catch (e) {
     return `Error: ${errMsg(e)}`;
@@ -471,7 +508,11 @@ export function runGlob(pattern: string): string {
 const bashSchema = z.object({ command: z.string() });
 const readSchema = z.object({ path: z.string() });
 const writeSchema = z.object({ path: z.string(), content: z.string() });
-const editSchema = z.object({ path: z.string(), old_text: z.string(), new_text: z.string() });
+const editSchema = z.object({
+  path: z.string(),
+  old_text: z.string(),
+  new_text: z.string(),
+});
 const globSchema = z.object({ pattern: z.string() });
 const taskSchema = z.object({ description: z.string() });
 
@@ -512,7 +553,8 @@ const TOOL_HANDLERS: Partial<
   Record<string, (input: any, deps: Deps) => string | Promise<string>>
 > = {
   ...SUB_HANDLERS,
-  edit_file: ({ path, old_text, new_text }) => runEdit(path, old_text, new_text),
+  edit_file: ({ path, old_text, new_text }) =>
+    runEdit(path, old_text, new_text),
   glob: ({ pattern }) => runGlob(pattern),
   task: ({ description }, deps) => spawnSubagent(description, deps),
 };
@@ -521,10 +563,15 @@ const TOOL_HANDLERS: Partial<
 //  FROM s06-s08 (simplified): Subagent — no hooks in s09
 // ═══════════════════════════════════════════════════════════
 
-export async function spawnSubagent(description: string, deps: Deps): Promise<string> {
+export async function spawnSubagent(
+  description: string,
+  deps: Deps,
+): Promise<string> {
   const { client, logger } = deps;
   console.log(`\n\x1b[35m[Subagent spawned]\x1b[0m`);
-  const messages: Anthropic.MessageParam[] = [{ role: "user", content: description }]; // fresh context
+  const messages: Anthropic.MessageParam[] = [
+    { role: "user", content: description },
+  ]; // fresh context
   let lastText = "";
 
   for (let turn = 0; turn < 30; turn++) {
@@ -548,9 +595,14 @@ export async function spawnSubagent(description: string, deps: Deps): Promise<st
       if (block.type !== "tool_use") continue;
       const schema = SUB_SCHEMAS[block.name];
       const handler = SUB_HANDLERS[block.name];
-      const output = handler && schema ? handler(schema.parse(block.input)) : `Unknown: ${block.name}`;
+      const output =
+        handler && schema
+          ? handler(schema.parse(block.input))
+          : `Unknown: ${block.name}`;
       logger.toolResult(block.name, output);
-      console.log(`  \x1b[90m[sub] ${block.name}: ${output.slice(0, 100)}\x1b[0m`);
+      console.log(
+        `  \x1b[90m[sub] ${block.name}: ${output.slice(0, 100)}\x1b[0m`,
+      );
       results.push({
         type: "tool_result",
         tool_use_id: block.id,
@@ -572,16 +624,22 @@ const CONTEXT_LIMIT = 50_000;
 const KEEP_RECENT = 3;
 const PERSIST_THRESHOLD = 30_000;
 
-export const estimateSize = (msgs: Anthropic.MessageParam[]): number => JSON.stringify(msgs).length;
+export const estimateSize = (msgs: Anthropic.MessageParam[]): number =>
+  JSON.stringify(msgs).length;
 
 // Replace an array's contents in place — callers hold the same reference
 // (mirrors Python's `messages[:] = ...`).
-export function setMessages(messages: Anthropic.MessageParam[], next: Anthropic.MessageParam[]): void {
+export function setMessages(
+  messages: Anthropic.MessageParam[],
+  next: Anthropic.MessageParam[],
+): void {
   messages.splice(0, messages.length, ...next);
 }
 
 const messageHasToolCall = (m: Anthropic.MessageParam): boolean =>
-  m.role === "assistant" && Array.isArray(m.content) && m.content.some((b) => b.type === "tool_use");
+  m.role === "assistant" &&
+  Array.isArray(m.content) &&
+  m.content.some((b) => b.type === "tool_use");
 
 // Tool results are user messages carrying tool_result content blocks.
 const isToolResultMessage = (m: Anthropic.MessageParam): boolean =>
@@ -590,7 +648,9 @@ const isToolResultMessage = (m: Anthropic.MessageParam): boolean =>
   m.content.some((b) => typeof b !== "string" && b.type === "tool_result");
 
 const outputText = (part: Anthropic.ToolResultBlockParam): string =>
-  typeof part.content === "string" ? part.content : JSON.stringify(part.content);
+  typeof part.content === "string"
+    ? part.content
+    : JSON.stringify(part.content);
 
 export function snipCompact(
   messages: Anthropic.MessageParam[],
@@ -600,7 +660,8 @@ export function snipCompact(
   let headEnd = 3;
   let tailStart = messages.length - (maxMessages - 3);
   if (headEnd > 0 && messageHasToolCall(messages[headEnd - 1])) {
-    while (headEnd < messages.length && isToolResultMessage(messages[headEnd])) headEnd += 1;
+    while (headEnd < messages.length && isToolResultMessage(messages[headEnd]))
+      headEnd += 1;
   }
   if (
     tailStart > 0 &&
@@ -625,13 +686,16 @@ export function collectToolResults(
   for (const m of messages) {
     if (m.role !== "user" || !Array.isArray(m.content)) continue;
     for (const part of m.content) {
-      if (typeof part !== "string" && part.type === "tool_result") parts.push(part);
+      if (typeof part !== "string" && part.type === "tool_result")
+        parts.push(part);
     }
   }
   return parts;
 }
 
-export function microCompact(messages: Anthropic.MessageParam[]): Anthropic.MessageParam[] {
+export function microCompact(
+  messages: Anthropic.MessageParam[],
+): Anthropic.MessageParam[] {
   const toolResults = collectToolResults(messages);
   if (toolResults.length <= KEEP_RECENT) return messages;
   for (const part of toolResults.slice(0, -KEEP_RECENT)) {
@@ -655,13 +719,16 @@ export function toolResultBudget(
   maxBytes = 200_000,
 ): Anthropic.MessageParam[] {
   const last = messages[messages.length - 1];
-  if (!last || last.role !== "user" || !Array.isArray(last.content)) return messages;
+  if (last?.role !== "user" || !Array.isArray(last.content)) return messages;
   const blocks = last.content.filter(
-    (b): b is Anthropic.ToolResultBlockParam => typeof b !== "string" && b.type === "tool_result",
+    (b): b is Anthropic.ToolResultBlockParam =>
+      typeof b !== "string" && b.type === "tool_result",
   );
   let total = blocks.reduce((n, b) => n + outputText(b).length, 0);
   if (total <= maxBytes) return messages;
-  const ranked = [...blocks].sort((a, b) => outputText(b).length - outputText(a).length);
+  const ranked = [...blocks].sort(
+    (a, b) => outputText(b).length - outputText(a).length,
+  );
   for (const block of ranked) {
     if (total <= maxBytes) break;
     const content = outputText(block);
@@ -674,8 +741,14 @@ export function toolResultBudget(
 
 function writeTranscript(messages: Anthropic.MessageParam[]): string {
   fs.mkdirSync(TRANSCRIPT_DIR, { recursive: true });
-  const filePath = path.join(TRANSCRIPT_DIR, `transcript_${Math.floor(Date.now() / 1000)}.jsonl`);
-  fs.writeFileSync(filePath, messages.map((m) => JSON.stringify(m)).join("\n") + "\n");
+  const filePath = path.join(
+    TRANSCRIPT_DIR,
+    `transcript_${Math.floor(Date.now() / 1000)}.jsonl`,
+  );
+  fs.writeFileSync(
+    filePath,
+    `${messages.map((m) => JSON.stringify(m)).join("\n")}\n`,
+  );
   return filePath;
 }
 
@@ -724,7 +797,10 @@ export async function reactiveCompact(
     tailStart -= 1;
   }
   const summary = await summarizeHistory(messages.slice(0, tailStart), deps);
-  return [{ role: "user", content: `[Reactive compact]\n\n${summary}` }, ...messages.slice(tailStart)];
+  return [
+    { role: "user", content: `[Reactive compact]\n\n${summary}` },
+    ...messages.slice(tailStart),
+  ];
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -742,7 +818,8 @@ export async function agentLoop(
   // s09: inject relevant memory content into the current user turn
   const memoriesContent = await loadMemories(memoryDir, messages, deps);
   const last = messages[messages.length - 1];
-  const memoryTurn = last && typeof last.content === "string" ? messages.length - 1 : null;
+  const memoryTurn =
+    last && typeof last.content === "string" ? messages.length - 1 : null;
   // s09: build system once per user turn; memory is updated after the loop returns
   const system = buildSystem(memoryDir);
 
@@ -760,11 +837,14 @@ export async function agentLoop(
       setMessages(messages, await compactHistory(messages, deps));
     }
 
-    let response;
+    let response: Anthropic.Message;
     try {
       // memories go into a request-time copy — history itself stays clean
       let requestMessages = messages;
-      const turn = memoryTurn !== null && memoryTurn < messages.length ? messages[memoryTurn] : null;
+      const turn =
+        memoryTurn !== null && memoryTurn < messages.length
+          ? messages[memoryTurn]
+          : null;
       if (memoriesContent && turn && typeof turn.content === "string") {
         requestMessages = messages.slice();
         requestMessages[memoryTurn as number] = {
@@ -811,7 +891,9 @@ export async function agentLoop(
       const schema = TOOL_SCHEMAS[block.name];
       const handler = TOOL_HANDLERS[block.name];
       const output =
-        handler && schema ? await handler(schema.parse(block.input), deps) : `Unknown: ${block.name}`;
+        handler && schema
+          ? await handler(schema.parse(block.input), deps)
+          : `Unknown: ${block.name}`;
       logger.toolResult(block.name, output);
       console.log(output.slice(0, 200));
       results.push({
@@ -857,7 +939,11 @@ if (import.meta.main) {
 
     logger.userInput(query);
     history.push({ role: "user", content: query });
-    const finalText = await agentLoop(history, { client, logger, memoryDir: MEMORY_DIR });
+    const finalText = await agentLoop(history, {
+      client,
+      logger,
+      memoryDir: MEMORY_DIR,
+    });
     console.log(finalText);
     console.log();
   }

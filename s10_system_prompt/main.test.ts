@@ -8,17 +8,23 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type Anthropic from "@anthropic-ai/sdk";
-import { fakeClient, fakeMessage, noopLogger, textBlock, toolUseBlock } from "../lib/testing";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import {
+  fakeClient,
+  fakeMessage,
+  noopLogger,
+  textBlock,
+  toolUseBlock,
+} from "../lib/testing";
 import {
   agentLoop,
   assembleSystemPrompt,
+  type Context,
   contextKey,
   getSystemPrompt,
   resetPromptCache,
   updateContext,
-  type Context,
 } from "./main";
 
 const ctx = (memories = ""): Context => ({
@@ -41,15 +47,25 @@ describe("assembleSystemPrompt", () => {
   });
 
   it("appends a memories section only when memories are present", () => {
-    expect(assembleSystemPrompt(ctx("- [a](a.md) — x"))).toContain("Relevant memories:\n- [a](a.md) — x");
+    expect(assembleSystemPrompt(ctx("- [a](a.md) — x"))).toContain(
+      "Relevant memories:\n- [a](a.md) — x",
+    );
   });
 });
 
 // ── contextKey ────────────────────────────────────────────
 describe("contextKey", () => {
   it("is stable regardless of key insertion order", () => {
-    const a: Context = { enabled_tools: ["bash"], workspace: "/r", memories: "" };
-    const b = { memories: "", workspace: "/r", enabled_tools: ["bash"] } as Context;
+    const a: Context = {
+      enabled_tools: ["bash"],
+      workspace: "/r",
+      memories: "",
+    };
+    const b = {
+      memories: "",
+      workspace: "/r",
+      enabled_tools: ["bash"],
+    } as Context;
     expect(contextKey(a)).toBe(contextKey(b));
   });
 
@@ -102,16 +118,30 @@ describe("updateContext", () => {
 
 // ── agentLoop ─────────────────────────────────────────────
 describe("agentLoop", () => {
-  const memoryIndex = path.join(process.cwd(), ".tmp", "s10-nonexistent", "MEMORY.md");
+  const memoryIndex = path.join(
+    process.cwd(),
+    ".tmp",
+    "s10-nonexistent",
+    "MEMORY.md",
+  );
 
   it("executes a plain tool call and returns the final text", async () => {
     const client = fakeClient(
-      fakeMessage([toolUseBlock("tu_1", "bash", { command: "echo hi" })], "tool_use"),
+      fakeMessage(
+        [toolUseBlock("tu_1", "bash", { command: "echo hi" })],
+        "tool_use",
+      ),
       fakeMessage([textBlock("done")], "end_turn"),
     );
-    const messages: Anthropic.MessageParam[] = [{ role: "user", content: "go" }];
+    const messages: Anthropic.MessageParam[] = [
+      { role: "user", content: "go" },
+    ];
 
-    const result = await agentLoop(messages, ctx(), { client, logger: noopLogger, memoryIndex });
+    const result = await agentLoop(messages, ctx(), {
+      client,
+      logger: noopLogger,
+      memoryIndex,
+    });
 
     expect(result).toBe("done");
     expect(client.messages.create).toHaveBeenCalledTimes(2);
@@ -120,10 +150,18 @@ describe("agentLoop", () => {
   });
 
   it("returns immediately when the first response needs no tools", async () => {
-    const client = fakeClient(fakeMessage([textBlock("just text")], "end_turn"));
-    const messages: Anthropic.MessageParam[] = [{ role: "user", content: "hi" }];
+    const client = fakeClient(
+      fakeMessage([textBlock("just text")], "end_turn"),
+    );
+    const messages: Anthropic.MessageParam[] = [
+      { role: "user", content: "hi" },
+    ];
 
-    const result = await agentLoop(messages, ctx(), { client, logger: noopLogger, memoryIndex });
+    const result = await agentLoop(messages, ctx(), {
+      client,
+      logger: noopLogger,
+      memoryIndex,
+    });
 
     expect(result).toBe("just text");
   });
