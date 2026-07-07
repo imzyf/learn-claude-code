@@ -7,7 +7,7 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import type Anthropic from "@anthropic-ai/sdk";
 import {
   fakeClient,
@@ -15,6 +15,7 @@ import {
   noopLogger,
   textBlock,
   toolUseBlock,
+  useTempDir,
 } from "../lib/testing";
 import {
   agentLoop,
@@ -25,19 +26,9 @@ import {
   safePath,
 } from "./main";
 
-// 工具以 WORKDIR = process.cwd() 为根，临时目录必须建在仓库内。
-// 统一放在 .tmp/（已 gitignore）下，各 session 的测试共用这个约定。
 let tmp: string;
-let rel: (name: string) => string;
-
-beforeAll(() => {
-  fs.mkdirSync(path.join(process.cwd(), ".tmp"), { recursive: true });
-  tmp = fs.mkdtempSync(path.join(process.cwd(), ".tmp", "s02-"));
-  rel = (name) => path.join(path.relative(process.cwd(), tmp), name);
-});
-
-afterAll(() => {
-  fs.rmSync(tmp, { recursive: true, force: true });
+const rel = useTempDir("s02", (dir) => {
+  tmp = dir;
 });
 
 // ── safePath ──────────────────────────────────────────────
@@ -108,6 +99,14 @@ describe("runEdit", () => {
     );
   });
 
+  it("replaces only the first of adjacent repeats", () => {
+    fs.writeFileSync(path.join(tmp, "repeat.txt"), "abcabcab abc");
+    runEdit(rel("repeat.txt"), "abc", "def");
+    expect(fs.readFileSync(path.join(tmp, "repeat.txt"), "utf8")).toBe(
+      "defabcab abc",
+    );
+  });
+
   it("inserts replacement-pattern characters literally", () => {
     fs.writeFileSync(path.join(tmp, "dollar.txt"), "abc");
     runEdit(rel("dollar.txt"), "b", "$&$'");
@@ -144,7 +143,7 @@ describe("runGlob", () => {
 describe("agentLoop", () => {
   it("dispatches to the handler matching the tool name", async () => {
     fs.writeFileSync(path.join(tmp, "loop.txt"), "from file");
-    const { client, create } = fakeClient(
+    const client = fakeClient(
       fakeMessage(
         [toolUseBlock("tu_1", "read_file", { path: rel("loop.txt") })],
         "tool_use",
@@ -158,14 +157,14 @@ describe("agentLoop", () => {
     const result = await agentLoop(messages, { client, logger: noopLogger });
 
     expect(result).toBe("done");
-    expect(create).toHaveBeenCalledTimes(2);
+    expect(client.messages.create).toHaveBeenCalledTimes(2);
     const toolResults = messages[2].content as Anthropic.ToolResultBlockParam[];
     expect(toolResults[0].tool_use_id).toBe("tu_1");
     expect(toolResults[0].content).toBe("from file");
   });
 
   it("handles mixed tool calls in one response, in order", async () => {
-    const { client } = fakeClient(
+    const client = fakeClient(
       fakeMessage(
         [
           toolUseBlock("tu_a", "bash", { command: "echo hi" }),
@@ -189,7 +188,7 @@ describe("agentLoop", () => {
   });
 
   it("returns an Unknown result for an unregistered tool and keeps looping", async () => {
-    const { client } = fakeClient(
+    const client = fakeClient(
       fakeMessage([toolUseBlock("tu_x", "no_such_tool", {})], "tool_use"),
       fakeMessage([textBlock("recovered")], "end_turn"),
     );
@@ -205,7 +204,7 @@ describe("agentLoop", () => {
   });
 
   it("rejects tool input that does not match the schema", async () => {
-    const { client } = fakeClient(
+    const client = fakeClient(
       fakeMessage(
         [toolUseBlock("tu_bad", "read_file", { path: 123 })],
         "tool_use",

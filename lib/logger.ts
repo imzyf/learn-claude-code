@@ -10,16 +10,20 @@ import { createCostMeter } from "./pricing";
 // 每次运行生成一对新文件，避免覆盖上一次的记录。
 // 日志落在对应 session 目录的 .log/ 下。
 
-// agent 循环依赖的最小日志接口。
-export interface AgentLogger {
+// 每个 session 的日志接口。
+export interface SessionLogger {
   // API 调用前调用
   request(messages: Anthropic.MessageParam[]): void;
   // API 返回后调用
   response(res: Anthropic.Message): void;
   toolResult(command: string, output: string): void;
-}
-
-export interface SessionLogger extends AgentLogger {
+  // 权限关卡放行/拦截一个工具调用时调用
+  permission(
+    toolName: string,
+    args: unknown,
+    reason: string,
+    decision: "allow" | "deny",
+  ): void;
   readonly file: string;
   readonly jsonFile: string;
   config(data: Record<string, unknown>): void;
@@ -77,6 +81,13 @@ export function createLogger(sessionDir: string): SessionLogger {
       writeTranscript(`TOOL RESULT (${command})`, output);
     },
 
+    permission(toolName, args, reason, decision) {
+      writeTranscript(
+        "PERMISSION",
+        `${reason}\nTool: ${toolName}(${JSON.stringify(args)})\nDecision: ${decision}`,
+      );
+    },
+
     request(messages: Anthropic.MessageParam[]) {
       writeJson("api_request", { new_messages: messages.slice(loggedMessages) });
       loggedMessages = messages.length;
@@ -85,12 +96,14 @@ export function createLogger(sessionDir: string): SessionLogger {
     response(res: Anthropic.Message) {
       writeJson("api_response", res);
       const u = res.usage;
-      writeTranscript(
-        `ASSISTANT (${u.input_tokens} in / ${u.output_tokens} out / ` +
+      const cost = `${u.input_tokens} in / ${u.output_tokens} out / ` +
           `${u.cache_creation_input_tokens ?? 0} cache-w / ` +
-          `${u.cache_read_input_tokens ?? 0} cache-r${costMeter.costSuffix(u)})`,
+          `${u.cache_read_input_tokens ?? 0} cache-r${costMeter.costSuffix(u)}`
+      writeTranscript(
+        `ASSISTANT (${cost})`,
         formatBlocks(res.content),
       );
+      console.log(`\x1b[38;5;245m${cost}\x1b[0m`);
     },
   };
 }

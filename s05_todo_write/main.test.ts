@@ -95,7 +95,7 @@ describe("agentLoop", () => {
 
   it("executes a tool and returns final text", async () => {
     registerDefaultHooks();
-    const { client } = fakeClient(bashRound("echo hi"), fakeMessage([textBlock("done")], "end_turn"));
+    const client = fakeClient(bashRound("echo hi"), fakeMessage([textBlock("done")], "end_turn"));
     const messages: Anthropic.MessageParam[] = [{ role: "user", content: "go" }];
 
     const result = await agentLoop(messages, { client, logger: noopLogger });
@@ -107,7 +107,7 @@ describe("agentLoop", () => {
 
   it("blocks deny-list commands via the permission hook", async () => {
     registerDefaultHooks();
-    const { client } = fakeClient(bashRound("sudo rm"), fakeMessage([textBlock("stop")], "end_turn"));
+    const client = fakeClient(bashRound("sudo rm"), fakeMessage([textBlock("stop")], "end_turn"));
     const messages: Anthropic.MessageParam[] = [{ role: "user", content: "go" }];
 
     await agentLoop(messages, { client, logger: noopLogger });
@@ -117,7 +117,7 @@ describe("agentLoop", () => {
   });
 
   it("injects a <reminder> after 3 tool rounds without todo_write", async () => {
-    const { client, create } = fakeClient(
+    const client = fakeClient(
       bashRound("echo 1"),
       bashRound("echo 2"),
       bashRound("echo 3"),
@@ -127,7 +127,7 @@ describe("agentLoop", () => {
 
     await agentLoop(messages, { client, logger: noopLogger });
 
-    expect(create).toHaveBeenCalledTimes(4);
+    expect(client.messages.create).toHaveBeenCalledTimes(4);
     const reminded = messages.some(
       (m) => m.content === "<reminder>Update your todos.</reminder>",
     );
@@ -135,7 +135,7 @@ describe("agentLoop", () => {
   });
 
   it("does not nag when todo_write resets the counter", async () => {
-    const { client } = fakeClient(
+    const client = fakeClient(
       bashRound("echo 1"),
       bashRound("echo 2"),
       fakeMessage(
@@ -157,7 +157,7 @@ describe("agentLoop", () => {
 
   it("lets a Stop hook force another round", async () => {
     let fired = false;
-    const { client, create } = fakeClient(
+    const client = fakeClient(
       fakeMessage([textBlock("first")], "end_turn"),
       fakeMessage([textBlock("second")], "end_turn"),
     );
@@ -172,6 +172,6 @@ describe("agentLoop", () => {
     const result = await agentLoop(messages, { client, logger: noopLogger });
 
     expect(result).toBe("second");
-    expect(create).toHaveBeenCalledTimes(2);
+    expect(client.messages.create).toHaveBeenCalledTimes(2);
   });
 });

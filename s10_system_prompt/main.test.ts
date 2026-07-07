@@ -105,7 +105,7 @@ describe("agentLoop", () => {
   const memoryIndex = path.join(process.cwd(), ".tmp", "s10-nonexistent", "MEMORY.md");
 
   it("executes a plain tool call and returns the final text", async () => {
-    const { client, create } = fakeClient(
+    const client = fakeClient(
       fakeMessage([toolUseBlock("tu_1", "bash", { command: "echo hi" })], "tool_use"),
       fakeMessage([textBlock("done")], "end_turn"),
     );
@@ -114,13 +114,13 @@ describe("agentLoop", () => {
     const result = await agentLoop(messages, ctx(), { client, logger: noopLogger, memoryIndex });
 
     expect(result).toBe("done");
-    expect(create).toHaveBeenCalledTimes(2);
+    expect(client.messages.create).toHaveBeenCalledTimes(2);
     const toolResults = messages[2].content as Anthropic.ToolResultBlockParam[];
     expect(toolResults[0].content).toBe("hi");
   });
 
   it("returns immediately when the first response needs no tools", async () => {
-    const { client } = fakeClient(fakeMessage([textBlock("just text")], "end_turn"));
+    const client = fakeClient(fakeMessage([textBlock("just text")], "end_turn"));
     const messages: Anthropic.MessageParam[] = [{ role: "user", content: "hi" }];
 
     const result = await agentLoop(messages, ctx(), { client, logger: noopLogger, memoryIndex });

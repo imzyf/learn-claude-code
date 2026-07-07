@@ -5,7 +5,7 @@
  * agentLoop：用 fake client 按序返回脚本化响应，
  *            验证「text 即停止、tool_use 即执行并回灌」这个核心循环。
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type Anthropic from "@anthropic-ai/sdk";
 import {
   fakeClient,
@@ -65,7 +65,7 @@ describe("runBash", () => {
 
 describe("agentLoop", () => {
   it("returns text and stops when the model does not call a tool", async () => {
-    const { client } = fakeClient(fakeMessage([textBlock("done")], "end_turn"));
+    const client = fakeClient(fakeMessage([textBlock("done")], "end_turn"));
     const messages: Anthropic.MessageParam[] = [
       { role: "user", content: "hello" },
     ];
@@ -79,7 +79,7 @@ describe("agentLoop", () => {
   });
 
   it("executes a tool call, feeds the result back, then returns final text", async () => {
-    const { client, create } = fakeClient(
+    const client = fakeClient(
       fakeMessage(
         [toolUseBlock("tu_1", "bash", { command: "echo hello" })],
         "tool_use",
@@ -93,7 +93,7 @@ describe("agentLoop", () => {
     const result = await agentLoop(messages, { client, logger: noopLogger });
 
     expect(result).toBe("all done");
-    expect(create).toHaveBeenCalledTimes(2);
+    expect(client.messages.create).toHaveBeenCalledTimes(2);
 
     // 历史：user → assistant(tool_use) → user(tool_result) → assistant(text)
     expect(messages).toHaveLength(4);
@@ -105,12 +105,12 @@ describe("agentLoop", () => {
     expect(toolResults[0].content).toBe("hello"); // 命令被真实执行
 
     // 第二次 API 调用带上了 tool_result
-    const secondCall = create.mock.calls.length === 2;
+    const secondCall = vi.mocked(client.messages.create).mock.calls.length === 2;
     expect(secondCall).toBe(true);
   });
 
   it("handles multiple tool calls in one response, in order", async () => {
-    const { client } = fakeClient(
+    const client = fakeClient(
       fakeMessage(
         [
           toolUseBlock("tu_a", "bash", { command: "echo first" }),
@@ -126,6 +126,8 @@ describe("agentLoop", () => {
 
     await agentLoop(messages, { client, logger: noopLogger });
 
+    // 历史：user → assistant(tool_use ×2) → user(tool_result ×2) → assistant(text)
+    // 同一次回复的多个工具，结果合并进 messages[2] 这一条 user 消息，按调用顺序排列
     const toolResults = messages[2]
       .content as Anthropic.ToolResultBlockParam[];
     expect(toolResults.map((r) => r.tool_use_id)).toEqual(["tu_a", "tu_b"]);
@@ -133,8 +135,9 @@ describe("agentLoop", () => {
   });
 
   it("rejects tool input that does not match the schema", async () => {
-    const { client } = fakeClient(
+    const client = fakeClient(
       fakeMessage(
+        // should be `command`
         [toolUseBlock("tu_bad", "bash", { cmd: 1 })],
         "tool_use",
       ),

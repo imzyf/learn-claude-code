@@ -90,7 +90,7 @@ describe("selectRelevantMemories", () => {
   });
 
   it("returns the filenames the model selects by index", async () => {
-    const { client } = fakeClient(fakeMessage([textBlock("[0]")], "end_turn"));
+    const client = fakeClient(fakeMessage([textBlock("[0]")], "end_turn"));
 
     const selected = await selectRelevantMemories(
       tmp,
@@ -102,7 +102,7 @@ describe("selectRelevantMemories", () => {
   });
 
   it("falls back to keyword matching when the model call fails", async () => {
-    const { client } = fakeClient(); // no responses → create throws → fallback
+    const client = fakeClient(); // no responses → create throws → fallback
 
     const selected = await selectRelevantMemories(
       tmp,
@@ -114,7 +114,7 @@ describe("selectRelevantMemories", () => {
   });
 
   it("returns nothing when there are no memory files", async () => {
-    const { client, create } = fakeClient();
+    const client = fakeClient();
     const empty = fs.mkdtempSync(path.join(process.cwd(), ".tmp", "s09-empty-"));
 
     const selected = await selectRelevantMemories(
@@ -124,7 +124,7 @@ describe("selectRelevantMemories", () => {
     );
 
     expect(selected).toEqual([]);
-    expect(create).not.toHaveBeenCalled(); // short-circuits before any API call
+    expect(client.messages.create).not.toHaveBeenCalled(); // short-circuits before any API call
     fs.rmSync(empty, { recursive: true, force: true });
   });
 });
@@ -157,7 +157,7 @@ describe("compaction", () => {
 // ── summarizeHistory (fake client) ────────────────────────
 describe("summarizeHistory", () => {
   it("returns the model's summary text", async () => {
-    const { client } = fakeClient(fakeMessage([textBlock("short summary")], "end_turn"));
+    const client = fakeClient(fakeMessage([textBlock("short summary")], "end_turn"));
     const summary = await summarizeHistory([{ role: "user", content: "history" }], {
       client,
       logger: noopLogger,
@@ -169,7 +169,7 @@ describe("summarizeHistory", () => {
 // ── spawnSubagent ─────────────────────────────────────────
 describe("spawnSubagent", () => {
   it("returns the subagent's final text", async () => {
-    const { client } = fakeClient(fakeMessage([textBlock("answer")], "end_turn"));
+    const client = fakeClient(fakeMessage([textBlock("answer")], "end_turn"));
     const result = await spawnSubagent("do x", { client, logger: noopLogger });
     expect(result).toBe("answer");
   });
@@ -178,7 +178,7 @@ describe("spawnSubagent", () => {
 // ── agentLoop (empty memory dir) ──────────────────────────
 describe("agentLoop", () => {
   it("executes a plain tool call, then extraction finds nothing new", async () => {
-    const { client, create } = fakeClient(
+    const client = fakeClient(
       fakeMessage([toolUseBlock("tu_1", "bash", { command: "echo hi" })], "tool_use"),
       fakeMessage([textBlock("done")], "end_turn"),
       fakeMessage([textBlock("[]")], "end_turn"), // extractMemories → nothing
@@ -188,14 +188,14 @@ describe("agentLoop", () => {
     const result = await agentLoop(messages, { client, logger: noopLogger, memoryDir: tmp });
 
     expect(result).toBe("done");
-    expect(create).toHaveBeenCalledTimes(3);
+    expect(client.messages.create).toHaveBeenCalledTimes(3);
     const toolResults = messages[2].content as Anthropic.ToolResultBlockParam[];
     expect(toolResults[0].content).toBe("hi");
     expect(memoryFilenames(tmp)).toEqual([]); // no memory written
   });
 
   it("dispatches task to a subagent and keeps only its summary", async () => {
-    const { client } = fakeClient(
+    const client = fakeClient(
       fakeMessage([toolUseBlock("tu_1", "task", { description: "sub work" })], "tool_use"),
       fakeMessage([textBlock("sub result")], "end_turn"),
       fakeMessage([textBlock("parent done")], "end_turn"),

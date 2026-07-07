@@ -172,16 +172,16 @@ describe("permissionHook", () => {
 // ── spawnSubagent (same as s06) ───────────────────────────
 describe("spawnSubagent", () => {
   it("returns the subagent's final text", async () => {
-    const { client, create } = fakeClient(fakeMessage([textBlock("answer")], "end_turn"));
+    const client = fakeClient(fakeMessage([textBlock("answer")], "end_turn"));
 
     const result = await spawnSubagent("do x", { client, logger: noopLogger });
 
     expect(result).toBe("answer");
-    expect(create).toHaveBeenCalledOnce();
+    expect(client.messages.create).toHaveBeenCalledOnce();
   });
 
   it("runs its own tool loop before returning a summary", async () => {
-    const { client, create } = fakeClient(
+    const client = fakeClient(
       fakeMessage([toolUseBlock("s1", "bash", { command: "echo hi" })], "tool_use"),
       fakeMessage([textBlock("summary")], "end_turn"),
     );
@@ -189,14 +189,14 @@ describe("spawnSubagent", () => {
     const result = await spawnSubagent("do x", { client, logger: noopLogger });
 
     expect(result).toBe("summary");
-    expect(create).toHaveBeenCalledTimes(2);
+    expect(client.messages.create).toHaveBeenCalledTimes(2);
   });
 
   it("falls back to a message when it never finishes", async () => {
     const rounds = Array.from({ length: 30 }, (_, i) =>
       fakeMessage([toolUseBlock(`s${i}`, "bash", { command: "echo x" })], "tool_use"),
     );
-    const { client } = fakeClient(...rounds);
+    const client = fakeClient(...rounds);
 
     const result = await spawnSubagent("do x", { client, logger: noopLogger });
 
@@ -207,7 +207,7 @@ describe("spawnSubagent", () => {
 // ── agentLoop: load_skill + task dispatch ─────────────────
 describe("agentLoop", () => {
   it("dispatches load_skill and injects the full content as the tool result", async () => {
-    const { client, create } = fakeClient(
+    const client = fakeClient(
       fakeMessage([toolUseBlock("tu_1", "load_skill", { name: "code-review" })], "tool_use"),
       fakeMessage([textBlock("used the skill")], "end_turn"),
     );
@@ -221,13 +221,13 @@ describe("agentLoop", () => {
     });
 
     expect(result).toBe("used the skill");
-    expect(create).toHaveBeenCalledTimes(2);
+    expect(client.messages.create).toHaveBeenCalledTimes(2);
     const toolResults = messages[2].content as Anthropic.ToolResultBlockParam[];
     expect(toolResults[0].content).toBe("FULL code-review content");
   });
 
   it("dispatches the task tool to a subagent and keeps only its summary", async () => {
-    const { client, create } = fakeClient(
+    const client = fakeClient(
       fakeMessage([toolUseBlock("tu_1", "task", { description: "sub work" })], "tool_use"),
       fakeMessage([textBlock("sub result")], "end_turn"), // subagent's own turn
       fakeMessage([textBlock("parent done")], "end_turn"), // parent resumes
@@ -242,13 +242,13 @@ describe("agentLoop", () => {
     });
 
     expect(result).toBe("parent done");
-    expect(create).toHaveBeenCalledTimes(3);
+    expect(client.messages.create).toHaveBeenCalledTimes(3);
     const toolResults = messages[2].content as Anthropic.ToolResultBlockParam[];
     expect(toolResults[0].content).toBe("sub result");
   });
 
   it("executes a plain tool call", async () => {
-    const { client } = fakeClient(
+    const client = fakeClient(
       fakeMessage([toolUseBlock("tu_1", "bash", { command: "echo hi" })], "tool_use"),
       fakeMessage([textBlock("done")], "end_turn"),
     );

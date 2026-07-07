@@ -3,15 +3,42 @@
  *
  * 只被 *.test.ts import，不进入运行时代码。
  */
-import { vi, type Mock } from "vitest";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { afterAll, beforeAll, vi } from "vitest";
 import type Anthropic from "@anthropic-ai/sdk";
 import type { ModelClient } from "./model";
-import type { AgentLogger } from "./logger";
+import type { SessionLogger } from "./logger";
 
-export const noopLogger: AgentLogger = {
+// 工具以 WORKDIR = process.cwd() 为根，临时目录必须建在仓库内。
+// 统一放在 .tmp/（已 gitignore）下，注册 beforeAll/afterAll 自动创建与清理。
+// onReady 在目录建好后回传其绝对路径；返回值把目录内文件转成相对 WORKDIR 的路径。
+export function useTempDir(
+  prefix: string,
+  onReady: (dir: string) => void,
+): (name: string) => string {
+  let dir = "";
+  beforeAll(() => {
+    fs.mkdirSync(path.join(process.cwd(), ".tmp"), { recursive: true });
+    dir = fs.mkdtempSync(path.join(process.cwd(), ".tmp", `${prefix}-`));
+    onReady(dir);
+  });
+  afterAll(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  return (name: string) => path.join(path.relative(process.cwd(), dir), name);
+}
+
+export const noopLogger: SessionLogger = {
+  file: "",
+  jsonFile: "",
   request() {},
   response() {},
   toolResult() {},
+  permission() {},
+  config() {},
+  writeTranscript() {},
+  userInput() {},
 };
 
 export function fakeMessage(
@@ -60,18 +87,13 @@ export function toolUseBlock(
   };
 }
 
-// create 暴露 mock 本体，供断言调用次数/参数。
-export interface FakeClient {
-  client: ModelClient;
-  create: Mock<ModelClient["messages"]["create"]>;
-}
-
-// create 按序弹出预设响应，耗尽则抛错
-export function fakeClient(...responses: Anthropic.Message[]): FakeClient {
-  const create: FakeClient["create"] = vi.fn(async () => {
+// 按序弹出预设响应，耗尽则抛错。
+// 返回的就是一个 ModelClient；断言时用 vi.mocked(client.messages.create)。
+export function fakeClient(...responses: Anthropic.Message[]): ModelClient {
+  const create = vi.fn(async () => {
     const next = responses.shift();
     if (!next) throw new Error("fake client ran out of responses");
     return next;
   });
-  return { client: { messages: { create } }, create };
+  return { messages: { create } };
 }

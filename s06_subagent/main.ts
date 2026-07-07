@@ -36,7 +36,7 @@ import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
 import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
 import { zodTool, textOf } from "../lib/tools";
-import { createLogger, type AgentLogger } from "../lib/logger";
+import { createLogger, type SessionLogger } from "../lib/logger";
 import {
   runRead as s02RunRead,
   runWrite as s02RunWrite,
@@ -58,7 +58,7 @@ const SUB_SYSTEM =
   "Do not delegate further.";
 
 // client 与 logger 通过参数注入到 agentLoop / spawnSubagent。
-export type Deps = { client: ModelClient; logger: AgentLogger };
+export type Deps = { client: ModelClient; logger: SessionLogger };
 
 // ═══════════════════════════════════════════════════════════
 //  FROM s02-s05: Tool Implementations

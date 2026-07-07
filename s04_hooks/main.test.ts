@@ -127,7 +127,7 @@ describe("pure hooks return null (non-blocking)", () => {
 describe("agentLoop", () => {
   it("blocks a tool call when a PreToolUse hook returns a message", async () => {
     registerHook("PreToolUse", makePermissionHook(grant));
-    const { client } = fakeClient(
+    const client = fakeClient(
       fakeMessage([toolUseBlock("tu_1", "bash", { command: "sudo ls" })], "tool_use"),
       fakeMessage([textBlock("stopped")], "end_turn"),
     );
@@ -145,7 +145,7 @@ describe("agentLoop", () => {
   it("runs PostToolUse after a tool executes", async () => {
     const post = vi.fn(() => null);
     registerHook("PostToolUse", post);
-    const { client } = fakeClient(
+    const client = fakeClient(
       fakeMessage([toolUseBlock("tu_1", "bash", { command: "echo hi" })], "tool_use"),
       fakeMessage([textBlock("done")], "end_turn"),
     );
@@ -168,7 +168,7 @@ describe("agentLoop", () => {
       fired = true;
       return "keep going"; // 第一次强制续一轮，第二次放行
     });
-    const { client, create } = fakeClient(
+    const client = fakeClient(
       fakeMessage([textBlock("first")], "end_turn"),
       fakeMessage([textBlock("second")], "end_turn"),
     );
@@ -179,7 +179,7 @@ describe("agentLoop", () => {
     const result = await agentLoop(messages, { client, logger: noopLogger });
 
     expect(result).toBe("second");
-    expect(create).toHaveBeenCalledTimes(2);
+    expect(client.messages.create).toHaveBeenCalledTimes(2);
     // Stop hook 的返回值作为一条 user 消息注入，触发了续轮
     expect(messages[2].role).toBe("user");
     expect(messages[2].content).toBe("keep going");

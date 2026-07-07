@@ -7,7 +7,7 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type Anthropic from "@anthropic-ai/sdk";
 import {
   fakeClient,
@@ -15,6 +15,7 @@ import {
   noopLogger,
   textBlock,
   toolUseBlock,
+  useTempDir,
 } from "../lib/testing";
 import {
   agentLoop,
@@ -24,19 +25,9 @@ import {
   type AskUser,
 } from "./main";
 
-// 工具以 WORKDIR = process.cwd() 为根，临时目录必须建在仓库内。
-// 统一放在 .tmp/（已 gitignore）下，各 session 的测试共用这个约定。
 let tmp: string;
-let rel: (name: string) => string;
-
-beforeAll(() => {
-  fs.mkdirSync(path.join(process.cwd(), ".tmp"), { recursive: true });
-  tmp = fs.mkdtempSync(path.join(process.cwd(), ".tmp", "s03-"));
-  rel = (name) => path.join(path.relative(process.cwd(), tmp), name);
-});
-
-afterAll(() => {
-  fs.rmSync(tmp, { recursive: true, force: true });
+const rel = useTempDir("s03", (dir) => {
+  tmp = dir;
 });
 
 const allow: AskUser = async () => "allow";
@@ -93,13 +84,13 @@ describe("checkPermission", () => {
 
   it("denies deny-list commands without asking the user", async () => {
     const ask = vi.fn(allow);
-    expect(await checkPermission(bash("sudo ls"), ask)).toBe(false);
+    expect(await checkPermission(bash("sudo ls"), ask, noopLogger)).toBe(false);
     expect(ask).not.toHaveBeenCalled();
   });
 
   it("asks the user when a rule matches, and honors allow", async () => {
     const ask = vi.fn(allow);
-    expect(await checkPermission(bash("rm foo"), ask)).toBe(true);
+    expect(await checkPermission(bash("rm foo"), ask, noopLogger)).toBe(true);
     expect(ask).toHaveBeenCalledWith(
       "bash",
       { command: "rm foo" },
@@ -109,14 +100,42 @@ describe("checkPermission", () => {
 
   it("asks the user when a rule matches, and honors deny", async () => {
     const ask = vi.fn(deny);
-    expect(await checkPermission(bash("rm foo"), ask)).toBe(false);
+    expect(await checkPermission(bash("rm foo"), ask, noopLogger)).toBe(false);
     expect(ask).toHaveBeenCalledOnce();
   });
 
   it("allows a safe command without asking", async () => {
     const ask = vi.fn(allow);
-    expect(await checkPermission(bash("echo hi"), ask)).toBe(true);
+    expect(await checkPermission(bash("echo hi"), ask, noopLogger)).toBe(true);
     expect(ask).not.toHaveBeenCalled();
+  });
+
+  it("logs a deny-list block as a denied permission", async () => {
+    const logger = { ...noopLogger, permission: vi.fn() };
+    await checkPermission(bash("sudo ls"), vi.fn(allow), logger);
+    expect(logger.permission).toHaveBeenCalledWith(
+      "bash",
+      { command: "sudo ls" },
+      expect.stringMatching(/deny list/),
+      "deny",
+    );
+  });
+
+  it("logs the user's decision when a rule matches", async () => {
+    const logger = { ...noopLogger, permission: vi.fn() };
+    await checkPermission(bash("rm foo"), vi.fn(deny), logger);
+    expect(logger.permission).toHaveBeenCalledWith(
+      "bash",
+      { command: "rm foo" },
+      "Potentially destructive command",
+      "deny",
+    );
+  });
+
+  it("does not log when no gate fires", async () => {
+    const logger = { ...noopLogger, permission: vi.fn() };
+    await checkPermission(bash("echo hi"), vi.fn(allow), logger);
+    expect(logger.permission).not.toHaveBeenCalled();
   });
 });
 
@@ -124,7 +143,7 @@ describe("checkPermission", () => {
 describe("agentLoop", () => {
   it("denies a deny-list tool call without executing it", async () => {
     const ask = vi.fn(allow);
-    const { client } = fakeClient(
+    const client = fakeClient(
       fakeMessage([toolUseBlock("tu_1", "bash", { command: "sudo ls" })], "tool_use"),
       fakeMessage([textBlock("stopped")], "end_turn"),
     );
@@ -146,7 +165,7 @@ describe("agentLoop", () => {
 
   it("denies a rule-matched call when the user says no", async () => {
     const ask = vi.fn(deny);
-    const { client } = fakeClient(
+    const client = fakeClient(
       fakeMessage(
         [toolUseBlock("tu_1", "write_file", { path: "../escape.txt", content: "x" })],
         "tool_use",
@@ -168,7 +187,7 @@ describe("agentLoop", () => {
 
   it("executes a safe tool without asking", async () => {
     const ask = vi.fn(allow);
-    const { client } = fakeClient(
+    const client = fakeClient(
       fakeMessage([toolUseBlock("tu_1", "bash", { command: "echo hi" })], "tool_use"),
       fakeMessage([textBlock("done")], "end_turn"),
     );
@@ -191,7 +210,7 @@ describe("agentLoop", () => {
   it("executes a rule-matched call after the user allows it", async () => {
     fs.writeFileSync(path.join(tmp, "perm.txt"), "x");
     const ask = vi.fn(allow);
-    const { client } = fakeClient(
+    const client = fakeClient(
       fakeMessage(
         [toolUseBlock("tu_1", "bash", { command: `chmod 777 ${rel("perm.txt")}` })],
         "tool_use",

@@ -39,7 +39,7 @@ import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
 import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
 import { zodTool, textOf } from "../lib/tools";
-import { createLogger, type AgentLogger } from "../lib/logger";
+import { createLogger, type SessionLogger } from "../lib/logger";
 
 const WORKDIR = process.cwd();
 const MEMORY_DIR = path.join(WORKDIR, ".memory");
@@ -49,7 +49,7 @@ const TOOL_RESULTS_DIR = path.join(WORKDIR, ".task_outputs", "tool-results");
 const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 // client 与 logger 通过参数注入到 agentLoop / spawnSubagent。
-export type Deps = { client: ModelClient; logger: AgentLogger };
+export type Deps = { client: ModelClient; logger: SessionLogger };
 // agentLoop 还需要知道记忆目录。
 export type LoopDeps = Deps & { memoryDir: string };
 

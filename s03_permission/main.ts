@@ -35,7 +35,7 @@ import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
 import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
 import { zodTool, textOf } from "../lib/tools";
-import { createLogger, type AgentLogger } from "../lib/logger";
+import { createLogger, type SessionLogger } from "../lib/logger";
 import {
   runRead as s02RunRead,
   runWrite as s02RunWrite,
@@ -181,17 +181,20 @@ export type AskUser = (
 export async function checkPermission(
   block: Anthropic.ToolUseBlock,
   askUser: AskUser,
+  logger: SessionLogger,
 ): Promise<boolean> {
   if (block.name === "bash") {
     const reason = checkDenyList((block.input as any).command ?? "");
     if (reason) {
       console.log(`\n\x1b[31m⛔ ${reason}\x1b[0m`);
+      logger.permission(block.name, block.input, reason, "deny");
       return false;
     }
   }
   const reason = checkRules(block.name, block.input);
   if (reason) {
     const decision = await askUser(block.name, block.input, reason);
+    logger.permission(block.name, block.input, reason, decision);
     if (decision === "deny") return false;
   }
   return true;
@@ -203,7 +206,7 @@ export async function checkPermission(
 
 export async function agentLoop(
   messages: Anthropic.MessageParam[],
-  deps: { client: ModelClient; logger: AgentLogger; askUser: AskUser },
+  deps: { client: ModelClient; logger: SessionLogger; askUser: AskUser },
 ): Promise<string> {
   const { client, logger, askUser } = deps;
   while (true) {
@@ -217,22 +220,19 @@ export async function agentLoop(
     });
     logger.response(response);
 
-    // Append assistant turn (includes any tool-call blocks)
     messages.push({ role: "assistant", content: response.content });
 
-    // If the model didn't call a tool, we're done
     if (response.stop_reason !== "tool_use") {
       return textOf(response);
     }
 
-    // Execute each tool call via the dispatch map, collect results
     const results: Anthropic.ToolResultBlockParam[] = [];
     for (const block of response.content) {
       if (block.type !== "tool_use") continue;
       console.log(`\x1b[36m> ${block.name}\x1b[0m`);
 
       // s03 change: run through permission pipeline before executing
-      if (!(await checkPermission(block, askUser))) {
+      if (!(await checkPermission(block, askUser, logger))) {
         results.push({
           type: "tool_result",
           tool_use_id: block.id,
@@ -288,7 +288,7 @@ if (import.meta.main) {
   };
 
   console.log("s03: Permission");
-  console.log("输入问题，回车发送。输入 q 退出。\n");
+  console.log("输入问题，回车发送。输入 q 退出。e.g., delete the README.md file\n");
 
   const history: Anthropic.MessageParam[] = [];
   while (true) {

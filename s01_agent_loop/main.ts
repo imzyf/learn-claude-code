@@ -34,7 +34,7 @@ import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
 import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
 import { zodTool, textOf } from "../lib/tools";
-import { createLogger, type AgentLogger } from "../lib/logger";
+import { createLogger, type SessionLogger } from "../lib/logger";
 
 const SYSTEM = `You are a coding agent at ${process.cwd()}. Use bash to solve tasks. Act, don't explain.`;
 
@@ -74,7 +74,7 @@ export function runBash(command: string, timeoutMs = 120_000): string {
 // ── The core pattern: a while loop that calls tools until the model stops ──
 export async function agentLoop(
   messages: Anthropic.MessageParam[],
-  deps: { client: ModelClient; logger: AgentLogger },
+  deps: { client: ModelClient; logger: SessionLogger },
 ): Promise<string> {
   const { client, logger } = deps;
   while (true) {

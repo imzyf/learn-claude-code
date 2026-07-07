@@ -41,7 +41,7 @@ import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
 import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
 import { zodTool, textOf } from "../lib/tools";
-import { createLogger, type AgentLogger } from "../lib/logger";
+import { createLogger, type SessionLogger } from "../lib/logger";
 import {
   runRead as s02RunRead,
   runWrite as s02RunWrite,
@@ -283,7 +283,7 @@ export function resetNagCounter(): void {
 
 export async function agentLoop(
   messages: Anthropic.MessageParam[],
-  deps: { client: ModelClient; logger: AgentLogger },
+  deps: { client: ModelClient; logger: SessionLogger },
 ): Promise<string> {
   const { client, logger } = deps;
   while (true) {

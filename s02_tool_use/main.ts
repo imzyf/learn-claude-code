@@ -25,7 +25,7 @@ import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
 import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
 import { zodTool, textOf } from "../lib/tools";
-import { createLogger, type AgentLogger } from "../lib/logger";
+import { createLogger, type SessionLogger } from "../lib/logger";
 import { runBash as s01RunBash } from "../s01_agent_loop/main";
 
 const WORKDIR = process.cwd();
@@ -148,7 +148,7 @@ const TOOL_HANDLERS: Partial<Record<string, (input: any) => string>> = {
 
 export async function agentLoop(
   messages: Anthropic.MessageParam[],
-  deps: { client: ModelClient; logger: AgentLogger },
+  deps: { client: ModelClient; logger: SessionLogger },
 ): Promise<string> {
   const { client, logger } = deps;
   while (true) {
@@ -174,6 +174,7 @@ export async function agentLoop(
     const results: Anthropic.ToolResultBlockParam[] = [];
     for (const block of response.content) {
       if (block.type !== "tool_use") continue;
+      
       console.log(`\x1b[33m> ${block.name}\x1b[0m`);
       const schema = TOOL_SCHEMAS[block.name];
       const handler = TOOL_HANDLERS[block.name];
