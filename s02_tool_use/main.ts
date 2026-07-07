@@ -1,0 +1,233 @@
+/**
+ * s02_tool_use/main.ts - Tool Use
+ *
+ * s01's loop, plus:
+ *   + runRead / runWrite / runEdit / runGlob — four new tool implementations
+ *   + TOOL_HANDLERS dispatch map (replaces s01's hardcoded runBash call)
+ *   + safePath workspace-escape check
+ *
+ * The loop itself (agentLoop) is identical to s01. The only line that
+ * changed inside it:
+ *   s01: output = runBash(call.input.command)
+ *   s02: output = TOOL_HANDLERS[call.toolName](call.input)
+ *
+ * Tools still have no `execute` function: the AI SDK hands the calls
+ * back to us, so this file owns the loop.
+ *
+ * Usage:
+ *     pnpm dev s02_tool_use/main.ts
+ */
+
+import { spawnSync } from "node:child_process";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import * as readline from "node:readline/promises";
+import { generateText, tool } from "ai";
+import type { ModelMessage, ToolResultPart } from "ai";
+import { z } from "zod";
+import { model } from "../lib/model";
+
+const WORKDIR = process.cwd();
+const SYSTEM = `You are a coding agent at ${WORKDIR}. Use tools to solve tasks. Act, don't explain.`;
+
+const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
+
+// ═══════════════════════════════════════════════════════════
+//  FROM s01 (unchanged)
+// ═══════════════════════════════════════════════════════════
+
+function runBash(command: string): string {
+  const dangerous = ["rm -rf /", "sudo", "shutdown", "reboot", "> /dev/"];
+  if (dangerous.some((d) => command.includes(d))) {
+    return "Error: Dangerous command blocked";
+  }
+  const r = spawnSync(command, {
+    shell: true,
+    cwd: WORKDIR,
+    encoding: "utf8",
+    timeout: 120_000,
+  });
+  if (r.error) {
+    const code = (r.error as NodeJS.ErrnoException).code;
+    if (code === "ETIMEDOUT") return "Error: Timeout (120s)";
+    return `Error: ${r.error.message}`;
+  }
+  const out = ((r.stdout ?? "") + (r.stderr ?? "")).trim();
+  return out ? out.slice(0, 50_000) : "(no output)";
+}
+
+// ═══════════════════════════════════════════════════════════
+//  NEW in s02: four new tools
+// ═══════════════════════════════════════════════════════════
+
+function safePath(p: string): string {
+  const resolved = path.resolve(WORKDIR, p);
+  if (resolved !== WORKDIR && !resolved.startsWith(WORKDIR + path.sep)) {
+    throw new Error(`Path escapes workspace: ${p}`);
+  }
+  return resolved;
+}
+
+function runRead(p: string, limit?: number): string {
+  try {
+    let lines = fs.readFileSync(safePath(p), "utf8").split("\n");
+    if (limit && limit < lines.length) {
+      lines = [...lines.slice(0, limit), `... (${lines.length - limit} more lines)`];
+    }
+    return lines.join("\n");
+  } catch (e) {
+    return `Error: ${errMsg(e)}`;
+  }
+}
+
+function runWrite(p: string, content: string): string {
+  try {
+    const filePath = safePath(p);
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(filePath, content);
+    return `Wrote ${Buffer.byteLength(content)} bytes to ${p}`;
+  } catch (e) {
+    return `Error: ${errMsg(e)}`;
+  }
+}
+
+function runEdit(p: string, oldText: string, newText: string): string {
+  try {
+    const filePath = safePath(p);
+    const text = fs.readFileSync(filePath, "utf8");
+    // indexOf + slice instead of String.replace: replace would treat
+    // `$&`-style patterns in newText as special replacement syntax.
+    const i = text.indexOf(oldText);
+    if (i === -1) return `Error: text not found in ${p}`;
+    fs.writeFileSync(filePath, text.slice(0, i) + newText + text.slice(i + oldText.length));
+    return `Edited ${p}`;
+  } catch (e) {
+    return `Error: ${errMsg(e)}`;
+  }
+}
+
+function runGlob(pattern: string): string {
+  try {
+    const results = fs
+      .globSync(pattern, { cwd: WORKDIR })
+      .filter((m) => path.resolve(WORKDIR, m).startsWith(WORKDIR + path.sep));
+    return results.length ? results.join("\n") : "(no matches)";
+  } catch (e) {
+    return `Error: ${errMsg(e)}`;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════
+//  NEW in s02: tool definitions (s01 had only bash, now five)
+// ═══════════════════════════════════════════════════════════
+
+const tools = {
+  bash: tool({
+    description: "Run a shell command.",
+    inputSchema: z.object({ command: z.string() }),
+  }),
+  read_file: tool({
+    description: "Read file contents.",
+    inputSchema: z.object({ path: z.string(), limit: z.number().int().optional() }),
+  }),
+  write_file: tool({
+    description: "Write content to a file.",
+    inputSchema: z.object({ path: z.string(), content: z.string() }),
+  }),
+  edit_file: tool({
+    description: "Replace exact text in a file once.",
+    inputSchema: z.object({ path: z.string(), old_text: z.string(), new_text: z.string() }),
+  }),
+  glob: tool({
+    description: "Find files matching a glob pattern.",
+    inputSchema: z.object({ pattern: z.string() }),
+  }),
+};
+
+// ═══════════════════════════════════════════════════════════
+//  NEW in s02: dispatch map (s01 hardcoded runBash, now a lookup)
+// ═══════════════════════════════════════════════════════════
+
+// `input: any` mirrors Python's `handler(**block.input)` — each handler
+// destructures the shape its inputSchema guarantees.
+const TOOL_HANDLERS: Record<string, (input: any) => string> = {
+  bash: ({ command }) => runBash(command),
+  read_file: ({ path, limit }) => runRead(path, limit),
+  write_file: ({ path, content }) => runWrite(path, content),
+  edit_file: ({ path, old_text, new_text }) => runEdit(path, old_text, new_text),
+  glob: ({ pattern }) => runGlob(pattern),
+};
+
+// ═══════════════════════════════════════════════════════════
+//  agentLoop — same structure as s01, only tool execution changed
+// ═══════════════════════════════════════════════════════════
+
+async function agentLoop(messages: ModelMessage[]): Promise<string> {
+  while (true) {
+    const result = await generateText({
+      model,
+      system: SYSTEM,
+      messages,
+      tools,
+      maxOutputTokens: 8000,
+    });
+
+    // Append assistant turn (includes any tool-call blocks)
+    messages.push(...result.response.messages);
+
+    // If the model didn't call a tool, we're done
+    if (result.finishReason !== "tool-calls") {
+      return result.text;
+    }
+
+    // Execute each tool call via the dispatch map, collect results
+    const results: ToolResultPart[] = [];
+    for (const call of result.toolCalls) {
+      if (call.dynamic) continue;
+      console.log(`\x1b[33m> ${call.toolName}\x1b[0m`);
+      const handler = TOOL_HANDLERS[call.toolName];
+      const output = handler ? handler(call.input) : `Unknown: ${call.toolName}`;
+      console.log(output.slice(0, 200));
+      results.push({
+        type: "tool-result",
+        toolCallId: call.toolCallId,
+        toolName: call.toolName,
+        output: { type: "text", value: output },
+      });
+    }
+
+    // Feed tool results back, loop continues
+    messages.push({ role: "tool", content: results });
+  }
+}
+
+// ── Entry point ──────────────────────────────────────────
+console.log("s02: Tool Use — s01 plus four new tools");
+console.log("输入问题，回车发送。输入 q 退出。\n");
+
+const rl = readline.createInterface({
+  input: process.stdin,
+  output: process.stdout,
+});
+rl.on("SIGINT", () => {
+  rl.close();
+  process.exit(0);
+});
+
+const history: ModelMessage[] = [];
+while (true) {
+  let query: string;
+  try {
+    query = await rl.question("\x1b[36ms02 >> \x1b[0m");
+  } catch {
+    break; // stdin closed (Ctrl+D)
+  }
+  const q = query.trim().toLowerCase();
+  if (q === "" || q === "q" || q === "exit") break;
+
+  history.push({ role: "user", content: query });
+  const finalText = await agentLoop(history);
+  console.log(finalText);
+  console.log();
+}
+rl.close();

@@ -16,17 +16,37 @@ UPSTREAM_BRANCH="main"
 SYNC_DIRS=(
   s01_agent_loop
   s02_tool_use
+  s03_permission
+  s04_hooks
+  s05_todo_write
+  s06_subagent
+  s07_skill_loading
+  s08_context_compact
+  s09_memory
+  s10_system_prompt
+  s11_error_recovery
+  s12_task_system
+  s13_background_tasks
+  s14_cron_scheduler
+  s15_agent_teams
+  s16_team_protocols
+  s17_autonomous_agents
+  s18_worktree_isolation
+  s19_mcp_plugin
+  s20_comprehensive
 )
 
 # Standalone files mirrored from upstream to the SAME path here (overwritten
 # in place). Leave empty if every synced file needs renaming (see below).
-SYNC_FILES=()
+SYNC_FILES=(
+  "requirements.txt"
+)
 
 # Files renamed on the way in: "upstream-path:local-path", both relative to
 # the repo root. Use this when a file must live under a different name here
 # (e.g. keep upstream's reference files without shadowing our own).
 SYNC_RENAMES=(
-  "README-zh.md:README-upstream.md"
+  "README-zh.md:README-zh.upstream.md"
   ".env.example:.env.upstream"
 )
 

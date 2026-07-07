@@ -1,0 +1,390 @@
+/**
+ * s05_todo_write/main.ts - TodoWrite
+ *
+ * Add a planning tool on top of s04 hooks:
+ *
+ *   +---------+      +-------+      +------------------+
+ *   |  User   | ---> |  LLM  | ---> | TOOL_HANDLERS    |
+ *   | prompt  |      |       |      |  bash            |
+ *   +---------+      +---+---+      |  read_file       |
+ *                        ^          |  write_file      |
+ *                        | result   |  edit_file       |
+ *                        +----------+  glob            |
+ *                                   |  todo_write ← NEW|
+ *                                   +------------------+
+ *                                        |
+ *                          in-memory currentTodos
+ *                                        |
+ *                         if roundsSinceTodo >= 3:
+ *                           inject <reminder>
+ *
+ * Changes from s04:
+ *   + todo_write tool + runTodoWrite() implementation
+ *   + Nag reminder (inject reminder after 3 rounds without todo update)
+ *   + SYSTEM prompt includes "plan before execute" guidance
+ *   + roundsSinceTodo counter in agentLoop
+ *   - permissionHook slims down to the deny list (no more Allow? prompts)
+ *   Loop unchanged: new tool auto-dispatches via TOOL_HANDLERS.
+ *
+ * One TS-specific diff: Python validates todos by hand in _normalize_todos;
+ * here zod's safeParse does the item validation, normalizeTodos only unwraps
+ * the occasional JSON-string form.
+ *
+ * Builds on s04 (hooks). Usage:
+ *
+ *     pnpm dev s05_todo_write/main.ts
+ */
+
+import { spawnSync } from "node:child_process";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import * as readline from "node:readline/promises";
+import { generateText, tool } from "ai";
+import type { ModelMessage, ToolResultPart } from "ai";
+import { z } from "zod";
+import { model } from "../lib/model";
+
+const WORKDIR = process.cwd();
+
+// s05 change: SYSTEM prompt adds planning guidance
+const SYSTEM =
+  `You are a coding agent at ${WORKDIR}. ` +
+  "Before starting any multi-step task, use todo_write to plan your steps. " +
+  "Update status as you go.";
+
+const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
+
+// ═══════════════════════════════════════════════════════════
+//  FROM s02-s04 (unchanged): Tool Implementations
+// ═══════════════════════════════════════════════════════════
+
+function runBash(command: string): string {
+  const r = spawnSync(command, {
+    shell: true,
+    cwd: WORKDIR,
+    encoding: "utf8",
+    timeout: 120_000,
+  });
+  if (r.error) {
+    const code = (r.error as NodeJS.ErrnoException).code;
+    if (code === "ETIMEDOUT") return "Error: Timeout (120s)";
+    return `Error: ${r.error.message}`;
+  }
+  const out = ((r.stdout ?? "") + (r.stderr ?? "")).trim();
+  return out ? out.slice(0, 50_000) : "(no output)";
+}
+
+function safePath(p: string): string {
+  const resolved = path.resolve(WORKDIR, p);
+  if (resolved !== WORKDIR && !resolved.startsWith(WORKDIR + path.sep)) {
+    throw new Error(`Path escapes workspace: ${p}`);
+  }
+  return resolved;
+}
+
+function runRead(p: string, limit?: number): string {
+  try {
+    let lines = fs.readFileSync(safePath(p), "utf8").split("\n");
+    if (limit && limit < lines.length) {
+      lines = [...lines.slice(0, limit), `... (${lines.length - limit} more lines)`];
+    }
+    return lines.join("\n");
+  } catch (e) {
+    return `Error: ${errMsg(e)}`;
+  }
+}
+
+function runWrite(p: string, content: string): string {
+  try {
+    const filePath = safePath(p);
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(filePath, content);
+    return `Wrote ${Buffer.byteLength(content)} bytes to ${p}`;
+  } catch (e) {
+    return `Error: ${errMsg(e)}`;
+  }
+}
+
+function runEdit(p: string, oldText: string, newText: string): string {
+  try {
+    const filePath = safePath(p);
+    const text = fs.readFileSync(filePath, "utf8");
+    // indexOf + slice instead of String.replace: replace would treat
+    // `$&`-style patterns in newText as special replacement syntax.
+    const i = text.indexOf(oldText);
+    if (i === -1) return `Error: text not found in ${p}`;
+    fs.writeFileSync(filePath, text.slice(0, i) + newText + text.slice(i + oldText.length));
+    return `Edited ${p}`;
+  } catch (e) {
+    return `Error: ${errMsg(e)}`;
+  }
+}
+
+function runGlob(pattern: string): string {
+  try {
+    const results = fs
+      .globSync(pattern, { cwd: WORKDIR })
+      .filter((m) => path.resolve(WORKDIR, m).startsWith(WORKDIR + path.sep));
+    return results.length ? results.join("\n") : "(no matches)";
+  } catch (e) {
+    return `Error: ${errMsg(e)}`;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════
+//  NEW in s05: todo_write tool — plan only, no execution
+// ═══════════════════════════════════════════════════════════
+
+const todoItem = z.object({
+  content: z.string(),
+  status: z.enum(["pending", "in_progress", "completed"]),
+});
+type Todo = z.infer<typeof todoItem>;
+
+let currentTodos: Todo[] = [];
+
+// The model occasionally sends `todos` as a JSON string instead of an
+// array — the input schema admits both, this unwraps and validates.
+// (Python's _normalize_todos also tries ast.literal_eval; JSON is enough here.)
+function normalizeTodos(todos: unknown): { todos?: Todo[]; error?: string } {
+  if (typeof todos === "string") {
+    try {
+      todos = JSON.parse(todos);
+    } catch {
+      return { error: "Error: todos must be a list or JSON array string" };
+    }
+  }
+  const parsed = z.array(todoItem).safeParse(todos);
+  if (!parsed.success) {
+    return { error: "Error: todos must be a list of {content, status} objects" };
+  }
+  return { todos: parsed.data };
+}
+
+function runTodoWrite(todosInput: unknown): string {
+  const { todos, error } = normalizeTodos(todosInput);
+  if (error || !todos) return error ?? "Error: invalid todos";
+  currentTodos = todos;
+  const icons: Record<Todo["status"], string> = {
+    pending: " ",
+    in_progress: "\x1b[36m▸\x1b[0m",
+    completed: "\x1b[32m✓\x1b[0m",
+  };
+  const lines = ["\n\x1b[33m## Current Tasks\x1b[0m"];
+  for (const t of currentTodos) {
+    lines.push(`  [${icons[t.status]}] ${t.content}`);
+  }
+  console.log(lines.join("\n"));
+  return `Updated ${currentTodos.length} tasks`;
+}
+
+const tools = {
+  bash: tool({
+    description: "Run a shell command.",
+    inputSchema: z.object({ command: z.string() }),
+  }),
+  read_file: tool({
+    description: "Read file contents.",
+    inputSchema: z.object({ path: z.string(), limit: z.number().int().optional() }),
+  }),
+  write_file: tool({
+    description: "Write content to a file.",
+    inputSchema: z.object({ path: z.string(), content: z.string() }),
+  }),
+  edit_file: tool({
+    description: "Replace exact text in a file once.",
+    inputSchema: z.object({ path: z.string(), old_text: z.string(), new_text: z.string() }),
+  }),
+  glob: tool({
+    description: "Find files matching a glob pattern.",
+    inputSchema: z.object({ pattern: z.string() }),
+  }),
+  // s05: new tool
+  todo_write: tool({
+    description: "Create and manage a task list for your current coding session.",
+    inputSchema: z.object({ todos: z.union([z.array(todoItem), z.string()]) }),
+  }),
+};
+
+// `input: any` mirrors Python's `handler(**block.input)` — each handler
+// destructures the shape its inputSchema guarantees.
+const TOOL_HANDLERS: Record<string, (input: any) => string> = {
+  bash: ({ command }) => runBash(command),
+  read_file: ({ path, limit }) => runRead(path, limit),
+  write_file: ({ path, content }) => runWrite(path, content),
+  edit_file: ({ path, old_text, new_text }) => runEdit(path, old_text, new_text),
+  glob: ({ pattern }) => runGlob(pattern),
+  todo_write: ({ todos }) => runTodoWrite(todos),
+};
+
+// ═══════════════════════════════════════════════════════════
+//  FROM s04 (unchanged): Hook System
+// ═══════════════════════════════════════════════════════════
+
+// `...args: any[]` mirrors Python's `callback(*args)`.
+type Hook = (...args: any[]) => string | null | Promise<string | null>;
+
+const HOOKS: Record<string, Hook[]> = {
+  UserPromptSubmit: [],
+  PreToolUse: [],
+  PostToolUse: [],
+  Stop: [],
+};
+
+function registerHook(event: string, callback: Hook): void {
+  HOOKS[event].push(callback);
+}
+
+async function triggerHooks(event: string, ...args: any[]): Promise<string | null> {
+  for (const callback of HOOKS[event]) {
+    const result = await callback(...args);
+    if (result != null) return result;
+  }
+  return null;
+}
+
+type ToolCallInfo = { toolName: string; input: any };
+
+// s04 hooks preserved
+const DENY_LIST = ["rm -rf /", "sudo", "shutdown", "reboot", "mkfs", "dd if="];
+
+// PreToolUse: deny list check.
+function permissionHook(call: ToolCallInfo): string | null {
+  if (call.toolName === "bash") {
+    for (const pattern of DENY_LIST) {
+      if ((call.input.command ?? "").includes(pattern)) {
+        console.log(`\n\x1b[31m⛔ Blocked: '${pattern}'\x1b[0m`);
+        return "Permission denied";
+      }
+    }
+  }
+  return null;
+}
+
+// PreToolUse: log tool calls.
+function logHook(call: ToolCallInfo): null {
+  console.log(`\x1b[90m[HOOK] ${call.toolName}\x1b[0m`);
+  return null;
+}
+
+// UserPromptSubmit: log working directory.
+function contextInjectHook(_query: string): null {
+  console.log(`\x1b[90m[HOOK] UserPromptSubmit: working in ${WORKDIR}\x1b[0m`);
+  return null;
+}
+
+// Stop: print tool call count.
+function summaryHook(messages: ModelMessage[]): null {
+  const toolCount = messages.reduce(
+    (n, m) =>
+      n + (Array.isArray(m.content) ? m.content.filter((b) => b.type === "tool-result").length : 0),
+    0,
+  );
+  console.log(`\x1b[90m[HOOK] Stop: session used ${toolCount} tool calls\x1b[0m`);
+  return null;
+}
+
+registerHook("UserPromptSubmit", contextInjectHook);
+registerHook("PreToolUse", permissionHook);
+registerHook("PreToolUse", logHook);
+registerHook("Stop", summaryHook);
+
+// ═══════════════════════════════════════════════════════════
+//  agentLoop — same as s04 + nag reminder counter
+// ═══════════════════════════════════════════════════════════
+
+let roundsSinceTodo = 0;
+
+async function agentLoop(messages: ModelMessage[]): Promise<string> {
+  while (true) {
+    // s05: nag reminder — inject if model hasn't updated todos for 3 rounds
+    if (roundsSinceTodo >= 3 && messages.length) {
+      messages.push({ role: "user", content: "<reminder>Update your todos.</reminder>" });
+      roundsSinceTodo = 0;
+    }
+
+    const result = await generateText({
+      model,
+      system: SYSTEM,
+      messages,
+      tools,
+      maxOutputTokens: 8000,
+    });
+    messages.push(...result.response.messages);
+
+    if (result.finishReason !== "tool-calls") {
+      const force = await triggerHooks("Stop", messages);
+      if (force) {
+        messages.push({ role: "user", content: force });
+        continue;
+      }
+      return result.text;
+    }
+
+    roundsSinceTodo += 1;
+    const results: ToolResultPart[] = [];
+    for (const call of result.toolCalls) {
+      if (call.dynamic) continue;
+
+      const blocked = await triggerHooks("PreToolUse", call);
+      if (blocked) {
+        results.push({
+          type: "tool-result",
+          toolCallId: call.toolCallId,
+          toolName: call.toolName,
+          output: { type: "text", value: blocked },
+        });
+        continue;
+      }
+
+      const handler = TOOL_HANDLERS[call.toolName];
+      const output = handler ? handler(call.input) : `Unknown: ${call.toolName}`;
+
+      await triggerHooks("PostToolUse", call, output);
+
+      // s05: reset nag counter when todo_write is called
+      if (call.toolName === "todo_write") roundsSinceTodo = 0;
+
+      results.push({
+        type: "tool-result",
+        toolCallId: call.toolCallId,
+        toolName: call.toolName,
+        output: { type: "text", value: output },
+      });
+    }
+
+    messages.push({ role: "tool", content: results });
+  }
+}
+
+// ── Entry point ──────────────────────────────────────────
+const rl = readline.createInterface({
+  input: process.stdin,
+  output: process.stdout,
+});
+rl.on("SIGINT", () => {
+  rl.close();
+  process.exit(0);
+});
+
+console.log("s05: TodoWrite — plan before execute, nag if you forget");
+console.log("输入问题，回车发送。输入 q 退出。\n");
+
+const history: ModelMessage[] = [];
+while (true) {
+  let query: string;
+  try {
+    query = await rl.question("\x1b[36ms05 >> \x1b[0m");
+  } catch {
+    break; // stdin closed (Ctrl+D)
+  }
+  const q = query.trim().toLowerCase();
+  if (q === "" || q === "q" || q === "exit") break;
+
+  await triggerHooks("UserPromptSubmit", query);
+  history.push({ role: "user", content: query });
+  const finalText = await agentLoop(history);
+  console.log(finalText);
+  console.log();
+}
+rl.close();
