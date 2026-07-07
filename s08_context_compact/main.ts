@@ -588,7 +588,7 @@ export function clearHooks(): void {
   for (const event of Object.keys(HOOKS)) HOOKS[event] = [];
 }
 
-const DENY_LIST = ["rm -rf /", "sudo", "shutdown"];
+const DENY_LIST = ["rm -rf /", "sudo", "shutdown", "osascript"];
 
 export function permissionHook(call: ToolCallInfo): string | null {
   if (call.name === "bash") {

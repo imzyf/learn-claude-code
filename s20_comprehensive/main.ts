@@ -1039,7 +1039,7 @@ async function confirmWithUser(warning: string, detail: string): Promise<boolean
   return choice === "y" || choice === "yes";
 }
 
-const DENY_LIST = ["rm -rf /", "sudo", "shutdown", "reboot", "mkfs", "dd if="];
+const DENY_LIST = ["rm -rf /", "sudo", "shutdown", "reboot", "mkfs", "dd if=", "osascript"];
 const DESTRUCTIVE = ["rm ", "> /etc/", "chmod 777"];
 
 // The permission layer sees the tool call before dispatch. It can deny,

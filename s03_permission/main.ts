@@ -131,7 +131,7 @@ const TOOL_HANDLERS: Partial<Record<string, (input: any) => string>> = {
 // ═══════════════════════════════════════════════════════════
 
 // Gate 1: Hard deny list — always forbidden
-const DENY_LIST = ["rm -rf /", "sudo", "shutdown", "reboot", "mkfs", "dd if=", "> /dev/sda"];
+const DENY_LIST = ["rm -rf /", "sudo", "shutdown", "reboot", "mkfs", "dd if=", "> /dev/sda", "osascript"];
 
 export function checkDenyList(command: string): string | null {
   for (const pattern of DENY_LIST) {

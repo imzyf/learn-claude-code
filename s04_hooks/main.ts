@@ -51,7 +51,6 @@
  *     pnpm dev s04_hooks/main.ts
  */
 
-import { spawnSync } from "node:child_process";
 import * as path from "node:path";
 import * as readline from "node:readline/promises";
 import type Anthropic from "@anthropic-ai/sdk";
@@ -66,31 +65,22 @@ import {
   runGlob as s02RunGlob,
   safePath as s02SafePath,
 } from "../s02_tool_use/main";
+import { runBash as s03RunBash } from "../s03_permission/main";
 
 const WORKDIR = process.cwd();
 const SYSTEM = `You are a coding agent at ${WORKDIR}. Use tools to solve tasks. Act, don't explain.`;
 
+//#region 之前章节的实现
+
 // ═══════════════════════════════════════════════════════════
 //  FROM s02-s03: Tool Implementations
-//  - runBash 同 s03：去掉内联危险检查（改由 permissionHook 把关）
+//  - runBash 直接复用 s03（s03 已去掉内联危险检查，改由 permissionHook 把关）
 //  - safePath + 四个文件工具 unchanged：从 s02 导入并起别名，本地保留
 //    同名 wrapper，结构与 TOOL_HANDLERS 调用点都不用动
 // ═══════════════════════════════════════════════════════════
 
 export function runBash(command: string): string {
-  const r = spawnSync(command, {
-    shell: true,
-    cwd: WORKDIR,
-    encoding: "utf8",
-    timeout: 120_000,
-  });
-  if (r.error) {
-    const code = (r.error as NodeJS.ErrnoException).code;
-    if (code === "ETIMEDOUT") return "Error: Timeout (120s)";
-    return `Error: ${r.error.message}`;
-  }
-  const out = ((r.stdout ?? "") + (r.stderr ?? "")).trim();
-  return out ? out.slice(0, 50_000) : "(no output)";
+  return s03RunBash(command);
 }
 
 export function safePath(p: string): string {
@@ -149,6 +139,8 @@ const TOOL_HANDLERS: Partial<Record<string, (input: any) => string>> = {
   glob: ({ pattern }) => runGlob(pattern),
 };
 
+//#endregion
+
 // ═══════════════════════════════════════════════════════════
 //  NEW in s04: Hook System (s03 permission logic now via hooks)
 // ═══════════════════════════════════════════════════════════
@@ -165,13 +157,29 @@ const HOOKS: Record<string, Hook[]> = {
   Stop: [],
 };
 
+// hook 系统的日志出口，设计成模块级单例（而非当参数传给 registerHook/
+// triggerHooks）：
+//   1. HOOKS 注册表本身已是模块级单例，logger 跟随同一模式，风格一致；
+//   2. triggerHooks 是变长参数（...args），logger 无处安放；当参数传还要
+//      改所有调用点和测试的签名。
+// 入口调用 setHookLogger 注入一次，测试不注入即静默（null）。
+let hookLogger: SessionLogger | null = null;
+
+export function setHookLogger(logger: SessionLogger | null): void {
+  hookLogger = logger;
+}
+
 export function registerHook(event: string, callback: Hook): void {
   HOOKS[event].push(callback);
+  hookLogger?.hook("register", event, callback.name);
 }
 
 export async function triggerHooks(event: string, ...args: any[]): Promise<string | null> {
   for (const callback of HOOKS[event]) {
+    hookLogger?.hook("trigger", event, callback.name);
     const result = await callback(...args);
+    // 执行记录集中在这里，而不是散落进每个 hook。
+    hookLogger?.hook("result", event, callback.name, result);
     if (result != null) return result; // teaching shortcut: block this tool call
   }
   return null;
@@ -192,19 +200,20 @@ type ToolCallInfo = Anthropic.ToolUseBlock;
 export type Confirm = (call: ToolCallInfo, warning: string) => Promise<boolean>;
 
 // s03 permission check logic, now wrapped as a hook
-const DENY_LIST = ["rm -rf /", "sudo", "shutdown", "reboot", "mkfs", "dd if="];
+const DENY_LIST = ["rm -rf /", "sudo", "shutdown", "reboot", "mkfs", "dd if=", "osascript"];
 const DESTRUCTIVE = ["rm ", "> /etc/", "chmod 777"];
 
 // PreToolUse: s03 checkPermission() logic moved here.
 // 工厂函数：闭包捕获 confirm，返回真正的 hook（这就是给回调注入依赖的标准手法）。
 export function makePermissionHook(confirm: Confirm): Hook {
-  return async (call: ToolCallInfo): Promise<string | null> => {
+  return async function permissionHook(call: ToolCallInfo): Promise<string | null> {
     const input = call.input as any;
     if (call.name === "bash") {
       const command: string = input.command ?? "";
       for (const pattern of DENY_LIST) {
         if (command.includes(pattern)) {
-          console.log(`\n\x1b[31m⛔ Blocked: '${pattern}'\x1b[0m`);
+          hookLogger?.console(`⛔ Blocked: '${pattern}'`, "red");
+          hookLogger?.permission(call.name, input, `deny list: '${pattern}'`, "deny");
           return "Permission denied by deny list";
         }
       }
@@ -229,21 +238,21 @@ export function makePermissionHook(confirm: Confirm): Hook {
 // PreToolUse: log every tool call.
 export function logHook(call: ToolCallInfo): null {
   const argsPreview = JSON.stringify(Object.values((call.input as any) ?? {}).slice(0, 2)).slice(0, 60);
-  console.log(`\x1b[90m[HOOK] ${call.name}(${argsPreview})\x1b[0m`);
+  hookLogger?.console(`[HOOK] ${call.name}(${argsPreview})`);
   return null;
 }
 
 // PostToolUse: warn on large output.
 export function largeOutputHook(call: ToolCallInfo, output: string): null {
   if (output.length > 100_000) {
-    console.log(`\x1b[33m[HOOK] ⚠ Large output from ${call.name}: ${output.length} chars\x1b[0m`);
+    hookLogger?.console(`[HOOK] ⚠ Large output from ${call.name}: ${output.length} chars`, "yellow");
   }
   return null;
 }
 
 // UserPromptSubmit hook: log user input before it reaches the LLM
 export function contextInjectHook(_query: string): null {
-  console.log(`\x1b[90m[HOOK] UserPromptSubmit: working in ${WORKDIR}\x1b[0m`);
+  hookLogger?.console(`[HOOK] UserPromptSubmit: working in ${WORKDIR}`);
   return null;
 }
 
@@ -255,7 +264,7 @@ export function summaryHook(messages: Anthropic.MessageParam[]): null {
       (Array.isArray(m.content) ? m.content.filter((b) => b.type === "tool_result").length : 0),
     0,
   );
-  console.log(`\x1b[90m[HOOK] Stop: session used ${toolCount} tool calls\x1b[0m`);
+  hookLogger?.console(`[HOOK] Stop: session used ${toolCount} tool calls`);
   return null;
 }
 
@@ -293,8 +302,8 @@ export async function agentLoop(
     messages.push({ role: "assistant", content: response.content });
 
     if (response.stop_reason !== "tool_use") {
-      // A Stop hook may force another round: its return value becomes
-      // a user message and the loop continues instead of exiting.
+      // 特殊点 1：模型想停，但 Stop hook 的返回值会被当成一条 user 消息，
+      // 强制再跑一轮——循环能「自己续命」，不直接退出。
       const force = await triggerHooks("Stop", messages);
       if (force) {
         messages.push({ role: "user", content: force });
@@ -307,7 +316,8 @@ export async function agentLoop(
     for (const block of response.content) {
       if (block.type !== "tool_use") continue;
 
-      // s04 change: hook replaces hard-coded checkPermission()
+      // 特殊点 2：PreToolUse hook 取代 s03 的 checkPermission()——
+      // 返回非 null 即拦截，返回值直接当成 tool_result 内容回给模型。
       const blocked = await triggerHooks("PreToolUse", block);
       if (blocked) {
         results.push({
@@ -323,7 +333,8 @@ export async function agentLoop(
       const output = handler && schema ? handler(schema.parse(block.input)) : `Unknown: ${block.name}`;
       logger.toolResult(block.name, output);
 
-      await triggerHooks("PostToolUse", block, output); // s04: post hook
+      // 特殊点 3：PostToolUse hook 拿到输出做观察（如大输出告警），不改结果。
+      await triggerHooks("PostToolUse", block, output);
 
       results.push({
         type: "tool_result",
@@ -353,6 +364,8 @@ if (import.meta.main) {
     process.exit(0);
   });
 
+  // confirmWithUser 就在入口里，直接握着 logger，用它专门的 permission()
+  // 记录放行/拦截决定——无需绕道 hookLogger 单例。
   const confirmWithUser: Confirm = async (call, warning) => {
     console.log(`\n\x1b[33m⚠  ${warning}\x1b[0m`);
     console.log(`   Tool: ${call.name}(${JSON.stringify(call.input)})`);
@@ -360,11 +373,15 @@ if (import.meta.main) {
     try {
       choice = (await rl.question("   Allow? [y/N] ")).trim().toLowerCase();
     } catch {
+      logger.permission(call.name, call.input, warning, "deny");
       return false; // stdin closed — nobody left to approve
     }
-    return choice === "y" || choice === "yes";
+    const allowed = choice === "y" || choice === "yes";
+    logger.permission(call.name, call.input, warning, allowed ? "allow" : "deny");
+    return allowed;
   };
 
+  setHookLogger(logger);
   registerDefaultHooks(confirmWithUser);
 
   console.log("s04: Hooks — extension logic on hooks, loop stays clean");

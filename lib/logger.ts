@@ -10,6 +10,15 @@ import { createCostMeter } from "./pricing";
 // 每次运行生成一对新文件，避免覆盖上一次的记录。
 // 日志落在对应 session 目录的 .log/ 下。
 
+// 终端文案的颜色档位：info / warning / danger。
+export type LogColor = "gray" | "yellow" | "red";
+
+const ANSI: Record<LogColor, string> = {
+  gray: "\x1b[38;5;245m",
+  yellow: "\x1b[33m",
+  red: "\x1b[31m",
+};
+
 // 每个 session 的日志接口。
 export interface SessionLogger {
   // API 调用前调用
@@ -24,6 +33,16 @@ export interface SessionLogger {
     reason: string,
     decision: "allow" | "deny",
   ): void;
+  // hook 生命周期（注册 / 触发）写入 transcript；transcript 排版归 logger。
+  hook(
+    phase: "register" | "trigger" | "result",
+    event: string,
+    name: string,
+    blocked?: string | null,
+  ): void;
+  // 一步做两件事：带颜色打到终端 + 纯文本写进 transcript。
+  // hook 的输出走这里，就不用每处各写一遍 console.log 和 transcript。
+  console(message: string, color?: LogColor): void;
   readonly file: string;
   readonly jsonFile: string;
   config(data: Record<string, unknown>): void;
@@ -88,6 +107,29 @@ export function createLogger(sessionDir: string): SessionLogger {
       );
     },
 
+    hook(phase, event, name, blocked) {
+      const hookName = name || "(anonymous)";
+      if (phase === "register") {
+        writeTranscript("HOOK REGISTER", `${event} ← ${hookName}`);
+        return;
+      } else if (phase === "trigger") {
+        writeTranscript(
+          "HOOK TRIGGER",
+         `${event} → ${hookName}`
+        );
+      } else if (phase === "result" && blocked) {
+        writeTranscript(
+          "HOOK RESULT",
+          `${event} → ${hookName} blocked: ${blocked}`,
+        );
+      }
+    },
+
+    console(message: string, color: LogColor = "gray") {
+      globalThis.console.log(`${ANSI[color]}${message}\x1b[0m`);
+      writeTranscript("CONSOLE", message);
+    },
+
     request(messages: Anthropic.MessageParam[]) {
       writeJson("api_request", { new_messages: messages.slice(loggedMessages) });
       loggedMessages = messages.length;
@@ -96,14 +138,12 @@ export function createLogger(sessionDir: string): SessionLogger {
     response(res: Anthropic.Message) {
       writeJson("api_response", res);
       const u = res.usage;
-      const cost = `${u.input_tokens} in / ${u.output_tokens} out / ` +
-          `${u.cache_creation_input_tokens ?? 0} cache-w / ` +
-          `${u.cache_read_input_tokens ?? 0} cache-r${costMeter.costSuffix(u)}`
       writeTranscript(
-        `ASSISTANT (${cost})`,
+        `ASSISTANT (${u.input_tokens} in / ${u.output_tokens} out / ` +
+          `${u.cache_creation_input_tokens ?? 0} cache-w / ` +
+          `${u.cache_read_input_tokens ?? 0} cache-r${costMeter.costSuffix(u)})`,
         formatBlocks(res.content),
       );
-      console.log(`\x1b[38;5;245m${cost}\x1b[0m`);
     },
   };
 }

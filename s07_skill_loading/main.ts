@@ -389,7 +389,7 @@ export function clearHooks(): void {
 
 type ToolCallInfo = Anthropic.ToolUseBlock;
 
-const DENY_LIST = ["rm -rf /", "sudo", "shutdown", "reboot", "mkfs", "dd if="];
+const DENY_LIST = ["rm -rf /", "sudo", "shutdown", "reboot", "mkfs", "dd if=", "osascript"];
 
 // PreToolUse: deny list check.
 export function permissionHook(call: ToolCallInfo): string | null {
