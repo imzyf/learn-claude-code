@@ -1,24 +1,22 @@
 #!/usr/bin/env bash
 #
-# Sync the Python reference sources from upstream shareAI-lab/learn-claude-code
-# into this repo, which is the TypeScript port of that project.
+# 从上游 shareAI-lab/learn-claude-code 同步 Python 参考源文件到这个项目
+# 该项目是上游项目的 TypeScript 版本
 #
-# For each dir in SYNC_DIRS (see .sync-config.sh) the upstream-owned files
-# (code.py, README*.md, images/) are refreshed in place. The TS files you
-# write alongside them (code.ts, ...) are left untouched, so you can keep
-# the Python reference next to your port and see upstream changes with
-# `git diff` after each sync, then port them by hand.
+# 对于 SYNC_DIRS 中的每个目录（见 .sync-config.sh），上游拥有的文件
+# （code.py、README*.md、images/）会被刷新到原位置。你在旁边写的 TS 文件
+# （code.ts 等）不会被触碰，这样你可以保持 Python 参考在你的端口旁边，
+# 并且每次同步后可以用 `git diff` 看到上游的更改，然后手动移植。
 #
-# The upstream clone is sparse (only SYNC_DIRS + SYNC_FILES) and cached
-# under CACHE_DIR for CACHE_TTL_SECONDS (default 1 day), so re-running the
-# same day reuses it. Delete CACHE_DIR or set LCC_SYNC_CACHE_TTL=0 to force
-# a fresh clone.
+# 上游的克隆是稀疏的（仅限 SYNC_DIRS + SYNC_FILES），并在 CACHE_DIR 下
+# 被缓存 CACHE_TTL_SECONDS（默认 1 天），所以同一天重新运行会重用它。
+# 删除 CACHE_DIR 或设置 LCC_SYNC_CACHE_TTL=0 来强制重新克隆。
 #
-# Usage: bin/sync-upstream.sh
+# 使用方法：bin/sync-upstream.sh
 #
-# Env overrides:
-#   LCC_SYNC_CACHE_DIR   where to keep the cached upstream clone
-#   LCC_SYNC_CACHE_TTL   cache lifetime in seconds (0 = always re-clone)
+# 环境变量覆盖：
+#   LCC_SYNC_CACHE_DIR   缓存的上游克隆的位置
+#   LCC_SYNC_CACHE_TTL   缓存生命周期（秒）(0 = 始终重新克隆)
 
 set -euo pipefail
 
@@ -40,14 +38,11 @@ cache_is_fresh() {
 if cache_is_fresh; then
   echo "==> Reusing cached clone at ${clone_dir} (younger than ${CACHE_TTL_SECONDS}s)"
 else
-  # Every path we want checked out: synced dirs, same-name files, and the
-  # upstream side of each rename. Guarded so empty arrays are safe under -u.
+  # 每个我们想要检出的路径：同步目录和独立文件（取 SYNC_FILES 条目
+  # ":" 前的上游路径部分）。受保护，以便空数组在 -u 下是安全的。
   sparse_paths=()
   for p in "${SYNC_DIRS[@]:-}" "${SYNC_FILES[@]:-}"; do
-    [[ -n "${p}" ]] && sparse_paths+=( "/${p}" )
-  done
-  for pair in "${SYNC_RENAMES[@]:-}"; do
-    [[ -n "${pair}" ]] && sparse_paths+=( "/${pair%%:*}" )
+    [[ -n "${p}" ]] && sparse_paths+=( "/${p%%:*}" )
   done
   echo "==> Cloning ${UPSTREAM_REPO} (${UPSTREAM_BRANCH}: ${sparse_paths[*]#/})"
   rm -rf "${clone_dir}"
@@ -60,6 +55,14 @@ fi
 
 shopt -s dotglob
 
+# rsync 排除我们不想复制的本地化变体。rsync 即使在匹配是字面源参数时
+# 也会跳过（不仅仅在递归期间），所以这个方法同时覆盖顶级文件
+# （README.en.md）和嵌套文件（images/*.en.svg）—— 不需要单独的 bash glob 匹配。
+exclude_args=()
+for glob in "${EXCLUDE_GLOBS[@]:-}"; do
+  [[ -n "${glob}" ]] && exclude_args+=( --exclude="${glob}" )
+done
+
 for dir in "${SYNC_DIRS[@]}"; do
   src="${clone_dir}/${dir}"
   if [[ ! -d "${src}" ]]; then
@@ -68,53 +71,36 @@ for dir in "${SYNC_DIRS[@]}"; do
   fi
   echo "==> Refreshing upstream files in ${dir}/ (TS files preserved)"
   mkdir -p "${ROOT_DIR}/${dir}"
-  # Copy each upstream-owned entry, replacing only that entry. Entries that
-  # exist only locally (your code.ts, etc.) are never removed.
+  # 刷新原位置上游拥有的每个条目。仅存在于本地的条目
+  # （你的 code.ts 等）永远不会被触碰。
   for entry in "${src}"/*; do
     name="$(basename "${entry}")"
     rm -rf "${ROOT_DIR:?}/${dir}/${name}"
-    cp -R "${entry}" "${ROOT_DIR}/${dir}/${name}"
+    # -q：排除的顶级条目（例如 README.en.md）是预期的且无声的；
+    # rsync 否则会为其警告"跳过排除的文件"。
+    rsync -aq "${exclude_args[@]}" "${entry}" "${ROOT_DIR}/${dir}/"
     echo "  - ${dir}/${name}"
   done
 done
 
-for file in "${SYNC_FILES[@]:-}"; do
-  [[ -n "${file}" ]] || continue
-  src="${clone_dir}/${file}"
-  if [[ ! -f "${src}" ]]; then
-    echo "!! Skipping ${file} (not found upstream)"
-    continue
-  fi
-  echo "==> Mirroring ${file}"
-  cp "${src}" "${ROOT_DIR}/${file}"
-done
-
-for pair in "${SYNC_RENAMES[@]:-}"; do
-  [[ -n "${pair}" ]] || continue
-  src_rel="${pair%%:*}"
-  dest_rel="${pair#*:}"
+# 每项是 "上游路径" 或 "上游路径:本地路径"；没有 ":" 时源和目标
+# 路径相同（原样镜像），写了 ":" 则改名落地。
+for entry in "${SYNC_FILES[@]:-}"; do
+  [[ -n "${entry}" ]] || continue
+  src_rel="${entry%%:*}"
+  dest_rel="${entry#*:}"
   src="${clone_dir}/${src_rel}"
   if [[ ! -f "${src}" ]]; then
     echo "!! Skipping ${src_rel} (not found upstream)"
     continue
   fi
-  echo "==> Mirroring ${src_rel} -> ${dest_rel}"
+  if [[ "${src_rel}" == "${dest_rel}" ]]; then
+    echo "==> Mirroring ${src_rel}"
+  else
+    echo "==> Mirroring ${src_rel} -> ${dest_rel}"
+  fi
   mkdir -p "$(dirname "${ROOT_DIR}/${dest_rel}")"
   cp "${src}" "${ROOT_DIR}/${dest_rel}"
 done
-
-if (( ${#PRUNE_GLOBS[@]} )); then
-  echo "==> Pruning localized files (${PRUNE_GLOBS[*]})"
-  for dir in "${SYNC_DIRS[@]}"; do
-    target="${ROOT_DIR}/${dir}"
-    [[ -d "${target}" ]] || continue
-    for glob in "${PRUNE_GLOBS[@]}"; do
-      while IFS= read -r -d '' f; do
-        rm -f "${f}"
-        echo "  - ${f#"${ROOT_DIR}"/}"
-      done < <(find "${target}" -type f -name "${glob}" -print0)
-    done
-  done
-fi
 
 echo "==> Done. Review upstream changes with: git diff"

@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
 #
-# Shared config for bin/sync-upstream.sh.
-# Sourced, not executed.
+# bin/sync-upstream.sh 的共享配置。
+# 被 source（引入）而不是执行。
 
-# Upstream is the Python reference project; this repo is its TypeScript port.
+# 上游是 Python 参考项目；这个项目是它的 TypeScript 端口。
 UPSTREAM_REPO="https://github.com/shareAI-lab/learn-claude-code.git"
 UPSTREAM_BRANCH="main"
 
-# Directories to mirror from upstream.
+# 从上游镜像的目录。
 #
-# Only the upstream-owned entries inside each dir are refreshed
-# (code.py, README*.md, images/). Files you add alongside them for the
-# TS port (code.ts, index.ts, ...) are NOT touched or deleted, because
-# they do not exist upstream. See sync-upstream.sh for the exact logic.
+# 仅刷新每个目录内的上游拥有的条目
+# （code.py、README*.md、images/）。你为 TS 端口在旁边添加的文件
+# （code.ts、index.ts 等）不会被触碰或删除，因为它们在上游不存在。
+# 有关确切的逻辑，请参阅 sync-upstream.sh。
 SYNC_DIRS=(
   s01_agent_loop
   s02_tool_use
@@ -36,24 +36,19 @@ SYNC_DIRS=(
   s20_comprehensive
 )
 
-# Standalone files mirrored from upstream to the SAME path here (overwritten
-# in place). Leave empty if every synced file needs renaming (see below).
+# 要从上游拉取的独立文件（也决定 sparse-checkout 范围）。每项是
+# "上游路径" 或 "上游路径:本地路径"；省略 ":本地路径" 时镜像到
+# 此处相同路径，写了则改名落地（例如避免与我们自己的 .env 冲突）。
 SYNC_FILES=(
   "requirements.txt"
-)
-
-# Files renamed on the way in: "upstream-path:local-path", both relative to
-# the repo root. Use this when a file must live under a different name here
-# (e.g. keep upstream's reference files without shadowing our own).
-SYNC_RENAMES=(
   "README-zh.md:README-zh.upstream.md"
   ".env.example:.env.upstream"
 )
 
-# Localized files to delete from SYNC_DIRS after each sync. We keep only the
-# Chinese base files (README.md, *.svg); the English (.en) and Japanese (.ja)
-# variants are pruned. Upstream uses "ja", not "jp".
-PRUNE_GLOBS=(
+# 从同步中排除的本地化文件（传递给 rsync --exclude）。我们仅保留中文基础
+# 文件（README.md、*.svg）；英文（.en）和日文（.ja）变体被跳过。
+# 上游使用"ja"而不是"jp"。
+EXCLUDE_GLOBS=(
   '*.en.md'
   '*.ja.md'
   '*.en.svg'
