@@ -21,7 +21,6 @@ type LiteLLMPrice = {
   cache_creation_input_token_cost?: number;
 };
 
-// 启动时取一次价格，失败返回 null，调用方降级为不显示费用
 async function fetchPrice(modelId: string): Promise<LiteLLMPrice | null> {
   try {
     const res = await fetch(`https://api.litellm.ai/model_catalog/${modelId}`);
@@ -42,7 +41,6 @@ function costUSD(u: Anthropic.Usage, p: LiteLLMPrice): number {
   );
 }
 
-// transcript 用：把 response 的 content blocks 拼成可读文本
 function formatBlocks(blocks: Anthropic.ContentBlock[]): string {
   return blocks
     .map((b) => {
@@ -55,7 +53,26 @@ function formatBlocks(blocks: Anthropic.ContentBlock[]): string {
     .join("\n");
 }
 
-export function createLogger(sessionName: string) {
+// agent 循环依赖的最小日志接口。
+export interface AgentLogger {
+  // API 调用前调用，传完整 messages 数组
+  request(messages: Anthropic.MessageParam[]): void;
+  // API 返回后调用
+  response(res: Anthropic.Message): void;
+  toolResult(command: string, output: string): void;
+}
+
+export interface SessionLogger extends AgentLogger {
+  readonly file: string;
+  readonly jsonFile: string;
+  // transcript 写入一节：── [HH:MM:SS] TITLE ─────
+  section(title: string, body: string): void;
+  // 启动时调用一次：记录 model / system / tools 等不变配置
+  config(data: Record<string, unknown>): void;
+  userInput(query: string): void;
+}
+
+export function createLogger(sessionName: string): SessionLogger {
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const base = path.join(LOG_DIR, `${sessionName}-${stamp}`);
   const json = fs.createWriteStream(`${base}.json`, { flags: "a" });
@@ -68,15 +85,14 @@ export function createLogger(sessionName: string) {
   let price: LiteLLMPrice | null = null;
   let totalCost = 0;
 
-  function log(tag: string, data: unknown) {
+  function log(tag: string, data: unknown): void {
     json.write(
       JSON.stringify({ ts: new Date().toISOString(), tag, data }, null, 2) +
         "\n",
     );
   }
 
-  // transcript 一节：── [HH:MM:SS] TITLE ─────
-  function section(title: string, body: string) {
+  function section(title: string, body: string): void {
     const time = new Date().toTimeString().slice(0, 8);
     const rule = "─".repeat(Math.max(3, 46 - title.length));
     text.write(`── [${time}] ${title} ${rule}\n${body}\n\n`);
@@ -87,7 +103,6 @@ export function createLogger(sessionName: string) {
     jsonFile: `${base}.json`,
     section,
 
-    // 启动时调用一次：model / system / tools 等不变的配置记入 transcript
     config(data: Record<string, unknown>) {
       section("CONFIG", JSON.stringify(data, null, 2));
       if (typeof data.model === "string") {
@@ -103,19 +118,16 @@ export function createLogger(sessionName: string) {
       }
     },
 
-    // 用户在命令行输入了一条消息（会随下一次 request 进入 *.json）
+    // 只写 transcript：消息会随下一次 request 进入 *.json
     userInput(query: string) {
       section("USER", query);
     },
 
-    // API 调用前：只记录上次调用之后新增的 messages
     request(messages: Anthropic.MessageParam[]) {
       log("api_request", { new_messages: messages.slice(loggedMessages) });
       loggedMessages = messages.length;
     },
 
-    // API 返回后：*.json 记完整原始响应，transcript 记可读摘要
-    // （token 明细含缓存写入/读取，费用为 RMB 单次与累计）
     response(res: Anthropic.Message) {
       log("api_response", res);
       const u = res.usage;
@@ -133,7 +145,7 @@ export function createLogger(sessionName: string) {
       );
     },
 
-    // 工具执行结果（会随下一次 request 作为 tool_result 消息进入 *.json）
+    // 只写 transcript：结果会随下一次 request 作为 tool_result 进入 *.json
     toolResult(command: string, output: string) {
       section(`TOOL RESULT (${command})`, output);
     },

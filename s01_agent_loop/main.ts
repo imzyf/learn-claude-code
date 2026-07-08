@@ -33,23 +33,20 @@ import * as path from "node:path";
 import * as readline from "node:readline/promises";
 import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
-import { client, MODEL_ID } from "../lib/model";
+import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
 import { zodTool, textOf } from "../lib/tools";
-import { createLogger } from "../lib/logger";
+import { createLogger, type AgentLogger } from "../lib/logger";
 
 const SYSTEM = `You are a coding agent at ${process.cwd()}. Use bash to solve tasks. Act, don't explain.`;
-
-const logger = createLogger(path.basename(import.meta.dirname));
 
 // ── Tool definition: just bash ────────────────────────────
 const bashSchema = z.object({ command: z.string() });
 const tools: Anthropic.Tool[] = [
   zodTool("bash", "Run a shell command.", bashSchema),
 ];
-logger.config({ model: MODEL_ID, system: SYSTEM, tools });
 
 // ── Tool execution ────────────────────────────────────────
-function runBash(command: string): string {
+export function runBash(command: string, timeoutMs = 120_000): string {
   const dangerous = ["rm -rf /", "sudo", "shutdown", "reboot", "> /dev/"];
   if (dangerous.some((d) => command.includes(d))) {
     return "Error: Dangerous command blocked";
@@ -58,11 +55,12 @@ function runBash(command: string): string {
     shell: true,
     cwd: process.cwd(),
     encoding: "utf8",
-    timeout: 120_000,
+    timeout: timeoutMs,
   });
   if (r.error) {
     const code = (r.error as NodeJS.ErrnoException).code;
-    if (code === "ETIMEDOUT") return "Error: Timeout (120s)";
+    if (code === "ETIMEDOUT")
+      return `Error: Timeout (${Math.round(timeoutMs / 1000)}s)`;
     return `Error: ${r.error.message}`;
   }
   const out = ((r.stdout ?? "") + (r.stderr ?? "")).trim();
@@ -70,7 +68,11 @@ function runBash(command: string): string {
 }
 
 // ── The core pattern: a while loop that calls tools until the model stops ──
-async function agentLoop(messages: Anthropic.MessageParam[]): Promise<string> {
+export async function agentLoop(
+  messages: Anthropic.MessageParam[],
+  deps: { client: ModelClient; logger: AgentLogger },
+): Promise<string> {
+  const { client, logger } = deps;
   while (true) {
     logger.request(messages);
     const response = await client.messages.create({
@@ -112,33 +114,40 @@ async function agentLoop(messages: Anthropic.MessageParam[]): Promise<string> {
 }
 
 // ── Entry point ──────────────────────────────────────────
-console.log("s01: Agent Loop");
-console.log("输入问题，回车发送。输入 q 退出。\n");
+// import.meta.main 只在文件被直接运行时为 true。
+if (import.meta.main) {
+  const client = createClient();
+  const logger = createLogger(path.basename(import.meta.dirname));
+  logger.config({ model: MODEL_ID, system: SYSTEM, tools });
 
-const rl = readline.createInterface({
-  input: process.stdin,
-  output: process.stdout,
-});
-rl.on("SIGINT", () => {
-  rl.close();
-  process.exit(0);
-});
+  console.log("s01: Agent Loop");
+  console.log("输入问题，回车发送。输入 q 退出。\n");
 
-const history: Anthropic.MessageParam[] = [];
-while (true) {
-  let query: string;
-  try {
-    query = await rl.question("\x1b[36ms01 >> \x1b[0m");
-  } catch {
-    break; // stdin closed (Ctrl+D)
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+  rl.on("SIGINT", () => {
+    rl.close();
+    process.exit(0);
+  });
+
+  const history: Anthropic.MessageParam[] = [];
+  while (true) {
+    let query: string;
+    try {
+      query = await rl.question("\x1b[36ms01 >> \x1b[0m");
+    } catch {
+      break; // stdin closed (Ctrl+D)
+    }
+    const q = query.trim().toLowerCase();
+    if (q === "" || q === "q" || q === "exit") break;
+    logger.userInput(query);
+
+    history.push({ role: "user", content: query });
+    const finalText = await agentLoop(history, { client, logger });
+    console.log(finalText);
+    console.log();
   }
-  const q = query.trim().toLowerCase();
-  if (q === "" || q === "q" || q === "exit") break;
-  logger.userInput(query);
-
-  history.push({ role: "user", content: query });
-  const finalText = await agentLoop(history);
-  console.log(finalText);
-  console.log();
+  rl.close();
 }
-rl.close();

@@ -3,6 +3,7 @@
  *
  * 在 s01 的循环基础上新增：
  *   + runRead / runWrite / runEdit / runGlob —— 四个新的工具实现
+ *     （bash 工具直接复用 s01 导出的 runBash）
  *   + TOOL_HANDLERS 分发表（取代 s01 里写死的 runBash 调用）
  *   + safePath 工作区越界检查
  *
@@ -17,52 +18,34 @@
  *     pnpm dev s02_tool_use/main.ts
  */
 
-import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as readline from "node:readline/promises";
 import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
-import { client, MODEL_ID } from "../lib/model";
+import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
 import { zodTool, textOf } from "../lib/tools";
-import { createLogger } from "../lib/logger";
+import { createLogger, type AgentLogger } from "../lib/logger";
+import { runBash as s01RunBash } from "../s01_agent_loop/main";
 
 const WORKDIR = process.cwd();
 const SYSTEM = `You are a coding agent at ${WORKDIR}. Use tools to solve tasks. Act, don't explain.`;
 
-const logger = createLogger(path.basename(import.meta.dirname));
-
 const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 // ═══════════════════════════════════════════════════════════
-//  FROM s01 (unchanged)
+//  FROM s01 (reused)
 // ═══════════════════════════════════════════════════════════
 
-function runBash(command: string): string {
-  const dangerous = ["rm -rf /", "sudo", "shutdown", "reboot", "> /dev/"];
-  if (dangerous.some((d) => command.includes(d))) {
-    return "Error: Dangerous command blocked";
-  }
-  const r = spawnSync(command, {
-    shell: true,
-    cwd: WORKDIR,
-    encoding: "utf8",
-    timeout: 120_000,
-  });
-  if (r.error) {
-    const code = (r.error as NodeJS.ErrnoException).code;
-    if (code === "ETIMEDOUT") return "Error: Timeout (120s)";
-    return `Error: ${r.error.message}`;
-  }
-  const out = ((r.stdout ?? "") + (r.stderr ?? "")).trim();
-  return out ? out.slice(0, 50_000) : "(no output)";
+export function runBash(command: string): string {
+  return s01RunBash(command);
 }
 
 // ═══════════════════════════════════════════════════════════
 //  NEW in s02: four new tools
 // ═══════════════════════════════════════════════════════════
 
-function safePath(p: string): string {
+export function safePath(p: string): string {
   const resolved = path.resolve(WORKDIR, p);
   if (resolved !== WORKDIR && !resolved.startsWith(WORKDIR + path.sep)) {
     throw new Error(`Path escapes workspace: ${p}`);
@@ -70,7 +53,7 @@ function safePath(p: string): string {
   return resolved;
 }
 
-function runRead(p: string, limit?: number): string {
+export function runRead(p: string, limit?: number): string {
   try {
     let lines = fs.readFileSync(safePath(p), "utf8").split("\n");
     if (limit && limit < lines.length) {
@@ -82,7 +65,7 @@ function runRead(p: string, limit?: number): string {
   }
 }
 
-function runWrite(p: string, content: string): string {
+export function runWrite(p: string, content: string): string {
   try {
     const filePath = safePath(p);
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -93,7 +76,7 @@ function runWrite(p: string, content: string): string {
   }
 }
 
-function runEdit(p: string, oldText: string, newText: string): string {
+export function runEdit(p: string, oldText: string, newText: string): string {
   try {
     const filePath = safePath(p);
     const text = fs.readFileSync(filePath, "utf8");
@@ -108,7 +91,7 @@ function runEdit(p: string, oldText: string, newText: string): string {
   }
 }
 
-function runGlob(pattern: string): string {
+export function runGlob(pattern: string): string {
   try {
     const results = fs
       .globSync(pattern, { cwd: WORKDIR })
@@ -136,7 +119,6 @@ const tools: Anthropic.Tool[] = [
   zodTool("edit_file", "Replace exact text in a file once.", editSchema),
   zodTool("glob", "Find files matching a glob pattern.", globSchema),
 ];
-logger.config({ model: MODEL_ID, system: SYSTEM, tools });
 
 // ═══════════════════════════════════════════════════════════
 //  NEW in s02: dispatch map (s01 hardcoded runBash, now a lookup)
@@ -164,7 +146,11 @@ const TOOL_HANDLERS: Partial<Record<string, (input: any) => string>> = {
 //  agentLoop — same structure as s01, only tool execution changed
 // ═══════════════════════════════════════════════════════════
 
-async function agentLoop(messages: Anthropic.MessageParam[]): Promise<string> {
+export async function agentLoop(
+  messages: Anthropic.MessageParam[],
+  deps: { client: ModelClient; logger: AgentLogger },
+): Promise<string> {
+  const { client, logger } = deps;
   while (true) {
     logger.request(messages);
     const response = await client.messages.create({
@@ -207,33 +193,40 @@ async function agentLoop(messages: Anthropic.MessageParam[]): Promise<string> {
 }
 
 // ── Entry point ──────────────────────────────────────────
-console.log("s02: Tool Use — s01 plus four new tools");
-console.log("输入问题，回车发送。输入 q 退出。\n");
+// import.meta.main 只在文件被直接运行时为 true。
+if (import.meta.main) {
+  const client = createClient();
+  const logger = createLogger(path.basename(import.meta.dirname));
+  logger.config({ model: MODEL_ID, system: SYSTEM, tools });
 
-const rl = readline.createInterface({
-  input: process.stdin,
-  output: process.stdout,
-});
-rl.on("SIGINT", () => {
-  rl.close();
-  process.exit(0);
-});
+  console.log("s02: Tool Use — s01 plus four new tools");
+  console.log("输入问题，回车发送。输入 q 退出。\n");
 
-const history: Anthropic.MessageParam[] = [];
-while (true) {
-  let query: string;
-  try {
-    query = await rl.question("\x1b[36ms02 >> \x1b[0m");
-  } catch {
-    break; // stdin closed (Ctrl+D)
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+  rl.on("SIGINT", () => {
+    rl.close();
+    process.exit(0);
+  });
+
+  const history: Anthropic.MessageParam[] = [];
+  while (true) {
+    let query: string;
+    try {
+      query = await rl.question("\x1b[36ms02 >> \x1b[0m");
+    } catch {
+      break; // stdin closed (Ctrl+D)
+    }
+    const q = query.trim().toLowerCase();
+    if (q === "" || q === "q" || q === "exit") break;
+    logger.userInput(query);
+
+    history.push({ role: "user", content: query });
+    const finalText = await agentLoop(history, { client, logger });
+    console.log(finalText);
+    console.log();
   }
-  const q = query.trim().toLowerCase();
-  if (q === "" || q === "q" || q === "exit") break;
-  logger.userInput(query);
-
-  history.push({ role: "user", content: query });
-  const finalText = await agentLoop(history);
-  console.log(finalText);
-  console.log();
+  rl.close();
 }
-rl.close();

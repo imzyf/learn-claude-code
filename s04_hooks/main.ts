@@ -57,9 +57,11 @@ import * as path from "node:path";
 import * as readline from "node:readline/promises";
 import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
-import { client, MODEL_ID } from "../lib/model";
+import { createClient, MODEL_ID } from "../lib/model";
 import { zodTool, textOf } from "../lib/tools";
 import { createLogger } from "../lib/logger";
+
+const client = createClient();
 
 const WORKDIR = process.cwd();
 const SYSTEM = `You are a coding agent at ${WORKDIR}. Use tools to solve tasks. Act, don't explain.`;

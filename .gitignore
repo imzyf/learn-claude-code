@@ -1,6 +1,7 @@
 bin/.cache/
 node_modules/
 logs/
+.tmp/
 .env
 .memory/
 .claude/memory.json

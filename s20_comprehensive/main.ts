@@ -42,8 +42,10 @@ import * as readline from "node:readline/promises";
 import { promisify } from "node:util";
 import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
-import { client, MODEL_ID } from "../lib/model";
+import { createClient, MODEL_ID } from "../lib/model";
 import { zodTool, textOf } from "../lib/tools";
+
+const client = createClient();
 
 const WORKDIR = process.cwd();
 const MEMORY_DIR = path.join(WORKDIR, ".memory");

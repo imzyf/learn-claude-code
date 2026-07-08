@@ -1,5 +1,7 @@
-import { client, MODEL_ID } from "./model";
+import { createClient, MODEL_ID } from "./model";
 import { textOf } from "./tools";
+
+const client = createClient();
 
 // 最小化的端到端检查：一次提问，一次回复。
 // 运行方式：pnpm smoke（需要 .env 中配置真实的 ANTHROPIC_API_KEY）

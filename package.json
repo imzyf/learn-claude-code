@@ -3,11 +3,14 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "packageManager": "pnpm@11.3.0",
   "description": "TypeScript port of learn-claude-code, built on @anthropic-ai/sdk",
   "scripts": {
     "dev": "env -u ANTHROPIC_AUTH_TOKEN tsx --env-file-if-exists=.env",
     "smoke": "env -u ANTHROPIC_AUTH_TOKEN tsx --env-file-if-exists=.env lib/smoke.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.110.0",
@@ -16,6 +19,7 @@
   "devDependencies": {
     "@types/node": "^26.1.0",
     "tsx": "^4.23.0",
-    "typescript": "^6.0.3"
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.10"
   }
 }
