@@ -475,7 +475,8 @@ function runBash(command: string, cwd?: string | null): string {
   return out ? out.slice(0, 50_000) : "(no output)";
 }
 
-// Async variant for background execution — keeps the event loop free.
+// Async variant for background execution — keeps the event loop free
+// (Python runs the same sync handler inside a worker thread instead).
 async function runBashAsync(command: string, cwd?: string | null): Promise<string> {
   try {
     const { stdout, stderr } = await execAsync(command, {
@@ -554,6 +555,8 @@ type Todo = z.infer<typeof todoItem>;
 
 let currentTodos: Todo[] = [];
 
+// Models sometimes send todos as a JSON string; accept both (Python also
+// tries ast.literal_eval for Python-literal strings).
 function normalizeTodos(todos: unknown): { todos?: Todo[]; error?: string } {
   if (typeof todos === "string") {
     try {
@@ -2215,11 +2218,10 @@ function callLLM(
   );
 }
 
-async function agentLoop(messages: ModelMessage[], context: Context): Promise<string> {
+async function agentLoop(messages: ModelMessage[], context: Context): Promise<void> {
   let { tools, handlers } = assembleToolPool();
   const state = new RecoveryState();
   let maxTokens = DEFAULT_MAX_TOKENS;
-  let lastText = "";
 
   while (true) {
     // One cycle: inject scheduled/background work, prepare context, call
@@ -2250,12 +2252,14 @@ async function agentLoop(messages: ModelMessage[], context: Context): Promise<st
         state.hasAttemptedReactiveCompact = true;
         continue;
       }
-      const errText = `[Error] ${e instanceof Error ? e.name : "Error"}: ${errMsg(e)}`;
-      messages.push({ role: "assistant", content: errText });
-      return errText;
+      messages.push({
+        role: "assistant",
+        content: `[Error] ${e instanceof Error ? e.name : "Error"}: ${errMsg(e)}`,
+      });
+      return;
     }
 
-    // max_tokens (finishReason "length") -> escalate, then continuation
+    // max_tokens (finishReason "length") -> escalate once, then continuation
     if (result.finishReason === "length") {
       if (!state.hasEscalated) {
         maxTokens = ESCALATED_MAX_TOKENS;
@@ -2264,22 +2268,20 @@ async function agentLoop(messages: ModelMessage[], context: Context): Promise<st
         continue;
       }
       messages.push(...result.response.messages);
-      if (result.text) lastText = result.text;
       if (state.recoveryCount < MAX_RECOVERY_RETRIES) {
         messages.push({ role: "user", content: CONTINUATION_PROMPT });
         state.recoveryCount += 1;
         continue;
       }
-      return lastText;
+      return;
     }
 
     maxTokens = DEFAULT_MAX_TOKENS;
     state.hasEscalated = false;
     messages.push(...result.response.messages);
-    if (result.text) lastText = result.text;
     if (result.finishReason !== "tool-calls") {
       await triggerHooks("Stop", messages);
-      return result.text;
+      return;
     }
 
     const results: ToolResultPart[] = [];
@@ -2348,6 +2350,21 @@ async function agentLoop(messages: ModelMessage[], context: Context): Promise<st
   }
 }
 
+// Print every assistant text produced during this turn (Python:
+// print_turn_assistants), not just the final one.
+function printTurnAssistants(messages: ModelMessage[], turnStart: number): void {
+  for (const msg of messages.slice(turnStart)) {
+    if (msg.role !== "assistant") continue;
+    if (typeof msg.content === "string") {
+      if (msg.content) terminalPrint(msg.content);
+      continue;
+    }
+    for (const part of msg.content) {
+      if (part.type === "text" && part.text) terminalPrint(part.text);
+    }
+  }
+}
+
 // ── Session state + agent lock ──────────────────────────
 
 const history: ModelMessage[] = [];
@@ -2359,12 +2376,13 @@ let agentBusy = false;
 
 // Run one agent turn. Caller must hold the agent lock (agentBusy === true).
 async function runAgentTurnLocked(userQuery?: string): Promise<void> {
+  const turnStart = history.length;
   if (userQuery !== undefined) {
     history.push({ role: "user", content: userQuery });
   }
-  const finalText = await agentLoop(history, context);
+  await agentLoop(history, context);
   context = updateContext();
-  terminalPrint(finalText);
+  printTurnAssistants(history, turnStart);
 }
 
 // Auto-deliver fired cron jobs when the agent is idle (Python:

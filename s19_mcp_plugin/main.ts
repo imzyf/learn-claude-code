@@ -9,6 +9,7 @@
  *   + assembleToolPool：把内置工具和 MCP 工具组装成一个工具池
  *   + connectMcp：连接到一个 MCP 服务器，发现其工具
  *   + 工具命名：mcp__{server}__{tool}，并做规范化处理
+ *   + MCP 工具带 readOnly/destructive 注解（写在 description 里）
  *   + agentLoop 使用动态工具池（内置 + MCP），不再使用 prompt 缓存
  *
  * ASCII 流程：
@@ -17,13 +18,13 @@
  *   agentLoop 使用组装好的工具池
  *
  * TS 特有说明：
- *   - AI SDK 的 `tool()` schema 要求 Zod 格式的 inputSchema；MCP 的工具定义
- *     是原始 JSON Schema，所以 mcpJsonSchemaToZod 做了一个尽力而为的
- *     转换（object/string/number/boolean 及它们的数组——足以覆盖下面的
- *     mock 服务器）
- *   - assembleToolPool 返回 { tools, handlers }——一个给 generateText 用的
+ *   - AI SDK 的 `tool()` 要求 Zod 格式的 inputSchema；MCP 的工具定义是
+ *     原始 JSON Schema，所以 jsonSchemaToZod 做了一个尽力而为的转换
+ *     （string/number/boolean/array/object——足以覆盖下面的 mock 服务器）
+ *   - assembleToolPool 返回 { tools, handlers }：一个给 generateText 用的
  *     AI SDK tools map，加上一个普通的 handler 查找表，对应 Python 版的
  *     (list[dict], dict) 元组
+ *   - Python 的 teammate 守护线程 → 后台 async 函数（单线程事件循环）
  *
  * Usage:
  *     pnpm dev s19_mcp_plugin/main.ts
@@ -46,7 +47,7 @@ const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 // ═══════════════════════════════════════════════════════════
-//  FROM s18 (synced): Task System
+//  FROM s12/s18: Task System
 // ═══════════════════════════════════════════════════════════
 
 const TASKS_DIR = path.join(WORKDIR, ".tasks");
@@ -106,6 +107,8 @@ function getTaskJson(taskId: string): string {
   return JSON.stringify(loadTask(taskId), null, 2);
 }
 
+// Dependencies are intentionally simple: every blocker must exist and be
+// completed before the task can be claimed.
 function canStart(taskId: string): boolean {
   const task = loadTask(taskId);
   for (const depId of task.blockedBy) {
@@ -159,7 +162,7 @@ function completeTask(taskId: string): string {
 }
 
 // ═══════════════════════════════════════════════════════════
-//  FROM s18 (synced): Worktree System
+//  FROM s18: Worktree System
 // ═══════════════════════════════════════════════════════════
 
 const WORKTREES_DIR = path.join(WORKDIR, ".worktrees");
@@ -434,6 +437,8 @@ const pendingRequests = new Map<string, ProtocolState>();
 const newRequestId = () =>
   `req_${String(Math.floor(Math.random() * 1_000_000)).padStart(6, "0")}`;
 
+// Responses are matched by request_id so one protocol reply cannot approve
+// a different pending request.
 function matchResponse(responseType: string, requestId: string, approve: boolean): void {
   const state = pendingRequests.get(requestId);
   if (!state) return;
@@ -466,6 +471,8 @@ function scanUnclaimedTasks(): Task[] {
   return listTasks().filter((t) => t.status === "pending" && !t.owner && canStart(t.id));
 }
 
+// Idle teammates wake up for inbox messages first, then look for unclaimed
+// tasks. This keeps direct protocol messages higher priority.
 async function idlePoll(
   name: string,
   messages: ModelMessage[],
@@ -540,6 +547,8 @@ function spawnTeammateThread(name: string, role: string, prompt: string): string
   };
 
   const run = async () => {
+    // Once a task with a worktree is claimed, all teammate file tools
+    // transparently run inside that isolated directory.
     const wtCtx: { path: string | null } = { path: null };
 
     const subListTasks = () => {
@@ -1146,6 +1155,8 @@ async function agentLoop(messages: ModelMessage[], context: Context): Promise<st
     }
     messages.push({ role: "tool", content: results });
 
+    // A connect_mcp call changes the tool pool mid-conversation: reassemble
+    // tools/handlers and rebuild the system prompt before the next LLM call.
     if (connectedMcp) {
       ({ tools, handlers } = assembleToolPool());
       context = updateContext();

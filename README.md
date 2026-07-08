@@ -13,13 +13,13 @@ LLM calls go through the **Vercel AI SDK** (`ai` + `@ai-sdk/anthropic`).
 Shared helpers live in `lib/` — `lib/model.ts` builds the AI SDK model from `.env` (supports the Anthropic-compatible providers listed in `.env.upstream`).
 
 ```sh
-make setup              # pnpm install + create .env from .env.upstream
+make setup      # pnpm install + create .env from .env.upstream
 # then fill in ANTHROPIC_API_KEY (and MODEL_ID / ANTHROPIC_BASE_URL)
-make smoke              # one-shot API call to verify the setup
+make smoke      # one-shot API call to verify the setup
 ```
 
 ## Usage
 
 ```sh
-make s01                          # run a session (make s01 ... make s20); make help lists them all
+make s01      # run a session (make s01 ... make s20); make help lists them all
 ```
