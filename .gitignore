@@ -1,6 +1,6 @@
 bin/.cache/
 node_modules/
-logs/
+.log/
 .tmp/
 .env
 .memory/

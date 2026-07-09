@@ -196,7 +196,7 @@ export async function agentLoop(
 // import.meta.main 只在文件被直接运行时为 true。
 if (import.meta.main) {
   const client = createClient();
-  const logger = createLogger(path.basename(import.meta.dirname));
+  const logger = createLogger(import.meta.dirname);
   logger.config({ model: MODEL_ID, system: SYSTEM, tools });
 
   console.log("s02: Tool Use — s01 plus four new tools");

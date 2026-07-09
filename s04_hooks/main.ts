@@ -52,29 +52,32 @@
  */
 
 import { spawnSync } from "node:child_process";
-import * as fs from "node:fs";
 import * as path from "node:path";
 import * as readline from "node:readline/promises";
 import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
-import { createClient, MODEL_ID } from "../lib/model";
+import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
 import { zodTool, textOf } from "../lib/tools";
-import { createLogger } from "../lib/logger";
-
-const client = createClient();
+import { createLogger, type AgentLogger } from "../lib/logger";
+import {
+  runRead as s02RunRead,
+  runWrite as s02RunWrite,
+  runEdit as s02RunEdit,
+  runGlob as s02RunGlob,
+  safePath as s02SafePath,
+} from "../s02_tool_use/main";
 
 const WORKDIR = process.cwd();
 const SYSTEM = `You are a coding agent at ${WORKDIR}. Use tools to solve tasks. Act, don't explain.`;
 
-const logger = createLogger(path.basename(import.meta.dirname));
-
-const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
-
 // ═══════════════════════════════════════════════════════════
-//  FROM s02-s03 (unchanged): Tool Implementations
+//  FROM s02-s03: Tool Implementations
+//  - runBash 同 s03：去掉内联危险检查（改由 permissionHook 把关）
+//  - safePath + 四个文件工具 unchanged：从 s02 导入并起别名，本地保留
+//    同名 wrapper，结构与 TOOL_HANDLERS 调用点都不用动
 // ═══════════════════════════════════════════════════════════
 
-function runBash(command: string): string {
+export function runBash(command: string): string {
   const r = spawnSync(command, {
     shell: true,
     cwd: WORKDIR,
@@ -90,61 +93,24 @@ function runBash(command: string): string {
   return out ? out.slice(0, 50_000) : "(no output)";
 }
 
-function safePath(p: string): string {
-  const resolved = path.resolve(WORKDIR, p);
-  if (resolved !== WORKDIR && !resolved.startsWith(WORKDIR + path.sep)) {
-    throw new Error(`Path escapes workspace: ${p}`);
-  }
-  return resolved;
+export function safePath(p: string): string {
+  return s02SafePath(p);
 }
 
-function runRead(p: string, limit?: number): string {
-  try {
-    let lines = fs.readFileSync(safePath(p), "utf8").split("\n");
-    if (limit && limit < lines.length) {
-      lines = [...lines.slice(0, limit), `... (${lines.length - limit} more lines)`];
-    }
-    return lines.join("\n");
-  } catch (e) {
-    return `Error: ${errMsg(e)}`;
-  }
+export function runRead(p: string, limit?: number): string {
+  return s02RunRead(p, limit);
 }
 
-function runWrite(p: string, content: string): string {
-  try {
-    const filePath = safePath(p);
-    fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    fs.writeFileSync(filePath, content);
-    return `Wrote ${Buffer.byteLength(content)} bytes to ${p}`;
-  } catch (e) {
-    return `Error: ${errMsg(e)}`;
-  }
+export function runWrite(p: string, content: string): string {
+  return s02RunWrite(p, content);
 }
 
-function runEdit(p: string, oldText: string, newText: string): string {
-  try {
-    const filePath = safePath(p);
-    const text = fs.readFileSync(filePath, "utf8");
-    // indexOf + slice instead of String.replace: replace would treat
-    // `$&`-style patterns in newText as special replacement syntax.
-    const i = text.indexOf(oldText);
-    if (i === -1) return `Error: text not found in ${p}`;
-    fs.writeFileSync(filePath, text.slice(0, i) + newText + text.slice(i + oldText.length));
-    return `Edited ${p}`;
-  } catch (e) {
-    return `Error: ${errMsg(e)}`;
-  }
+export function runEdit(p: string, oldText: string, newText: string): string {
+  return s02RunEdit(p, oldText, newText);
 }
 
-function runGlob(pattern: string): string {
-  try {
-    const results = fs
-      .globSync(pattern, { cwd: WORKDIR })
-      .filter((m) => path.resolve(WORKDIR, m).startsWith(WORKDIR + path.sep));
-    return results.length ? results.join("\n") : "(no matches)";
-  } catch (e) {
-    return `Error: ${errMsg(e)}`;
-  }
+export function runGlob(pattern: string): string {
+  return s02RunGlob(pattern);
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -164,7 +130,6 @@ const tools: Anthropic.Tool[] = [
   zodTool("edit_file", "Replace exact text in a file once.", editSchema),
   zodTool("glob", "Find files matching a glob pattern.", globSchema),
 ];
-logger.config({ model: MODEL_ID, system: SYSTEM, tools });
 
 const TOOL_SCHEMAS: Partial<Record<string, z.ZodObject>> = {
   bash: bashSchema,
@@ -200,11 +165,11 @@ const HOOKS: Record<string, Hook[]> = {
   Stop: [],
 };
 
-function registerHook(event: string, callback: Hook): void {
+export function registerHook(event: string, callback: Hook): void {
   HOOKS[event].push(callback);
 }
 
-async function triggerHooks(event: string, ...args: any[]): Promise<string | null> {
+export async function triggerHooks(event: string, ...args: any[]): Promise<string | null> {
   for (const callback of HOOKS[event]) {
     const result = await callback(...args);
     if (result != null) return result; // teaching shortcut: block this tool call
@@ -212,73 +177,64 @@ async function triggerHooks(event: string, ...args: any[]): Promise<string | nul
   return null;
 }
 
+// 清空所有已注册 hook。入口不会自动注册（见 registerDefaultHooks），
+// 测试用它在每个用例前重置注册表，避免用例间互相污染。
+export function clearHooks(): void {
+  for (const event of Object.keys(HOOKS)) HOOKS[event] = [];
+}
+
 // The shape PreToolUse/PostToolUse hooks receive — the raw tool_use block
 // (matches what Python hooks receive too).
 type ToolCallInfo = Anthropic.ToolUseBlock;
 
-// Shared readline: hooks (Allow? prompt) and the REPL both use it.
-const rl = readline.createInterface({
-  input: process.stdin,
-  output: process.stdout,
-});
-rl.on("SIGINT", () => {
-  rl.close();
-  process.exit(0);
-});
-
-async function confirmWithUser(call: ToolCallInfo, warning: string): Promise<boolean> {
-  console.log(`\n\x1b[33m⚠  ${warning}\x1b[0m`);
-  console.log(`   Tool: ${call.name}(${JSON.stringify(call.input)})`);
-  let choice: string;
-  try {
-    choice = (await rl.question("   Allow? [y/N] ")).trim().toLowerCase();
-  } catch {
-    return false; // stdin closed — nobody left to approve
-  }
-  return choice === "y" || choice === "yes";
-}
+// permissionHook 需要「问用户」的能力，但不该自己持有 readline。
+// 把确认动作抽象成 Confirm：入口注入真实 readline 提示，测试注入 fake。
+export type Confirm = (call: ToolCallInfo, warning: string) => Promise<boolean>;
 
 // s03 permission check logic, now wrapped as a hook
 const DENY_LIST = ["rm -rf /", "sudo", "shutdown", "reboot", "mkfs", "dd if="];
 const DESTRUCTIVE = ["rm ", "> /etc/", "chmod 777"];
 
 // PreToolUse: s03 checkPermission() logic moved here.
-async function permissionHook(call: ToolCallInfo): Promise<string | null> {
-  const input = call.input as any;
-  if (call.name === "bash") {
-    const command: string = input.command ?? "";
-    for (const pattern of DENY_LIST) {
-      if (command.includes(pattern)) {
-        console.log(`\n\x1b[31m⛔ Blocked: '${pattern}'\x1b[0m`);
-        return "Permission denied by deny list";
+// 工厂函数：闭包捕获 confirm，返回真正的 hook（这就是给回调注入依赖的标准手法）。
+export function makePermissionHook(confirm: Confirm): Hook {
+  return async (call: ToolCallInfo): Promise<string | null> => {
+    const input = call.input as any;
+    if (call.name === "bash") {
+      const command: string = input.command ?? "";
+      for (const pattern of DENY_LIST) {
+        if (command.includes(pattern)) {
+          console.log(`\n\x1b[31m⛔ Blocked: '${pattern}'\x1b[0m`);
+          return "Permission denied by deny list";
+        }
+      }
+      if (DESTRUCTIVE.some((kw) => command.includes(kw))) {
+        if (!(await confirm(call, "Potentially destructive command"))) {
+          return "Permission denied by user";
+        }
       }
     }
-    if (DESTRUCTIVE.some((kw) => command.includes(kw))) {
-      if (!(await confirmWithUser(call, "Potentially destructive command"))) {
-        return "Permission denied by user";
+    if (call.name === "write_file" || call.name === "edit_file") {
+      const resolved = path.resolve(WORKDIR, input.path ?? "");
+      if (resolved !== WORKDIR && !resolved.startsWith(WORKDIR + path.sep)) {
+        if (!(await confirm(call, "Writing outside workspace"))) {
+          return "Permission denied by user";
+        }
       }
     }
-  }
-  if (call.name === "write_file" || call.name === "edit_file") {
-    const resolved = path.resolve(WORKDIR, input.path ?? "");
-    if (resolved !== WORKDIR && !resolved.startsWith(WORKDIR + path.sep)) {
-      if (!(await confirmWithUser(call, "Writing outside workspace"))) {
-        return "Permission denied by user";
-      }
-    }
-  }
-  return null;
+    return null;
+  };
 }
 
 // PreToolUse: log every tool call.
-function logHook(call: ToolCallInfo): null {
+export function logHook(call: ToolCallInfo): null {
   const argsPreview = JSON.stringify(Object.values((call.input as any) ?? {}).slice(0, 2)).slice(0, 60);
   console.log(`\x1b[90m[HOOK] ${call.name}(${argsPreview})\x1b[0m`);
   return null;
 }
 
 // PostToolUse: warn on large output.
-function largeOutputHook(call: ToolCallInfo, output: string): null {
+export function largeOutputHook(call: ToolCallInfo, output: string): null {
   if (output.length > 100_000) {
     console.log(`\x1b[33m[HOOK] ⚠ Large output from ${call.name}: ${output.length} chars\x1b[0m`);
   }
@@ -286,13 +242,13 @@ function largeOutputHook(call: ToolCallInfo, output: string): null {
 }
 
 // UserPromptSubmit hook: log user input before it reaches the LLM
-function contextInjectHook(_query: string): null {
+export function contextInjectHook(_query: string): null {
   console.log(`\x1b[90m[HOOK] UserPromptSubmit: working in ${WORKDIR}\x1b[0m`);
   return null;
 }
 
 // Stop hook: print summary when loop is about to exit
-function summaryHook(messages: Anthropic.MessageParam[]): null {
+export function summaryHook(messages: Anthropic.MessageParam[]): null {
   const toolCount = messages.reduce(
     (n, m) =>
       n +
@@ -303,11 +259,15 @@ function summaryHook(messages: Anthropic.MessageParam[]): null {
   return null;
 }
 
-registerHook("UserPromptSubmit", contextInjectHook);
-registerHook("PreToolUse", permissionHook);
-registerHook("PreToolUse", logHook);
-registerHook("PostToolUse", largeOutputHook);
-registerHook("Stop", summaryHook);
+// 默认 hook 注册收进函数，只在入口调用一次；import 该模块不产生副作用。
+// permissionHook 需要 confirm，所以注册时才把它注入进去。
+export function registerDefaultHooks(confirm: Confirm): void {
+  registerHook("UserPromptSubmit", contextInjectHook);
+  registerHook("PreToolUse", makePermissionHook(confirm));
+  registerHook("PreToolUse", logHook);
+  registerHook("PostToolUse", largeOutputHook);
+  registerHook("Stop", summaryHook);
+}
 
 // ═══════════════════════════════════════════════════════════
 //  agentLoop — same structure as s03, but no hard-coded check
@@ -315,7 +275,11 @@ registerHook("Stop", summaryHook);
 //  s04: if (await triggerHooks("PreToolUse", call)) ...
 // ═══════════════════════════════════════════════════════════
 
-async function agentLoop(messages: Anthropic.MessageParam[]): Promise<string> {
+export async function agentLoop(
+  messages: Anthropic.MessageParam[],
+  deps: { client: ModelClient; logger: AgentLogger },
+): Promise<string> {
+  const { client, logger } = deps;
   while (true) {
     logger.request(messages);
     const response = await client.messages.create({
@@ -373,25 +337,56 @@ async function agentLoop(messages: Anthropic.MessageParam[]): Promise<string> {
 }
 
 // ── Entry point ──────────────────────────────────────────
-console.log("s04: Hooks — extension logic on hooks, loop stays clean");
-console.log("输入问题，回车发送。输入 q 退出。\n");
+// import.meta.main 只在文件被直接运行时为 true。
+if (import.meta.main) {
+  const client = createClient();
+  const logger = createLogger(import.meta.dirname);
+  logger.config({ model: MODEL_ID, system: SYSTEM, tools });
 
-const history: Anthropic.MessageParam[] = [];
-while (true) {
-  let query: string;
-  try {
-    query = await rl.question("\x1b[36ms04 >> \x1b[0m");
-  } catch {
-    break; // stdin closed (Ctrl+D)
+  // Shared readline: hooks (Allow? prompt) and the REPL both use it.
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+  rl.on("SIGINT", () => {
+    rl.close();
+    process.exit(0);
+  });
+
+  const confirmWithUser: Confirm = async (call, warning) => {
+    console.log(`\n\x1b[33m⚠  ${warning}\x1b[0m`);
+    console.log(`   Tool: ${call.name}(${JSON.stringify(call.input)})`);
+    let choice: string;
+    try {
+      choice = (await rl.question("   Allow? [y/N] ")).trim().toLowerCase();
+    } catch {
+      return false; // stdin closed — nobody left to approve
+    }
+    return choice === "y" || choice === "yes";
+  };
+
+  registerDefaultHooks(confirmWithUser);
+
+  console.log("s04: Hooks — extension logic on hooks, loop stays clean");
+  console.log("输入问题，回车发送。输入 q 退出。\n");
+
+  const history: Anthropic.MessageParam[] = [];
+  while (true) {
+    let query: string;
+    try {
+      query = await rl.question("\x1b[36ms04 >> \x1b[0m");
+    } catch {
+      break; // stdin closed (Ctrl+D)
+    }
+    const q = query.trim().toLowerCase();
+    if (q === "" || q === "q" || q === "exit") break;
+    logger.userInput(query);
+
+    await triggerHooks("UserPromptSubmit", query);
+    history.push({ role: "user", content: query });
+    const finalText = await agentLoop(history, { client, logger });
+    console.log(finalText);
+    console.log();
   }
-  const q = query.trim().toLowerCase();
-  if (q === "" || q === "q" || q === "exit") break;
-  logger.userInput(query);
-
-  await triggerHooks("UserPromptSubmit", query);
-  history.push({ role: "user", content: query });
-  const finalText = await agentLoop(history);
-  console.log(finalText);
-  console.log();
+  rl.close();
 }
-rl.close();

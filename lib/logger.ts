@@ -7,8 +7,7 @@ import type Anthropic from "@anthropic-ai/sdk";
 //            jq 可直接解析这种连续 JSON 流
 //   *.log  — 人类可读的 transcript，按节展示对话过程
 // 每次运行生成一对新文件，避免覆盖上一次的记录。
-const LOG_DIR = path.join(process.cwd(), "logs");
-fs.mkdirSync(LOG_DIR, { recursive: true });
+// 日志落在对应 session 目录的 .log/ 下。
 
 // 费用按 RMB 显示，固定汇率 USD × 7
 const USD_TO_RMB = 7;
@@ -72,9 +71,13 @@ export interface SessionLogger extends AgentLogger {
   userInput(query: string): void;
 }
 
-export function createLogger(sessionName: string): SessionLogger {
+export function createLogger(sessionDir: string): SessionLogger {
+  const sessionName = path.basename(sessionDir);
+  const logDir = path.join(sessionDir, ".log");
+  fs.mkdirSync(logDir, { recursive: true });
+
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const base = path.join(LOG_DIR, `${sessionName}-${stamp}`);
+  const base = path.join(logDir, `${sessionName}-${stamp}`);
   const json = fs.createWriteStream(`${base}.json`, { flags: "a" });
   const text = fs.createWriteStream(`${base}.log`, { flags: "a" });
 

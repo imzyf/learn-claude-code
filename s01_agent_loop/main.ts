@@ -29,7 +29,6 @@
  */
 
 import { spawnSync } from "node:child_process";
-import * as path from "node:path";
 import * as readline from "node:readline/promises";
 import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
@@ -117,7 +116,7 @@ export async function agentLoop(
 // import.meta.main 只在文件被直接运行时为 true。
 if (import.meta.main) {
   const client = createClient();
-  const logger = createLogger(path.basename(import.meta.dirname));
+  const logger = createLogger(import.meta.dirname);
   logger.config({ model: MODEL_ID, system: SYSTEM, tools });
 
   console.log("s01: Agent Loop");

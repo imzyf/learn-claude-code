@@ -31,15 +31,19 @@
  */
 
 import { spawnSync } from "node:child_process";
-import * as fs from "node:fs";
-import * as path from "node:path";
 import * as readline from "node:readline/promises";
 import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
-import { createClient, MODEL_ID } from "../lib/model";
+import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
 import { zodTool, textOf } from "../lib/tools";
-
-const client = createClient();
+import { createLogger, type AgentLogger } from "../lib/logger";
+import {
+  runRead as s02RunRead,
+  runWrite as s02RunWrite,
+  runEdit as s02RunEdit,
+  runGlob as s02RunGlob,
+  safePath as s02SafePath,
+} from "../s02_tool_use/main";
 
 const WORKDIR = process.cwd();
 
@@ -53,13 +57,17 @@ const SUB_SYSTEM =
   "Complete the task you were given, then return a concise summary. " +
   "Do not delegate further.";
 
-const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
+// client 与 logger 通过参数注入到 agentLoop / spawnSubagent。
+export type Deps = { client: ModelClient; logger: AgentLogger };
 
 // ═══════════════════════════════════════════════════════════
-//  FROM s02-s05 (unchanged): Tool Implementations
+//  FROM s02-s05: Tool Implementations
+//  - runBash 同 s03/s04：去掉内联危险检查（改由 permissionHook 把关）
+//  - safePath + 四个文件工具 unchanged：从 s02 导入并起别名，本地保留
+//    同名 wrapper，结构与 TOOL_HANDLERS 调用点都不用动
 // ═══════════════════════════════════════════════════════════
 
-function runBash(command: string): string {
+export function runBash(command: string): string {
   const r = spawnSync(command, {
     shell: true,
     cwd: WORKDIR,
@@ -75,61 +83,24 @@ function runBash(command: string): string {
   return out ? out.slice(0, 50_000) : "(no output)";
 }
 
-function safePath(p: string): string {
-  const resolved = path.resolve(WORKDIR, p);
-  if (resolved !== WORKDIR && !resolved.startsWith(WORKDIR + path.sep)) {
-    throw new Error(`Path escapes workspace: ${p}`);
-  }
-  return resolved;
+export function safePath(p: string): string {
+  return s02SafePath(p);
 }
 
-function runRead(p: string, limit?: number): string {
-  try {
-    let lines = fs.readFileSync(safePath(p), "utf8").split("\n");
-    if (limit && limit < lines.length) {
-      lines = [...lines.slice(0, limit), `... (${lines.length - limit} more lines)`];
-    }
-    return lines.join("\n");
-  } catch (e) {
-    return `Error: ${errMsg(e)}`;
-  }
+export function runRead(p: string, limit?: number): string {
+  return s02RunRead(p, limit);
 }
 
-function runWrite(p: string, content: string): string {
-  try {
-    const filePath = safePath(p);
-    fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    fs.writeFileSync(filePath, content);
-    return `Wrote ${Buffer.byteLength(content)} bytes to ${p}`;
-  } catch (e) {
-    return `Error: ${errMsg(e)}`;
-  }
+export function runWrite(p: string, content: string): string {
+  return s02RunWrite(p, content);
 }
 
-function runEdit(p: string, oldText: string, newText: string): string {
-  try {
-    const filePath = safePath(p);
-    const text = fs.readFileSync(filePath, "utf8");
-    // indexOf + slice instead of String.replace: replace would treat
-    // `$&`-style patterns in newText as special replacement syntax.
-    const i = text.indexOf(oldText);
-    if (i === -1) return `Error: text not found in ${p}`;
-    fs.writeFileSync(filePath, text.slice(0, i) + newText + text.slice(i + oldText.length));
-    return `Edited ${p}`;
-  } catch (e) {
-    return `Error: ${errMsg(e)}`;
-  }
+export function runEdit(p: string, oldText: string, newText: string): string {
+  return s02RunEdit(p, oldText, newText);
 }
 
-function runGlob(pattern: string): string {
-  try {
-    const results = fs
-      .globSync(pattern, { cwd: WORKDIR })
-      .filter((m) => path.resolve(WORKDIR, m).startsWith(WORKDIR + path.sep));
-    return results.length ? results.join("\n") : "(no matches)";
-  } catch (e) {
-    return `Error: ${errMsg(e)}`;
-  }
+export function runGlob(pattern: string): string {
+  return s02RunGlob(pattern);
 }
 
 // FROM s05 (unchanged): todo_write
@@ -142,7 +113,7 @@ type Todo = z.infer<typeof todoItem>;
 
 let currentTodos: Todo[] = [];
 
-function normalizeTodos(todos: unknown): { todos?: Todo[]; error?: string } {
+export function normalizeTodos(todos: unknown): { todos?: Todo[]; error?: string } {
   if (typeof todos === "string") {
     try {
       todos = JSON.parse(todos);
@@ -157,7 +128,7 @@ function normalizeTodos(todos: unknown): { todos?: Todo[]; error?: string } {
   return { todos: parsed.data };
 }
 
-function runTodoWrite(todosInput: unknown): string {
+export function runTodoWrite(todosInput: unknown): string {
   const { todos, error } = normalizeTodos(todosInput);
   if (error || !todos) return error ?? "Error: invalid todos";
   currentTodos = todos;
@@ -235,24 +206,30 @@ const SUB_HANDLERS: Partial<Record<string, (input: any) => string>> = {
   glob: ({ pattern }) => runGlob(pattern),
 };
 
-// Handlers may be async now: task -> spawnSubagent returns a Promise
-const TOOL_HANDLERS: Partial<Record<string, (input: any) => string | Promise<string>>> = {
+// Handlers may be async now: task -> spawnSubagent returns a Promise.
+// 第二参 deps 让需要 client/logger 的 handler（task）拿到依赖，
+// 纯工具 handler 直接忽略它。
+const TOOL_HANDLERS: Partial<
+  Record<string, (input: any, deps: Deps) => string | Promise<string>>
+> = {
   ...SUB_HANDLERS,
   todo_write: ({ todos }) => runTodoWrite(todos),
-  task: ({ description }) => spawnSubagent(description),
+  task: ({ description }, deps) => spawnSubagent(description, deps),
 };
 
 // ═══════════════════════════════════════════════════════════
 //  NEW in s06: Subagent — fresh messages[], summary only
 // ═══════════════════════════════════════════════════════════
 
-async function spawnSubagent(description: string): Promise<string> {
+export async function spawnSubagent(description: string, deps: Deps): Promise<string> {
+  const { client, logger } = deps;
   console.log(`\n\x1b[35m[Subagent spawned]\x1b[0m`);
   const messages: Anthropic.MessageParam[] = [{ role: "user", content: description }]; // fresh context
   let lastText = "";
 
   for (let turn = 0; turn < 30; turn++) {
     // safety limit
+    logger.request(messages);
     const response = await client.messages.create({
       model: MODEL_ID,
       system: SUB_SYSTEM,
@@ -260,6 +237,7 @@ async function spawnSubagent(description: string): Promise<string> {
       tools: subTools,
       max_tokens: 8000,
     });
+    logger.response(response);
     messages.push({ role: "assistant", content: response.content });
     const text = textOf(response);
     if (text) lastText = text;
@@ -283,6 +261,7 @@ async function spawnSubagent(description: string): Promise<string> {
       const schema = FILE_SCHEMAS[block.name];
       const handler = SUB_HANDLERS[block.name];
       const output = handler && schema ? handler(schema.parse(block.input)) : `Unknown: ${block.name}`;
+      logger.toolResult(block.name, output);
       await triggerHooks("PostToolUse", block, output);
       console.log(`  \x1b[90m[sub] ${block.name}: ${output.slice(0, 100)}\x1b[0m`);
       results.push({
@@ -315,11 +294,11 @@ const HOOKS: Record<string, Hook[]> = {
   Stop: [],
 };
 
-function registerHook(event: string, callback: Hook): void {
+export function registerHook(event: string, callback: Hook): void {
   HOOKS[event].push(callback);
 }
 
-async function triggerHooks(event: string, ...args: any[]): Promise<string | null> {
+export async function triggerHooks(event: string, ...args: any[]): Promise<string | null> {
   for (const callback of HOOKS[event]) {
     const result = await callback(...args);
     if (result != null) return result;
@@ -327,12 +306,17 @@ async function triggerHooks(event: string, ...args: any[]): Promise<string | nul
   return null;
 }
 
+// 测试用：清空注册表，隔离用例（入口通过 registerDefaultHooks 注册）。
+export function clearHooks(): void {
+  for (const event of Object.keys(HOOKS)) HOOKS[event] = [];
+}
+
 type ToolCallInfo = Anthropic.ToolUseBlock;
 
 const DENY_LIST = ["rm -rf /", "sudo", "shutdown", "reboot", "mkfs", "dd if="];
 
 // PreToolUse: deny list check.
-function permissionHook(call: ToolCallInfo): string | null {
+export function permissionHook(call: ToolCallInfo): string | null {
   if (call.name === "bash") {
     for (const pattern of DENY_LIST) {
       if (((call.input as any).command ?? "").includes(pattern)) {
@@ -345,19 +329,19 @@ function permissionHook(call: ToolCallInfo): string | null {
 }
 
 // PreToolUse: log tool calls.
-function logHook(call: ToolCallInfo): null {
+export function logHook(call: ToolCallInfo): null {
   console.log(`\x1b[90m[HOOK] ${call.name}\x1b[0m`);
   return null;
 }
 
 // UserPromptSubmit: log working directory.
-function contextInjectHook(_query: string): null {
+export function contextInjectHook(_query: string): null {
   console.log(`\x1b[90m[HOOK] UserPromptSubmit: working in ${WORKDIR}\x1b[0m`);
   return null;
 }
 
 // Stop: print tool call count.
-function summaryHook(messages: Anthropic.MessageParam[]): null {
+export function summaryHook(messages: Anthropic.MessageParam[]): null {
   const toolCount = messages.reduce(
     (n, m) =>
       n +
@@ -368,10 +352,13 @@ function summaryHook(messages: Anthropic.MessageParam[]): null {
   return null;
 }
 
-registerHook("UserPromptSubmit", contextInjectHook);
-registerHook("PreToolUse", permissionHook);
-registerHook("PreToolUse", logHook);
-registerHook("Stop", summaryHook);
+// 默认 hook 注册收进函数，只在入口调用一次；import 该模块不产生副作用。
+export function registerDefaultHooks(): void {
+  registerHook("UserPromptSubmit", contextInjectHook);
+  registerHook("PreToolUse", permissionHook);
+  registerHook("PreToolUse", logHook);
+  registerHook("Stop", summaryHook);
+}
 
 // ═══════════════════════════════════════════════════════════
 //  agentLoop — same as s05 + nag reminder, task auto-dispatches
@@ -379,7 +366,15 @@ registerHook("Stop", summaryHook);
 
 let roundsSinceTodo = 0;
 
-async function agentLoop(messages: Anthropic.MessageParam[]): Promise<string> {
+export function resetNagCounter(): void {
+  roundsSinceTodo = 0;
+}
+
+export async function agentLoop(
+  messages: Anthropic.MessageParam[],
+  deps: Deps,
+): Promise<string> {
+  const { client, logger } = deps;
   while (true) {
     // s05: nag reminder
     if (roundsSinceTodo >= 3 && messages.length) {
@@ -387,6 +382,7 @@ async function agentLoop(messages: Anthropic.MessageParam[]): Promise<string> {
       roundsSinceTodo = 0;
     }
 
+    logger.request(messages);
     const response = await client.messages.create({
       model: MODEL_ID,
       system: SYSTEM,
@@ -394,6 +390,7 @@ async function agentLoop(messages: Anthropic.MessageParam[]): Promise<string> {
       tools,
       max_tokens: 8000,
     });
+    logger.response(response);
     messages.push({ role: "assistant", content: response.content });
 
     if (response.stop_reason !== "tool_use") {
@@ -424,7 +421,10 @@ async function agentLoop(messages: Anthropic.MessageParam[]): Promise<string> {
       const handler = TOOL_HANDLERS[block.name];
       // s06: await — the task handler (spawnSubagent) is async
       const output =
-        handler && schema ? await handler(schema.parse(block.input)) : `Unknown: ${block.name}`;
+        handler && schema
+          ? await handler(schema.parse(block.input), deps)
+          : `Unknown: ${block.name}`;
+      logger.toolResult(block.name, output);
 
       await triggerHooks("PostToolUse", block, output);
 
@@ -442,33 +442,42 @@ async function agentLoop(messages: Anthropic.MessageParam[]): Promise<string> {
 }
 
 // ── Entry point ──────────────────────────────────────────
-const rl = readline.createInterface({
-  input: process.stdin,
-  output: process.stdout,
-});
-rl.on("SIGINT", () => {
-  rl.close();
-  process.exit(0);
-});
+// import.meta.main 只在文件被直接运行时为 true。
+if (import.meta.main) {
+  const client = createClient();
+  const logger = createLogger(import.meta.dirname);
+  logger.config({ model: MODEL_ID, system: SYSTEM, tools });
+  registerDefaultHooks();
 
-console.log("s06: Subagent — spawn sub-agents with fresh context, summary only");
-console.log("输入问题，回车发送。输入 q 退出。\n");
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+  rl.on("SIGINT", () => {
+    rl.close();
+    process.exit(0);
+  });
 
-const history: Anthropic.MessageParam[] = [];
-while (true) {
-  let query: string;
-  try {
-    query = await rl.question("\x1b[36ms06 >> \x1b[0m");
-  } catch {
-    break; // stdin closed (Ctrl+D)
+  console.log("s06: Subagent — spawn sub-agents with fresh context, summary only");
+  console.log("输入问题，回车发送。输入 q 退出。\n");
+
+  const history: Anthropic.MessageParam[] = [];
+  while (true) {
+    let query: string;
+    try {
+      query = await rl.question("\x1b[36ms06 >> \x1b[0m");
+    } catch {
+      break; // stdin closed (Ctrl+D)
+    }
+    const q = query.trim().toLowerCase();
+    if (q === "" || q === "q" || q === "exit") break;
+
+    logger.userInput(query);
+    await triggerHooks("UserPromptSubmit", query);
+    history.push({ role: "user", content: query });
+    const finalText = await agentLoop(history, { client, logger });
+    console.log(finalText);
+    console.log();
   }
-  const q = query.trim().toLowerCase();
-  if (q === "" || q === "q" || q === "exit") break;
-
-  await triggerHooks("UserPromptSubmit", query);
-  history.push({ role: "user", content: query });
-  const finalText = await agentLoop(history);
-  console.log(finalText);
-  console.log();
+  rl.close();
 }
-rl.close();

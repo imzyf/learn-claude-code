@@ -21,7 +21,7 @@
  *
  * 相比 s02 还有两处改动：
  *   - runBash 内联的危险命令检查被移除——现在归关卡 1 管
- *   - readline 接口上移：关卡 3（askUser）和 REPL 共用同一个接口
+ *   - 关卡 3（askUser）做成可注入依赖：入口用真实 readline，测试用 fake
  *
  * 基于 s02（多工具）构建。Usage:
  *
@@ -29,30 +29,32 @@
  */
 
 import { spawnSync } from "node:child_process";
-import * as fs from "node:fs";
 import * as path from "node:path";
 import * as readline from "node:readline/promises";
 import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
-import { createClient, MODEL_ID } from "../lib/model";
+import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
 import { zodTool, textOf } from "../lib/tools";
-import { createLogger } from "../lib/logger";
-
-const client = createClient();
+import { createLogger, type AgentLogger } from "../lib/logger";
+import {
+  runRead as s02RunRead,
+  runWrite as s02RunWrite,
+  runEdit as s02RunEdit,
+  runGlob as s02RunGlob,
+  safePath as s02SafePath,
+} from "../s02_tool_use/main";
 
 const WORKDIR = process.cwd();
 const SYSTEM = `You are a coding agent at ${WORKDIR}. All destructive operations require user approval.`;
 
-const logger = createLogger(path.basename(import.meta.dirname));
-
-const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
-
 // ═══════════════════════════════════════════════════════════
 //  FROM s02: Tool Implementations
-//  (runBash changed: inline dangerous-check removed, Gate 1 replaces it)
+//  - runBash changed: inline dangerous-check removed, Gate 1 replaces it
+//  - safePath + 四个文件工具 unchanged：从 s02 导入并起别名，本地保留
+//    同名 wrapper，结构与调用点（TOOL_HANDLERS）都不用动
 // ═══════════════════════════════════════════════════════════
 
-function runBash(command: string): string {
+export function runBash(command: string): string {
   const r = spawnSync(command, {
     shell: true,
     cwd: WORKDIR,
@@ -68,61 +70,24 @@ function runBash(command: string): string {
   return out ? out.slice(0, 50_000) : "(no output)";
 }
 
-function safePath(p: string): string {
-  const resolved = path.resolve(WORKDIR, p);
-  if (resolved !== WORKDIR && !resolved.startsWith(WORKDIR + path.sep)) {
-    throw new Error(`Path escapes workspace: ${p}`);
-  }
-  return resolved;
+export function safePath(p: string): string {
+  return s02SafePath(p);
 }
 
-function runRead(p: string, limit?: number): string {
-  try {
-    let lines = fs.readFileSync(safePath(p), "utf8").split("\n");
-    if (limit && limit < lines.length) {
-      lines = [...lines.slice(0, limit), `... (${lines.length - limit} more lines)`];
-    }
-    return lines.join("\n");
-  } catch (e) {
-    return `Error: ${errMsg(e)}`;
-  }
+export function runRead(p: string, limit?: number): string {
+  return s02RunRead(p, limit);
 }
 
-function runWrite(p: string, content: string): string {
-  try {
-    const filePath = safePath(p);
-    fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    fs.writeFileSync(filePath, content);
-    return `Wrote ${Buffer.byteLength(content)} bytes to ${p}`;
-  } catch (e) {
-    return `Error: ${errMsg(e)}`;
-  }
+export function runWrite(p: string, content: string): string {
+  return s02RunWrite(p, content);
 }
 
-function runEdit(p: string, oldText: string, newText: string): string {
-  try {
-    const filePath = safePath(p);
-    const text = fs.readFileSync(filePath, "utf8");
-    // indexOf + slice instead of String.replace: replace would treat
-    // `$&`-style patterns in newText as special replacement syntax.
-    const i = text.indexOf(oldText);
-    if (i === -1) return `Error: text not found in ${p}`;
-    fs.writeFileSync(filePath, text.slice(0, i) + newText + text.slice(i + oldText.length));
-    return `Edited ${p}`;
-  } catch (e) {
-    return `Error: ${errMsg(e)}`;
-  }
+export function runEdit(p: string, oldText: string, newText: string): string {
+  return s02RunEdit(p, oldText, newText);
 }
 
-function runGlob(pattern: string): string {
-  try {
-    const results = fs
-      .globSync(pattern, { cwd: WORKDIR })
-      .filter((m) => path.resolve(WORKDIR, m).startsWith(WORKDIR + path.sep));
-    return results.length ? results.join("\n") : "(no matches)";
-  } catch (e) {
-    return `Error: ${errMsg(e)}`;
-  }
+export function runGlob(pattern: string): string {
+  return s02RunGlob(pattern);
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -142,7 +107,6 @@ const tools: Anthropic.Tool[] = [
   zodTool("edit_file", "Replace exact text in a file once.", editSchema),
   zodTool("glob", "Find files matching a glob pattern.", globSchema),
 ];
-logger.config({ model: MODEL_ID, system: SYSTEM, tools });
 
 const TOOL_SCHEMAS: Partial<Record<string, z.ZodObject>> = {
   bash: bashSchema,
@@ -169,7 +133,7 @@ const TOOL_HANDLERS: Partial<Record<string, (input: any) => string>> = {
 // Gate 1: Hard deny list — always forbidden
 const DENY_LIST = ["rm -rf /", "sudo", "shutdown", "reboot", "mkfs", "dd if=", "> /dev/sda"];
 
-function checkDenyList(command: string): string | null {
+export function checkDenyList(command: string): string | null {
   for (const pattern of DENY_LIST) {
     if (command.includes(pattern)) {
       return `Blocked: '${pattern}' is on the deny list`;
@@ -195,7 +159,7 @@ const PERMISSION_RULES: { tools: string[]; check: (args: any) => boolean; messag
   },
 ];
 
-function checkRules(toolName: string, args: unknown): string | null {
+export function checkRules(toolName: string, args: unknown): string | null {
   for (const rule of PERMISSION_RULES) {
     if (rule.tools.includes(toolName) && rule.check(args)) {
       return rule.message;
@@ -205,30 +169,19 @@ function checkRules(toolName: string, args: unknown): string | null {
 }
 
 // Gate 3: User approval — wait for confirmation after rule match.
-// Shares the REPL's readline interface (Python just calls input()).
-const rl = readline.createInterface({
-  input: process.stdin,
-  output: process.stdout,
-});
-rl.on("SIGINT", () => {
-  rl.close();
-  process.exit(0);
-});
-
-async function askUser(toolName: string, args: unknown, reason: string): Promise<"allow" | "deny"> {
-  console.log(`\n\x1b[33m⚠  ${reason}\x1b[0m`);
-  console.log(`   Tool: ${toolName}(${JSON.stringify(args)})`);
-  let choice: string;
-  try {
-    choice = (await rl.question("   Allow? [y/N] ")).trim().toLowerCase();
-  } catch {
-    return "deny"; // stdin closed — nobody left to approve
-  }
-  return choice === "y" || choice === "yes" ? "allow" : "deny";
-}
+// The prompt itself is injected (AskUser) so the pipeline stays free of
+// readline: the entry point wires in a real terminal prompt, tests a fake.
+export type AskUser = (
+  toolName: string,
+  args: unknown,
+  reason: string,
+) => Promise<"allow" | "deny">;
 
 // Pipeline: all three gates chained
-async function checkPermission(block: Anthropic.ToolUseBlock): Promise<boolean> {
+export async function checkPermission(
+  block: Anthropic.ToolUseBlock,
+  askUser: AskUser,
+): Promise<boolean> {
   if (block.name === "bash") {
     const reason = checkDenyList((block.input as any).command ?? "");
     if (reason) {
@@ -248,7 +201,11 @@ async function checkPermission(block: Anthropic.ToolUseBlock): Promise<boolean> 
 //  agentLoop — same as s02, with checkPermission() inserted
 // ═══════════════════════════════════════════════════════════
 
-async function agentLoop(messages: Anthropic.MessageParam[]): Promise<string> {
+export async function agentLoop(
+  messages: Anthropic.MessageParam[],
+  deps: { client: ModelClient; logger: AgentLogger; askUser: AskUser },
+): Promise<string> {
+  const { client, logger, askUser } = deps;
   while (true) {
     logger.request(messages);
     const response = await client.messages.create({
@@ -275,7 +232,7 @@ async function agentLoop(messages: Anthropic.MessageParam[]): Promise<string> {
       console.log(`\x1b[36m> ${block.name}\x1b[0m`);
 
       // s03 change: run through permission pipeline before executing
-      if (!(await checkPermission(block))) {
+      if (!(await checkPermission(block, askUser))) {
         results.push({
           type: "tool_result",
           tool_use_id: block.id,
@@ -302,24 +259,53 @@ async function agentLoop(messages: Anthropic.MessageParam[]): Promise<string> {
 }
 
 // ── Entry point ──────────────────────────────────────────
-console.log("s03: Permission");
-console.log("输入问题，回车发送。输入 q 退出。\n");
+// import.meta.main 只在文件被直接运行时为 true。
+if (import.meta.main) {
+  const client = createClient();
+  const logger = createLogger(import.meta.dirname);
+  logger.config({ model: MODEL_ID, system: SYSTEM, tools });
 
-const history: Anthropic.MessageParam[] = [];
-while (true) {
-  let query: string;
-  try {
-    query = await rl.question("\x1b[36ms03 >> \x1b[0m");
-  } catch {
-    break; // stdin closed (Ctrl+D)
+  // Gate 3 的真实实现：readline 接口和 REPL 共用（Python 里就是 input()）。
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+  rl.on("SIGINT", () => {
+    rl.close();
+    process.exit(0);
+  });
+
+  const askUser: AskUser = async (toolName, args, reason) => {
+    console.log(`\n\x1b[33m⚠  ${reason}\x1b[0m`);
+    console.log(`   Tool: ${toolName}(${JSON.stringify(args)})`);
+    let choice: string;
+    try {
+      choice = (await rl.question("   Allow? [y/N] ")).trim().toLowerCase();
+    } catch {
+      return "deny"; // stdin closed — nobody left to approve
+    }
+    return choice === "y" || choice === "yes" ? "allow" : "deny";
+  };
+
+  console.log("s03: Permission");
+  console.log("输入问题，回车发送。输入 q 退出。\n");
+
+  const history: Anthropic.MessageParam[] = [];
+  while (true) {
+    let query: string;
+    try {
+      query = await rl.question("\x1b[36ms03 >> \x1b[0m");
+    } catch {
+      break; // stdin closed (Ctrl+D)
+    }
+    const q = query.trim().toLowerCase();
+    if (q === "" || q === "q" || q === "exit") break;
+    logger.userInput(query);
+
+    history.push({ role: "user", content: query });
+    const finalText = await agentLoop(history, { client, logger, askUser });
+    console.log(finalText);
+    console.log();
   }
-  const q = query.trim().toLowerCase();
-  if (q === "" || q === "q" || q === "exit") break;
-  logger.userInput(query);
-
-  history.push({ role: "user", content: query });
-  const finalText = await agentLoop(history);
-  console.log(finalText);
-  console.log();
+  rl.close();
 }
-rl.close();
