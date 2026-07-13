@@ -79,7 +79,7 @@ describe("contextKey", () => {
 describe("getSystemPrompt", () => {
   it("returns a cached identical string for an unchanged context", () => {
     const first = getSystemPrompt(ctx());
-    const second = getSystemPrompt(ctx()); // equal-but-rebuilt context → still a hit
+    const second = getSystemPrompt(ctx()); // 重建但内容相同的 context → 仍命中缓存
     expect(second).toBe(first);
   });
 

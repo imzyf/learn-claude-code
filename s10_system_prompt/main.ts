@@ -23,7 +23,8 @@ import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
 import { createLogger, type SessionLogger } from "../lib/logger";
 import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
-import { textOf, zodTool } from "../lib/tools";
+import { colorize, print } from "../lib/terminal";
+import { printProse, textOf, zodTool } from "../lib/tools";
 
 const WORKDIR = process.cwd();
 const MEMORY_DIR = path.join(WORKDIR, ".memory");
@@ -37,7 +38,7 @@ export type Deps = { client: ModelClient; logger: SessionLogger };
 export type LoopDeps = Deps & { memoryIndex: string };
 
 // ═══════════════════════════════════════════════════════════
-//  NEW in s10: Prompt Sections
+//  s10 新增：Prompt 片段
 // ═══════════════════════════════════════════════════════════
 
 const PROMPT_SECTIONS = {
@@ -53,16 +54,16 @@ export type Context = {
   memories: string;
 };
 
-// Select and join prompt sections based on current context.
+// 根据当前 context 挑选并拼接 prompt 片段。
 export function assembleSystemPrompt(context: Context): string {
   const sections: string[] = [];
 
-  // Always loaded — identity, tools, workspace
+  // 始终加载：identity / tools / workspace。
   sections.push(PROMPT_SECTIONS.identity);
   sections.push(PROMPT_SECTIONS.tools);
   sections.push(PROMPT_SECTIONS.workspace);
 
-  // Conditional — memory loaded when MEMORY.md exists and has content
+  // 条件加载：MEMORY.md 存在且非空时才加上记忆片段。
   if (context.memories) {
     sections.push(`Relevant memories:\n${context.memories}`);
   }
@@ -79,24 +80,19 @@ export function resetPromptCache(): void {
   lastPrompt = null;
 }
 
-// JSON.stringify keeps insertion order; passing a sorted key array makes the
-// serialization deterministic (the TS analog of Python's
-// json.dumps(sort_keys=True) — and unlike hashing object identity, it
-// survives rebuilt-but-equal contexts).
+// JSON.stringify 保持插入顺序；传入排序后的 key 数组让序列化结果确定
+// （对应 Python 的 json.dumps(sort_keys=True)）—— 比对对象身份更可靠，
+// 重建但内容相同的 context 也能命中缓存。
 export const contextKey = (context: Context): string =>
   JSON.stringify(context, Object.keys(context).sort());
 
-/**
- * Cache wrapper — reassemble only when context changes.
- *
- * This cache only avoids redundant string assembly within a process.
- * Real Claude Code additionally protects API-level prompt cache via
- * stable section ordering and SYSTEM_PROMPT_DYNAMIC_BOUNDARY.
- */
+// 缓存包装 —— context 变了才重新组装。
+// 这层缓存只省进程内的重复拼接；真正的 Claude Code 还会靠稳定的片段顺序 +
+// SYSTEM_PROMPT_DYNAMIC_BOUNDARY 保护 API 层的 prompt cache。
 export function getSystemPrompt(context: Context): string {
   const key = contextKey(context);
   if (key === lastContextKey && lastPrompt) {
-    console.log("  \x1b[90m[cache hit] system prompt unchanged\x1b[0m");
+    print("  [cache hit] system prompt unchanged", "gray");
     return lastPrompt;
   }
   lastContextKey = key;
@@ -104,14 +100,15 @@ export function getSystemPrompt(context: Context): string {
 
   const loaded = ["identity", "tools", "workspace"];
   if (context.memories) loaded.push("memory");
-  console.log(`  \x1b[32m[assembled] sections: ${loaded.join(", ")}\x1b[0m`);
+  print(`  [assembled] sections: ${loaded.join(", ")}`, "green");
   return lastPrompt;
 }
 
 // ═══════════════════════════════════════════════════════════
-//  FROM s02 (unchanged): Basic tools
+//  来自 s02（原样复用）：基础工具
 // ═══════════════════════════════════════════════════════════
 
+// 把路径限制在 WORKDIR 内，越界即抛错。
 export function safePath(p: string): string {
   const resolved = path.resolve(WORKDIR, p);
   if (resolved !== WORKDIR && !resolved.startsWith(WORKDIR + path.sep)) {
@@ -188,10 +185,10 @@ const TOOL_HANDLERS: Partial<Record<string, (input: any) => string>> = {
 };
 
 // ═══════════════════════════════════════════════════════════
-//  NEW in s10: Context — real state, not keyword guessing
+//  s10 新增：Context —— 依据真实状态，而非关键词猜测
 // ═══════════════════════════════════════════════════════════
 
-// Derive context from real state: which tools exist, whether memory files exist.
+// 由真实状态推导 context：有哪些工具、记忆文件是否存在。
 export function updateContext(memoryIndex: string): Context {
   let memories = "";
   if (fs.existsSync(memoryIndex)) {
@@ -205,7 +202,7 @@ export function updateContext(memoryIndex: string): Context {
 }
 
 // ═══════════════════════════════════════════════════════════
-//  agentLoop — uses assembled system prompt instead of hardcoded SYSTEM
+//  agentLoop —— 用组装出来的 system prompt，替代写死的 SYSTEM
 // ═══════════════════════════════════════════════════════════
 
 export async function agentLoop(
@@ -232,8 +229,10 @@ export async function agentLoop(
 
     const results: Anthropic.ToolResultBlockParam[] = [];
     for (const block of response.content) {
-      if (block.type !== "tool_use") continue;
-      console.log(`\x1b[36m> ${block.name}\x1b[0m`);
+      if (block.type !== "tool_use") {
+        printProse(block);
+        continue;
+      }
       const schema = TOOL_SCHEMAS[block.name];
       const handler = TOOL_HANDLERS[block.name];
       const output =
@@ -241,7 +240,6 @@ export async function agentLoop(
           ? handler(schema.parse(block.input))
           : `Unknown: ${block.name}`;
       logger.toolResult(block.name, output);
-      console.log(output.slice(0, 200));
       results.push({
         type: "tool_result",
         tool_use_id: block.id,
@@ -250,13 +248,13 @@ export async function agentLoop(
     }
     messages.push({ role: "user", content: results });
 
-    // Re-evaluate context and prompt after each tool round
+    // 每轮工具后重新推导 context 并重组 prompt。
     context = updateContext(memoryIndex);
     system = getSystemPrompt(context);
   }
 }
 
-// ── Entry point ──────────────────────────────────────────
+// ── 入口 ──────────────────────────────────────────
 // import.meta.main 只在文件被直接运行时为 true。
 if (import.meta.main) {
   const client = createClient();
@@ -264,8 +262,8 @@ if (import.meta.main) {
   let context = updateContext(MEMORY_INDEX);
   logger.config({ model: MODEL_ID, system: getSystemPrompt(context), tools });
 
-  console.log("s10: system prompt — runtime assembly");
-  console.log("输入问题，回车发送。输入 q 退出。\n");
+  print("s10: System Prompt — 运行时组装 + 缓存", "cyan");
+  print("输入问题，回车发送。输入 q 退出。\n", "green");
 
   const rl = readline.createInterface({
     input: process.stdin,
@@ -280,9 +278,9 @@ if (import.meta.main) {
   while (true) {
     let query: string;
     try {
-      query = await rl.question("\x1b[36ms10 >> \x1b[0m");
+      query = await rl.question(colorize("s10 >> ", "cyan"));
     } catch {
-      break; // stdin closed (Ctrl+D)
+      break; // stdin 关闭（Ctrl+D）
     }
     const q = query.trim().toLowerCase();
     if (q === "" || q === "q" || q === "exit") break;
@@ -295,8 +293,8 @@ if (import.meta.main) {
       memoryIndex: MEMORY_INDEX,
     });
     context = updateContext(MEMORY_INDEX);
-    console.log(finalText);
-    console.log();
+    print(finalText, "green");
+    print();
   }
   rl.close();
 }

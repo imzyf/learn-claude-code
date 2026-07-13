@@ -27,7 +27,8 @@ import * as readline from "node:readline/promises";
 import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
 import { createClient, MODEL_ID } from "../lib/model";
-import { textOf, zodTool } from "../lib/tools";
+import { colorize, print } from "../lib/terminal";
+import { printProse, textOf, zodTool } from "../lib/tools";
 
 const client = createClient();
 
@@ -38,7 +39,7 @@ const MEMORY_INDEX = path.join(MEMORY_DIR, "MEMORY.md");
 const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 // ═══════════════════════════════════════════════════════════
-//  NEW in s12: Task System
+//  s12 新增：任务系统
 // ═══════════════════════════════════════════════════════════
 
 const TASKS_DIR = path.join(WORKDIR, ".tasks");
@@ -51,8 +52,8 @@ type Task = {
   subject: string;
   description: string;
   status: TaskStatus;
-  owner: string | null; // Agent name (multi-agent scenarios)
-  blockedBy: string[]; // Dependency task IDs
+  owner: string | null; // agent 名（多 agent 场景）
+  blockedBy: string[]; // 依赖的任务 ID
 };
 
 const taskPath = (taskId: string) => path.join(TASKS_DIR, `${taskId}.json`);
@@ -93,14 +94,14 @@ function listTasks(): Task[] {
     );
 }
 
-// Return full task details as JSON.
+// 返回任务的完整详情（JSON）。
 function getTask(taskId: string): string {
   return JSON.stringify(loadTask(taskId), null, 2);
 }
 
 /**
- * Check if all blockedBy dependencies are completed.
- * Missing dependencies are treated as blocked.
+ * 检查 blockedBy 依赖是否全部完成。
+ * 依赖缺失即视为被阻塞。
  */
 function canStart(taskId: string): boolean {
   const task = loadTask(taskId);
@@ -125,9 +126,7 @@ function claimTask(taskId: string, owner = "agent"): string {
   task.owner = owner;
   task.status = "in_progress";
   saveTask(task);
-  console.log(
-    `  \x1b[36m[claim] ${task.subject} → in_progress (owner: ${owner})\x1b[0m`,
-  );
+  print(`  [claim] ${task.subject} → in_progress (owner: ${owner})`, "cyan");
   return `Claimed ${task.id} (${task.subject})`;
 }
 
@@ -143,17 +142,17 @@ function completeTask(taskId: string): string {
       (t) => t.status === "pending" && t.blockedBy.length > 0 && canStart(t.id),
     )
     .map((t) => t.subject);
-  console.log(`  \x1b[32m[complete] ${task.subject} ✓\x1b[0m`);
+  print(`  [complete] ${task.subject} ✓`, "green");
   let msg = `Completed ${task.id} (${task.subject})`;
   if (unblocked.length) {
     msg += `\nUnblocked: ${unblocked.join(", ")}`;
-    console.log(`  \x1b[33m[unblocked] ${unblocked.join(", ")}\x1b[0m`);
+    print(`  [unblocked] ${unblocked.join(", ")}`, "yellow");
   }
   return msg;
 }
 
 // ═══════════════════════════════════════════════════════════
-//  FROM s10 (synced): Prompt Assembly
+//  来自 s10（同步）：Prompt 组装
 // ═══════════════════════════════════════════════════════════
 
 const PROMPT_SECTIONS = {
@@ -200,7 +199,7 @@ function getSystemPrompt(context: Context): string {
 }
 
 // ═══════════════════════════════════════════════════════════
-//  FROM s02 (unchanged): Basic tools
+//  来自 s02（原样复用）：基础工具
 // ═══════════════════════════════════════════════════════════
 
 function safePath(p: string): string {
@@ -253,7 +252,7 @@ function runWrite(p: string, content: string): string {
   }
 }
 
-// ── Task tools ──
+// ── 任务工具 ──
 
 function runCreateTask(
   subject: string,
@@ -262,7 +261,7 @@ function runCreateTask(
 ): string {
   const task = createTask(subject, description, blockedBy ?? []);
   const deps = blockedBy?.length ? ` (blockedBy: ${blockedBy.join(", ")})` : "";
-  console.log(`  \x1b[34m[create] ${task.subject}${deps}\x1b[0m`);
+  print(`  [create] ${task.subject}${deps}`, "blue");
   return `Created ${task.id}: ${task.subject}${deps}`;
 }
 
@@ -302,7 +301,7 @@ function runCompleteTask(taskId: string): string {
   return completeTask(taskId);
 }
 
-// ── Tool definitions ──
+// ── 工具定义 ──
 
 const bashSchema = z.object({ command: z.string() });
 const readSchema = z.object({
@@ -376,7 +375,7 @@ const TOOL_HANDLERS: Partial<Record<string, (input: any) => string>> = {
 
 // ── Context ──
 
-// Derive context from real state.
+// 由真实状态推导 context。
 function updateContext(): Context {
   let memories = "";
   if (fs.existsSync(MEMORY_INDEX)) {
@@ -390,7 +389,7 @@ function updateContext(): Context {
 }
 
 // ═══════════════════════════════════════════════════════════
-//  agentLoop — simplified, focused on task system
+//  agentLoop —— 精简版，聚焦任务系统
 // ═══════════════════════════════════════════════════════════
 
 async function agentLoop(
@@ -421,15 +420,18 @@ async function agentLoop(
 
     const results: Anthropic.ToolResultBlockParam[] = [];
     for (const block of response.content) {
-      if (block.type !== "tool_use") continue;
-      console.log(`\x1b[36m> ${block.name}\x1b[0m`);
+      if (block.type !== "tool_use") {
+        printProse(block);
+        continue;
+      }
+      print(`> ${block.name}`, "cyan");
       const schema = TOOL_SCHEMAS[block.name];
       const handler = TOOL_HANDLERS[block.name];
       const output =
         handler && schema
           ? handler(schema.parse(block.input))
           : `Unknown: ${block.name}`;
-      console.log(output.slice(0, 300));
+      print(output.slice(0, 300));
       results.push({
         type: "tool_result",
         tool_use_id: block.id,
@@ -443,9 +445,9 @@ async function agentLoop(
   }
 }
 
-// ── Entry point ──────────────────────────────────────────
-console.log("s12: task system");
-console.log("输入问题，回车发送。输入 q 退出。\n");
+// ── 入口 ──────────────────────────────────────────
+print("s12: Task System — 带依赖的持久化任务图", "cyan");
+print("输入问题，回车发送。输入 q 退出。\n", "green");
 
 const rl = readline.createInterface({
   input: process.stdin,
@@ -461,9 +463,9 @@ let context = updateContext();
 while (true) {
   let query: string;
   try {
-    query = await rl.question("\x1b[36ms12 >> \x1b[0m");
+    query = await rl.question(colorize("s12 >> ", "cyan"));
   } catch {
-    break; // stdin closed (Ctrl+D)
+    break; // stdin 关闭（Ctrl+D）
   }
   const q = query.trim().toLowerCase();
   if (q === "" || q === "q" || q === "exit") break;
@@ -471,7 +473,7 @@ while (true) {
   history.push({ role: "user", content: query });
   const finalText = await agentLoop(history, context);
   context = updateContext();
-  console.log(finalText);
-  console.log();
+  print(finalText, "green");
+  print();
 }
 rl.close();

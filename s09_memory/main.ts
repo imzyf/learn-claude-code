@@ -39,7 +39,8 @@ import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
 import { createLogger, type SessionLogger } from "../lib/logger";
 import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
-import { textOf, zodTool } from "../lib/tools";
+import { colorize, print } from "../lib/terminal";
+import { printProse, textOf, zodTool } from "../lib/tools";
 
 const WORKDIR = process.cwd();
 const MEMORY_DIR = path.join(WORKDIR, ".memory");
@@ -56,10 +57,10 @@ export type LoopDeps = Deps & { memoryDir: string };
 const memoryIndexPath = (dir: string): string => path.join(dir, "MEMORY.md");
 
 // ═══════════════════════════════════════════════════════════
-//  NEW in s09: Memory System
+//  s09 新增：记忆系统
 // ═══════════════════════════════════════════════════════════
 
-// Python keeps a MEMORY_TYPES list; a union type does the same job in TS.
+// Python 用一个 MEMORY_TYPES 列表；TS 里用联合类型表达同一个约束。
 type MemoryType = "user" | "feedback" | "project" | "reference";
 
 export type MemoryFile = {
@@ -70,8 +71,7 @@ export type MemoryFile = {
   body: string;
 };
 
-// Note a JS gotcha vs Python: `text.split("---", 2)` in JS TRUNCATES the rest,
-// while Python keeps it in the last part — so slice by index instead.
+// 注意：JS 的 split("---", 2) 会截掉剩余部分，Python 不会 —— 这里改用 indexOf 按下标切。
 export function parseFrontmatter(text: string): {
   meta: Record<string, string>;
   body: string;
@@ -91,7 +91,7 @@ export function parseFrontmatter(text: string): {
   return { meta, body: text.slice(end + 3).trim() };
 }
 
-// Write a single memory file with YAML frontmatter.
+// 写入一个带 YAML frontmatter 的记忆文件，并重建索引。
 export function writeMemoryFile(
   dir: string,
   name: string,
@@ -110,6 +110,7 @@ export function writeMemoryFile(
   return filepath;
 }
 
+// 列出目录下所有记忆文件名（排除索引 MEMORY.md），按名排序。
 export function memoryFilenames(dir: string): string[] {
   if (!fs.existsSync(dir)) return [];
   return fs
@@ -118,7 +119,7 @@ export function memoryFilenames(dir: string): string[] {
     .sort();
 }
 
-// Rebuild MEMORY.md index from all memory files.
+// 由所有记忆文件重建 MEMORY.md 索引。
 export function rebuildIndex(dir: string): void {
   const lines: string[] = [];
   for (const filename of memoryFilenames(dir)) {
@@ -134,21 +135,21 @@ export function rebuildIndex(dir: string): void {
   );
 }
 
-// Read MEMORY.md index (injected into SYSTEM every turn).
+// 读取 MEMORY.md 索引（每轮注入 SYSTEM）。
 export function readMemoryIndex(dir: string): string {
   const indexPath = memoryIndexPath(dir);
   if (!fs.existsSync(indexPath)) return "";
   return fs.readFileSync(indexPath, "utf8").trim();
 }
 
-// Read a single memory file's full content.
+// 读取单个记忆文件的完整内容，不存在返回 null。
 export function readMemoryFile(dir: string, filename: string): string | null {
   const filepath = path.join(dir, filename);
   if (!fs.existsSync(filepath)) return null;
   return fs.readFileSync(filepath, "utf8");
 }
 
-// List all memory files with metadata.
+// 列出所有记忆文件及其元数据。
 export function listMemoryFiles(dir: string): MemoryFile[] {
   return memoryFilenames(dir).map((filename) => {
     const raw = fs.readFileSync(path.join(dir, filename), "utf8");
@@ -163,7 +164,7 @@ export function listMemoryFiles(dir: string): MemoryFile[] {
   });
 }
 
-// Collect the text of one message (string content or text parts).
+// 取一条消息的文本（字符串内容或 text 块）。
 export function messageText(m: Anthropic.MessageParam): string {
   if (typeof m.content === "string") return m.content;
   return m.content
@@ -172,9 +173,8 @@ export function messageText(m: Anthropic.MessageParam): string {
     .join(" ");
 }
 
-// Select relevant memory filenames by matching recent conversation against
-// memory names/descriptions. Uses a simple LLM call (or falls back to
-// keyword matching on name+description).
+// 用最近对话去匹配记忆的 name/description，挑出相关记忆文件名。
+// 先让 LLM 选（返回下标数组），失败则回退到 name+description 上的关键词匹配。
 export async function selectRelevantMemories(
   dir: string,
   messages: Anthropic.MessageParam[],
@@ -185,7 +185,7 @@ export async function selectRelevantMemories(
   const files = listMemoryFiles(dir);
   if (!files.length) return [];
 
-  // Collect recent user text for context
+  // 收集最近的用户输入作为上下文。
   const recentTexts: string[] = [];
   for (let i = messages.length - 1; i >= 0 && recentTexts.length < 3; i--) {
     if (messages[i].role === "user") recentTexts.push(messageText(messages[i]));
@@ -193,7 +193,7 @@ export async function selectRelevantMemories(
   const recent = recentTexts.reverse().join(" ").slice(0, 2000);
   if (!recent.trim()) return [];
 
-  // Build catalog of name + description for the LLM to choose from
+  // 给 LLM 一份「下标 + name + description」的目录供其挑选。
   const catalog = files
     .map((f, i) => `${i}: ${f.name} — ${f.description}`)
     .join("\n");
@@ -231,10 +231,10 @@ export async function selectRelevantMemories(
       return selected;
     }
   } catch {
-    // fall through to keyword matching
+    // 落到下面的关键词匹配兜底。
   }
 
-  // Fallback: keyword matching on name + description
+  // 兜底：拿较长的词去 name + description 里做关键词匹配。
   const keywords = recent
     .split(/\s+/)
     .filter((w) => w.length > 3)
@@ -250,7 +250,7 @@ export async function selectRelevantMemories(
   return selected;
 }
 
-// Load relevant memory content for injection into context.
+// 加载相关记忆的内容，包成一段注入上下文的文本。
 export async function loadMemories(
   dir: string,
   messages: Anthropic.MessageParam[],
@@ -275,7 +275,7 @@ type ExtractedMemory = {
   body?: string;
 };
 
-// Extract new memories from recent dialogue. Runs after each turn.
+// 从最近对话里提取新记忆，每轮结束后运行。
 export async function extractMemories(
   dir: string,
   messages: Anthropic.MessageParam[],
@@ -290,7 +290,7 @@ export async function extractMemories(
   const dialogue = dialogueParts.join("\n");
   if (!dialogue.trim()) return;
 
-  // Check existing memories to avoid duplicates
+  // 把已有记忆一并给 LLM，避免重复提取。
   const existing = listMemoryFiles(dir);
   const existingDesc = existing.length
     ? existing.map((m) => `- ${m.name}: ${m.description}`).join("\n")
@@ -334,15 +334,15 @@ export async function extractMemories(
       }
     }
     if (count)
-      console.log(`\n\x1b[33m[Memory: extracted ${count} new memories]\x1b[0m`);
+      logger.console(`[Memory] extracted ${count} new memories`, "yellow");
   } catch {
-    // extraction is best-effort; never break the main loop
+    // 提取是尽力而为，出错也不能中断主循环。
   }
 }
 
 const CONSOLIDATE_THRESHOLD = 10;
 
-// Merge duplicate/stale memories. Triggered when file count ≥ threshold.
+// 合并重复/过期记忆，文件数 ≥ 阈值时触发。
 export async function consolidateMemories(
   dir: string,
   deps: Deps,
@@ -383,7 +383,7 @@ export async function consolidateMemories(
     if (!match) return;
     const items: ExtractedMemory[] = JSON.parse(match[0]);
 
-    // Remove old memory files (keep MEMORY.md)
+    // 删掉旧记忆文件（保留 MEMORY.md），再按整合结果重写。
     for (const filename of memoryFilenames(dir)) {
       fs.unlinkSync(path.join(dir, filename));
     }
@@ -400,15 +400,16 @@ export async function consolidateMemories(
         );
       }
     }
-    console.log(
-      `\n\x1b[33m[Memory: consolidated ${files.length} → ${items.length} memories]\x1b[0m`,
+    logger.console(
+      `[Memory] consolidated ${files.length} → ${items.length} memories`,
+      "yellow",
     );
   } catch {
-    // consolidation is best-effort; never break the main loop
+    // 整合是尽力而为，出错也不能中断主循环。
   }
 }
 
-// Build SYSTEM with memory index
+// 用记忆索引拼出 SYSTEM prompt。
 export function buildSystem(dir: string): string {
   const index = readMemoryIndex(dir);
   const memoriesSection = index ? `\n\nMemories available:\n${index}` : "";
@@ -420,13 +421,14 @@ export function buildSystem(dir: string): string {
   );
 }
 
+// 子 agent 的 system prompt —— 没有 task，不能递归派生。
 const SUB_SYSTEM =
   `You are a coding agent at ${WORKDIR}. ` +
   "Complete the task you were given, then return a concise summary. " +
   "Do not delegate further.";
 
 // ═══════════════════════════════════════════════════════════
-//  FROM s02-s08 (skeleton): Basic tools
+//  来自 s02-s08（精简骨架）：基础工具
 // ═══════════════════════════════════════════════════════════
 
 export function runBash(command: string): string {
@@ -445,6 +447,7 @@ export function runBash(command: string): string {
   return out ? out.slice(0, 50_000) : "(no output)";
 }
 
+// 把路径限制在 WORKDIR 内，越界即抛错。
 export function safePath(p: string): string {
   const resolved = path.resolve(WORKDIR, p);
   if (resolved !== WORKDIR && !resolved.startsWith(WORKDIR + path.sep)) {
@@ -476,8 +479,8 @@ export function runEdit(p: string, oldText: string, newText: string): string {
   try {
     const filePath = safePath(p);
     const text = fs.readFileSync(filePath, "utf8");
-    // indexOf + slice instead of String.replace: replace would treat
-    // `$&`-style patterns in newText as special replacement syntax.
+    // 用 indexOf + slice 而非 String.replace：replace 会把 newText 里的
+    // `$&` 之类当成特殊替换语法。
     const i = text.indexOf(oldText);
     if (i === -1) return `Error: text not found in ${p}`;
     fs.writeFileSync(
@@ -502,7 +505,7 @@ export function runGlob(pattern: string): string {
 }
 
 // ═══════════════════════════════════════════════════════════
-//  Tool Definitions (skeleton — fewer tools to focus on memory)
+//  工具定义（精简骨架 —— 少几个工具，聚焦记忆本身）
 // ═══════════════════════════════════════════════════════════
 
 const bashSchema = z.object({ command: z.string() });
@@ -516,7 +519,7 @@ const editSchema = z.object({
 const globSchema = z.object({ pattern: z.string() });
 const taskSchema = z.object({ description: z.string() });
 
-// Shared by parent and subagent (Python re-declares SUB_TOOLS by hand)
+// parent 与 subagent 共用这三样基础工具（对应 Python 里手写的 SUB_TOOLS）。
 const subTools: Anthropic.Tool[] = [
   zodTool("bash", "Run a shell command.", bashSchema),
   zodTool("read_file", "Read file contents.", readSchema),
@@ -529,6 +532,7 @@ const SUB_SCHEMAS: Partial<Record<string, z.ZodObject>> = {
   write_file: writeSchema,
 };
 
+// parent 在 subagent 三张基础表之上追加 edit/glob/task。
 const tools: Anthropic.Tool[] = [
   ...subTools,
   zodTool("edit_file", "Replace exact text in a file once.", editSchema),
@@ -549,6 +553,7 @@ const SUB_HANDLERS: Partial<Record<string, (input: any) => string>> = {
   write_file: ({ path, content }) => runWrite(path, content),
 };
 
+// handler 可能是 async：task -> spawnSubagent 返回 Promise。
 const TOOL_HANDLERS: Partial<
   Record<string, (input: any, deps: Deps) => string | Promise<string>>
 > = {
@@ -560,15 +565,18 @@ const TOOL_HANDLERS: Partial<
 };
 
 // ═══════════════════════════════════════════════════════════
-//  FROM s06-s08 (simplified): Subagent — no hooks in s09
+//  来自 s06-s08（精简版）：Subagent —— s09 没有 hooks
 // ═══════════════════════════════════════════════════════════
 
 export async function spawnSubagent(
   description: string,
   deps: Deps,
 ): Promise<string> {
-  const { client, logger } = deps;
-  console.log(`\n\x1b[35m[Subagent spawned]\x1b[0m`);
+  const { client } = deps;
+  // 子 agent 用 scope="sub" 的 child logger：同一对文件，记录标注来源。
+  const logger = deps.logger.child("sub");
+
+  print("[Subagent spawned]", "magenta");
   const messages: Anthropic.MessageParam[] = [
     { role: "user", content: description },
   ]; // fresh context
@@ -593,6 +601,8 @@ export async function spawnSubagent(
     const results: Anthropic.ToolResultBlockParam[] = [];
     for (const block of response.content) {
       if (block.type !== "tool_use") continue;
+
+      print(`> [sub] [${block.name}] ${JSON.stringify(block.input)}`, "cyan");
       const schema = SUB_SCHEMAS[block.name];
       const handler = SUB_HANDLERS[block.name];
       const output =
@@ -600,9 +610,7 @@ export async function spawnSubagent(
           ? handler(schema.parse(block.input))
           : `Unknown: ${block.name}`;
       logger.toolResult(block.name, output);
-      console.log(
-        `  \x1b[90m[sub] ${block.name}: ${output.slice(0, 100)}\x1b[0m`,
-      );
+      print(`  [sub] [${block.name}] ${output.slice(0, 100)}`, "gray");
       results.push({
         type: "tool_result",
         tool_use_id: block.id,
@@ -612,23 +620,24 @@ export async function spawnSubagent(
     messages.push({ role: "user", content: results });
   }
 
-  console.log(`\x1b[35m[Subagent done]\x1b[0m`);
+  logger.console("[Subagent done]", "magenta");
+  // 兜底：命中安全上限时 lastText 保留最近一段 assistant 文本。
   return lastText || "Subagent stopped after 30 turns without final answer.";
 }
 
 // ═══════════════════════════════════════════════════════════
-//  FROM s08 (skeleton): Compaction pipeline
+//  来自 s08（精简骨架）：压缩流水线
 // ═══════════════════════════════════════════════════════════
 
 const CONTEXT_LIMIT = 50_000;
 const KEEP_RECENT = 3;
 const PERSIST_THRESHOLD = 30_000;
 
+// 用 JSON 字符数估算上下文大小 —— 不是 token 数，但零成本，够做阈值判断。
 export const estimateSize = (msgs: Anthropic.MessageParam[]): number =>
   JSON.stringify(msgs).length;
 
-// Replace an array's contents in place — callers hold the same reference
-// (mirrors Python's `messages[:] = ...`).
+// 原地替换数组内容 —— 调用方持有同一个引用（对应 Python 的 `messages[:] = ...`）。
 export function setMessages(
   messages: Anthropic.MessageParam[],
   next: Anthropic.MessageParam[],
@@ -636,22 +645,25 @@ export function setMessages(
   messages.splice(0, messages.length, ...next);
 }
 
+// 工具调用是携带 tool_use 内容块的 assistant 消息。
 const messageHasToolCall = (m: Anthropic.MessageParam): boolean =>
   m.role === "assistant" &&
   Array.isArray(m.content) &&
   m.content.some((b) => b.type === "tool_use");
 
-// Tool results are user messages carrying tool_result content blocks.
+// tool_result 是携带 tool_result 内容块的 user 消息。
 const isToolResultMessage = (m: Anthropic.MessageParam): boolean =>
   m.role === "user" &&
   Array.isArray(m.content) &&
   m.content.some((b) => typeof b !== "string" && b.type === "tool_result");
 
+// 取 tool_result 的文本 —— content 可能是字符串或内容块数组，统一成字符串来量长度。
 const outputText = (part: Anthropic.ToolResultBlockParam): string =>
   typeof part.content === "string"
     ? part.content
     : JSON.stringify(part.content);
 
+// L1: snipCompact —— 裁剪中间消息，保留头 3 条、尾 (maxMessages - 3) 条。
 export function snipCompact(
   messages: Anthropic.MessageParam[],
   maxMessages = 50,
@@ -659,6 +671,7 @@ export function snipCompact(
   if (messages.length <= maxMessages) return messages;
   let headEnd = 3;
   let tailStart = messages.length - (maxMessages - 3);
+  // 头尾边界都不能把「工具调用 / 工具结果」这一对拆开。
   if (headEnd > 0 && messageHasToolCall(messages[headEnd - 1])) {
     while (headEnd < messages.length && isToolResultMessage(messages[headEnd]))
       headEnd += 1;
@@ -679,6 +692,7 @@ export function snipCompact(
   ];
 }
 
+// 按出现顺序收集所有 tool_result 块 —— 返回原对象引用，调用方可原地修改。
 export function collectToolResults(
   messages: Anthropic.MessageParam[],
 ): Anthropic.ToolResultBlockParam[] {
@@ -693,6 +707,7 @@ export function collectToolResults(
   return parts;
 }
 
+// L2: microCompact —— 把较早的长工具结果换成占位符，保留最近 KEEP_RECENT 条。
 export function microCompact(
   messages: Anthropic.MessageParam[],
 ): Anthropic.MessageParam[] {
@@ -706,6 +721,7 @@ export function microCompact(
   return messages;
 }
 
+// 超长输出写到磁盘，返回「路径 + 预览」的占位文本；短输出原样返回。
 export function persistLargeOutput(toolUseId: string, output: string): string {
   if (output.length <= PERSIST_THRESHOLD) return output;
   fs.mkdirSync(TOOL_RESULTS_DIR, { recursive: true });
@@ -714,11 +730,13 @@ export function persistLargeOutput(toolUseId: string, output: string): string {
   return `<persisted-output>\nFull: ${filePath}\nPreview:\n${output.slice(0, 2000)}\n</persisted-output>`;
 }
 
+// L3: toolResultBudget —— 最新一轮结果超预算时，从最大的开始落盘。
 export function toolResultBudget(
   messages: Anthropic.MessageParam[],
   maxBytes = 200_000,
 ): Anthropic.MessageParam[] {
   const last = messages[messages.length - 1];
+  // 只看最后一条消息 —— 预算只管最新一轮的工具结果，更早的交给 L2。
   if (last?.role !== "user" || !Array.isArray(last.content)) return messages;
   const blocks = last.content.filter(
     (b): b is Anthropic.ToolResultBlockParam =>
@@ -739,6 +757,7 @@ export function toolResultBudget(
   return messages;
 }
 
+// 压缩前把完整历史落成 JSONL 存档 —— 信息只是移出上下文，并未真正丢失。
 function writeTranscript(messages: Anthropic.MessageParam[]): string {
   fs.mkdirSync(TRANSCRIPT_DIR, { recursive: true });
   const filePath = path.join(
@@ -752,18 +771,21 @@ function writeTranscript(messages: Anthropic.MessageParam[]): string {
   return filePath;
 }
 
+// 用一次独立的 API 调用把整段历史浓缩成结构化摘要。
 export async function summarizeHistory(
   messages: Anthropic.MessageParam[],
   deps: Deps,
 ): Promise<string> {
-  const { client, logger } = deps;
+  const { client } = deps;
+  // 摘要是独立子请求：用 child scope 打标记，日志里与主循环区分开。
+  const logger = deps.logger.child("compact");
   const conversation = JSON.stringify(messages).slice(0, 80_000);
   const prompt =
     "Summarize this coding-agent conversation so work can continue.\n" +
     "Preserve: 1. current goal, 2. key findings, 3. files changed, 4. remaining work, 5. user constraints.\n\n" +
     conversation;
   const request: Anthropic.MessageParam[] = [{ role: "user", content: prompt }];
-  logger.request(request);
+  logger.request(request, true);
   const response = await client.messages.create({
     model: MODEL_ID,
     max_tokens: 2000,
@@ -773,6 +795,7 @@ export async function summarizeHistory(
   return textOf(response).trim();
 }
 
+// L4: autoCompact —— 落盘存档 + LLM 完整摘要，用摘要替换整段历史。
 export async function compactHistory(
   messages: Anthropic.MessageParam[],
   deps: Deps,
@@ -782,6 +805,7 @@ export async function compactHistory(
   return [{ role: "user", content: `[Compacted]\n\n${summary}` }];
 }
 
+// 应急：reactiveCompact —— API 仍报 prompt_too_long 时触发，摘要头部、保留尾部。
 export async function reactiveCompact(
   messages: Anthropic.MessageParam[],
   deps: Deps,
@@ -794,6 +818,7 @@ export async function reactiveCompact(
     isToolResultMessage(messages[tailStart]) &&
     messageHasToolCall(messages[tailStart - 1])
   ) {
+    // 尾部开头是 tool_result 时，把配对的 tool_use 一起留下，避免孤立引用。
     tailStart -= 1;
   }
   const summary = await summarizeHistory(messages.slice(0, tailStart), deps);
@@ -804,7 +829,7 @@ export async function reactiveCompact(
 }
 
 // ═══════════════════════════════════════════════════════════
-//  agentLoop — s09: inject memories + extract after each turn
+//  agentLoop —— s09：注入相关记忆 + 每轮结束后提取新记忆
 // ═══════════════════════════════════════════════════════════
 
 const MAX_REACTIVE_RETRIES = 1;
@@ -815,31 +840,31 @@ export async function agentLoop(
 ): Promise<string> {
   const { client, logger, memoryDir } = deps;
   let reactiveRetries = 0;
-  // s09: inject relevant memory content into the current user turn
+  // s09：把相关记忆内容注入到当前这轮 user 消息。
   const memoriesContent = await loadMemories(memoryDir, messages, deps);
   const last = messages[messages.length - 1];
   const memoryTurn =
     last && typeof last.content === "string" ? messages.length - 1 : null;
-  // s09: build system once per user turn; memory is updated after the loop returns
+  // s09：每轮用户输入只构建一次 SYSTEM；记忆在本次循环返回后再更新。
   const system = buildSystem(memoryDir);
 
   while (true) {
-    // s09: save pre-compaction snapshot for accurate memory extraction
+    // s09：留一份压缩前快照，供后面精确提取记忆。
     const preCompact = structuredClone(messages);
 
-    // s08: compaction pipeline (budget → snip → micro)
+    // s08：压缩流水线（budget → snip → micro）。
     setMessages(messages, toolResultBudget(messages));
     setMessages(messages, snipCompact(messages));
     setMessages(messages, microCompact(messages));
 
     if (estimateSize(messages) > CONTEXT_LIMIT) {
-      console.log("[auto compact]");
+      logger.console("[auto compact]", "yellow");
       setMessages(messages, await compactHistory(messages, deps));
     }
 
     let response: Anthropic.Message;
     try {
-      // memories go into a request-time copy — history itself stays clean
+      // 记忆只进请求时的临时副本 —— 历史本身保持干净。
       let requestMessages = messages;
       const turn =
         memoryTurn !== null && memoryTurn < messages.length
@@ -868,7 +893,7 @@ export async function agentLoop(
         (msg.includes("prompt_too_long") || msg.includes("too many tokens")) &&
         reactiveRetries < MAX_REACTIVE_RETRIES
       ) {
-        console.log("[reactive compact]");
+        logger.console("[reactive compact]", "yellow");
         setMessages(messages, await reactiveCompact(messages, deps));
         reactiveRetries += 1;
         continue;
@@ -878,7 +903,7 @@ export async function agentLoop(
 
     messages.push({ role: "assistant", content: response.content });
     if (response.stop_reason !== "tool_use") {
-      // s09: extract from pre-compaction snapshot for full fidelity
+      // s09：用压缩前的快照提取，保证信息完整。
       await extractMemories(memoryDir, preCompact, deps);
       await consolidateMemories(memoryDir, deps);
       return textOf(response);
@@ -886,8 +911,10 @@ export async function agentLoop(
 
     const results: Anthropic.ToolResultBlockParam[] = [];
     for (const block of response.content) {
-      if (block.type !== "tool_use") continue;
-      console.log(`\x1b[36m> ${block.name}\x1b[0m`);
+      if (block.type !== "tool_use") {
+        printProse(block);
+        continue;
+      }
       const schema = TOOL_SCHEMAS[block.name];
       const handler = TOOL_HANDLERS[block.name];
       const output =
@@ -895,7 +922,6 @@ export async function agentLoop(
           ? await handler(schema.parse(block.input), deps)
           : `Unknown: ${block.name}`;
       logger.toolResult(block.name, output);
-      console.log(output.slice(0, 200));
       results.push({
         type: "tool_result",
         tool_use_id: block.id,
@@ -906,7 +932,7 @@ export async function agentLoop(
   }
 }
 
-// ── Entry point ──────────────────────────────────────────
+// ── 入口 ──────────────────────────────────────────
 // import.meta.main 只在文件被直接运行时为 true。
 if (import.meta.main) {
   const client = createClient();
@@ -923,16 +949,16 @@ if (import.meta.main) {
     process.exit(0);
   });
 
-  console.log("s09: Memory — persistent cross-session knowledge");
-  console.log("输入问题，回车发送。输入 q 退出。\n");
+  print("s09: Memory — 持久化的跨会话知识", "cyan");
+  print("输入问题，回车发送。输入 q 退出。\n", "green");
 
   const history: Anthropic.MessageParam[] = [];
   while (true) {
     let query: string;
     try {
-      query = await rl.question("\x1b[36ms09 >> \x1b[0m");
+      query = await rl.question(colorize("s09 >> ", "cyan"));
     } catch {
-      break; // stdin closed (Ctrl+D)
+      break; // stdin 关闭（Ctrl+D）
     }
     const q = query.trim().toLowerCase();
     if (q === "" || q === "q" || q === "exit") break;
@@ -944,8 +970,8 @@ if (import.meta.main) {
       logger,
       memoryDir: MEMORY_DIR,
     });
-    console.log(finalText);
-    console.log();
+    print(finalText, "green");
+    print();
   }
   rl.close();
 }

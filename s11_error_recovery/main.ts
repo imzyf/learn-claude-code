@@ -37,7 +37,8 @@ import * as readline from "node:readline/promises";
 import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
 import { createClient, MODEL_ID } from "../lib/model";
-import { textOf, zodTool } from "../lib/tools";
+import { colorize, print } from "../lib/terminal";
+import { printProse, textOf, zodTool } from "../lib/tools";
 
 const client = createClient();
 
@@ -51,7 +52,7 @@ const FALLBACK_MODEL = process.env.FALLBACK_MODEL_ID;
 const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
-// ── Constants ──
+// ── 常量 ──
 
 const ESCALATED_MAX_TOKENS = 64_000;
 const DEFAULT_MAX_TOKENS = 8000;
@@ -63,7 +64,7 @@ const CONTINUATION_PROMPT =
   "Output token limit hit. Resume directly — no apology, no recap. Pick up mid-thought.";
 
 // ═══════════════════════════════════════════════════════════
-//  FROM s10 (synced): Prompt Assembly
+//  来自 s10（同步）：Prompt 组装
 // ═══════════════════════════════════════════════════════════
 
 const PROMPT_SECTIONS = {
@@ -100,7 +101,7 @@ const contextKey = (context: Context): string =>
 function getSystemPrompt(context: Context): string {
   const key = contextKey(context);
   if (key === lastContextKey && lastPrompt) {
-    console.log("  \x1b[90m[cache hit] system prompt unchanged\x1b[0m");
+    print("  [cache hit] system prompt unchanged", "gray");
     return lastPrompt;
   }
   lastContextKey = key;
@@ -108,12 +109,12 @@ function getSystemPrompt(context: Context): string {
 
   const loaded = ["identity", "tools", "workspace"];
   if (context.memories) loaded.push("memory");
-  console.log(`  \x1b[32m[assembled] sections: ${loaded.join(", ")}\x1b[0m`);
+  print(`  [assembled] sections: ${loaded.join(", ")}`, "green");
   return lastPrompt;
 }
 
 // ═══════════════════════════════════════════════════════════
-//  FROM s02 (unchanged): Basic tools
+//  来自 s02（原样复用）：基础工具
 // ═══════════════════════════════════════════════════════════
 
 function safePath(p: string): string {
@@ -192,10 +193,10 @@ const TOOL_HANDLERS: Partial<Record<string, (input: any) => string>> = {
 };
 
 // ═══════════════════════════════════════════════════════════
-//  NEW in s11: Error Recovery
+//  s11 新增：错误恢复
 // ═══════════════════════════════════════════════════════════
 
-// Track recovery attempts across the loop.
+// 跨循环跟踪恢复尝试的状态。
 class RecoveryState {
   hasEscalated = false;
   recoveryCount = 0;
@@ -204,7 +205,7 @@ class RecoveryState {
   currentModel = PRIMARY_MODEL;
 }
 
-// Exponential backoff with jitter (seconds). Retry-After takes priority.
+// 带抖动的指数退避（秒）；Retry-After 优先。
 function retryDelay(attempt: number, retryAfter?: number): number {
   if (retryAfter) return retryAfter;
   const base = Math.min(BASE_DELAY_MS * 2 ** attempt, 32_000) / 1000;
@@ -212,7 +213,7 @@ function retryDelay(attempt: number, retryAfter?: number): number {
   return base + jitter;
 }
 
-// Anthropic SDK's APIError carries `status`; fall back to message text below.
+// Anthropic SDK 的 APIError 带 status；取不到时下面兜底看错误文本。
 function errorStatus(e: unknown): number | undefined {
   if (typeof e === "object" && e !== null && "status" in e) {
     const s = (e as { status?: unknown }).status;
@@ -222,8 +223,8 @@ function errorStatus(e: unknown): number | undefined {
 }
 
 /**
- * Exponential backoff for transient errors (429/529).
- * Non-transient errors are re-thrown for the outer handler.
+ * 瞬时错误（429/529）的指数退避。
+ * 非瞬时错误重新抛出，交给外层处理。
  */
 async function withRetry<T>(
   fn: () => Promise<T>,
@@ -239,18 +240,19 @@ async function withRetry<T>(
       const msg = errMsg(e).toLowerCase();
       const status = errorStatus(e);
 
-      // 429 rate limit -> exponential backoff
+      // 429 限流 -> 指数退避
       if (status === 429 || name.includes("ratelimit") || msg.includes("429")) {
         const delay = retryDelay(attempt);
-        console.log(
-          `  \x1b[33m[429 rate limit] retry ${attempt + 1}/${MAX_RETRIES},` +
-            ` wait ${delay.toFixed(1)}s\x1b[0m`,
+        print(
+          `  [429 rate limit] retry ${attempt + 1}/${MAX_RETRIES},` +
+            ` wait ${delay.toFixed(1)}s`,
+          "yellow",
         );
         await sleep(delay * 1000);
         continue;
       }
 
-      // 529 overloaded -> exponential backoff + fallback model
+      // 529 过载 -> 指数退避 + 切备用模型
       if (
         status === 529 ||
         name.includes("overloaded") ||
@@ -262,34 +264,37 @@ async function withRetry<T>(
           if (FALLBACK_MODEL) {
             state.currentModel = FALLBACK_MODEL;
             state.consecutive529 = 0;
-            console.log(
-              `  \x1b[31m[529 x${MAX_CONSECUTIVE_529}] switching to ${FALLBACK_MODEL}\x1b[0m`,
+            print(
+              `  [529 x${MAX_CONSECUTIVE_529}] switching to ${FALLBACK_MODEL}`,
+              "red",
             );
           } else {
             state.consecutive529 = 0;
-            console.log(
-              `  \x1b[31m[529 x${MAX_CONSECUTIVE_529}]` +
-                ` no FALLBACK_MODEL_ID configured, continuing retry\x1b[0m`,
+            print(
+              `  [529 x${MAX_CONSECUTIVE_529}]` +
+                ` no FALLBACK_MODEL_ID configured, continuing retry`,
+              "red",
             );
           }
         }
         const delay = retryDelay(attempt);
-        console.log(
-          `  \x1b[33m[529 overloaded] retry ${attempt + 1}/${MAX_RETRIES},` +
-            ` wait ${delay.toFixed(1)}s\x1b[0m`,
+        print(
+          `  [529 overloaded] retry ${attempt + 1}/${MAX_RETRIES},` +
+            ` wait ${delay.toFixed(1)}s`,
+          "yellow",
         );
         await sleep(delay * 1000);
         continue;
       }
 
-      // Not transient -> re-throw for outer try/catch
+      // 非瞬时错误 -> 重新抛出，交给外层 try/catch
       throw e;
     }
   }
   throw new Error(`Max retries (${MAX_RETRIES}) exceeded`);
 }
 
-// Check whether an API error indicates prompt/context too long.
+// 判断 API 错误是否属于「prompt/上下文过长」。
 function isPromptTooLongError(e: unknown): boolean {
   const msg = errMsg(e).toLowerCase();
   return (
@@ -301,17 +306,14 @@ function isPromptTooLongError(e: unknown): boolean {
 }
 
 /**
- * Emergency compact — teaching version keeps last N messages.
- * Real CC generates a compact summary via LLM, then retries with
- * the compacted message list. Teaching version simplifies to tail
- * retention since s08/s09 already cover LLM-based compact.
+ * 应急压缩 —— 教学版只保留最后 N 条消息。
+ * 真实 CC 会用 LLM 生成压缩摘要再重试；这里简化为只留尾部，
+ * 因为基于 LLM 的压缩在 s08/s09 已经讲过。
  */
 function reactiveCompact(
   messages: Anthropic.MessageParam[],
 ): Anthropic.MessageParam[] {
-  console.log(
-    "  \x1b[31m[reactive compact] trimming to last 5 messages\x1b[0m",
-  );
+  print("  [reactive compact] trimming to last 5 messages", "red");
   const tail = messages.slice(-5);
   return [
     {
@@ -325,7 +327,7 @@ function reactiveCompact(
 
 // ── Context ──
 
-// Derive context from real state: which tools exist, whether memory files exist.
+// 由真实状态推导 context：有哪些工具、记忆文件是否存在。
 function updateContext(): Context {
   let memories = "";
   if (fs.existsSync(MEMORY_INDEX)) {
@@ -339,7 +341,7 @@ function updateContext(): Context {
 }
 
 // ═══════════════════════════════════════════════════════════
-//  agentLoop — error recovery wrapping LLM calls
+//  agentLoop —— 用错误恢复包裹 LLM 调用
 // ═══════════════════════════════════════════════════════════
 
 async function agentLoop(
@@ -351,7 +353,7 @@ async function agentLoop(
   let maxTokens = DEFAULT_MAX_TOKENS;
 
   while (true) {
-    // ── LLM call: withRetry handles 429/529, outer handles rest ──
+    // ── LLM 调用：withRetry 处理 429/529，外层处理其余错误 ──
     const callLLM = () =>
       client.messages.create(
         {
@@ -361,80 +363,81 @@ async function agentLoop(
           tools,
           max_tokens: maxTokens,
         },
-        { maxRetries: 0 }, // withRetry above owns backoff, not the SDK
+        { maxRetries: 0 }, // 退避由上面的 withRetry 负责，不交给 SDK
       );
     let result: Awaited<ReturnType<typeof callLLM>>;
     try {
       result = await withRetry(callLLM, state);
     } catch (e) {
-      // Path 2: prompt_too_long -> reactive compact (once)
+      // 路径 2：prompt_too_long -> 应急压缩（一次）
       if (isPromptTooLongError(e)) {
         if (!state.hasAttemptedReactiveCompact) {
           messages.splice(0, messages.length, ...reactiveCompact(messages));
           state.hasAttemptedReactiveCompact = true;
           continue;
         }
-        console.log(
-          "  \x1b[31m[unrecoverable] still too long after compact\x1b[0m",
-        );
+        print("  [unrecoverable] still too long after compact", "red");
         const errText = "[Error] Context too large, cannot continue.";
         messages.push({ role: "assistant", content: errText });
         return errText;
       }
 
-      // Unrecoverable
+      // 无法恢复
       const name = e instanceof Error ? e.name : "Error";
-      console.log(
-        `  \x1b[31m[unrecoverable] ${name}: ${errMsg(e).slice(0, 100)}\x1b[0m`,
-      );
+      print(`  [unrecoverable] ${name}: ${errMsg(e).slice(0, 100)}`, "red");
       const errText = `[Error] ${name}: ${errMsg(e).slice(0, 200)}`;
       messages.push({ role: "assistant", content: errText });
       return errText;
     }
 
-    // ── Path 1: max_tokens (stop_reason "max_tokens") -> escalate or continue ──
+    // ── 路径 1：max_tokens（stop_reason "max_tokens"）-> 升级或续写 ──
     if (result.stop_reason === "max_tokens") {
-      // First escalation: don't append truncated output, retry same request
+      // 第一次升级：不追加被截断的输出，原样重试本次请求
       if (!state.hasEscalated) {
         maxTokens = ESCALATED_MAX_TOKENS;
         state.hasEscalated = true;
-        console.log(
-          `  \x1b[33m[max_tokens] escalating ${DEFAULT_MAX_TOKENS} -> ${ESCALATED_MAX_TOKENS}\x1b[0m`,
+        print(
+          `  [max_tokens] escalating ${DEFAULT_MAX_TOKENS} -> ${ESCALATED_MAX_TOKENS}`,
+          "yellow",
         );
         continue;
       }
-      // 64K still truncated: save truncated output + continuation prompt
+      // 64K 仍被截断：保存截断输出 + 续写 prompt
       messages.push({ role: "assistant", content: result.content });
       if (state.recoveryCount < MAX_RECOVERY_RETRIES) {
         messages.push({ role: "user", content: CONTINUATION_PROMPT });
         state.recoveryCount += 1;
-        console.log(
-          `  \x1b[33m[max_tokens] continuation ${state.recoveryCount}/${MAX_RECOVERY_RETRIES}\x1b[0m`,
+        print(
+          `  [max_tokens] continuation ${state.recoveryCount}/${MAX_RECOVERY_RETRIES}`,
+          "yellow",
         );
         continue;
       }
-      console.log("  \x1b[31m[max_tokens] recovery limit reached\x1b[0m");
+      print("  [max_tokens] recovery limit reached", "red");
       return textOf(result);
     }
 
-    // Normal completion: append assistant response
+    // 正常结束：追加 assistant 回复
     messages.push({ role: "assistant", content: result.content });
     if (result.stop_reason !== "tool_use") {
       return textOf(result);
     }
 
-    // ── Tool execution ──
+    // ── 工具执行 ──
     const results: Anthropic.ToolResultBlockParam[] = [];
     for (const block of result.content) {
-      if (block.type !== "tool_use") continue;
-      console.log(`\x1b[36m> ${block.name}\x1b[0m`);
+      if (block.type !== "tool_use") {
+        printProse(block);
+        continue;
+      }
+      print(`> ${block.name}`, "cyan");
       const schema = TOOL_SCHEMAS[block.name];
       const handler = TOOL_HANDLERS[block.name];
       const output =
         handler && schema
           ? handler(schema.parse(block.input))
           : `Unknown: ${block.name}`;
-      console.log(output.slice(0, 200));
+      print(output.slice(0, 200));
       results.push({
         type: "tool_result",
         tool_use_id: block.id,
@@ -448,9 +451,9 @@ async function agentLoop(
   }
 }
 
-// ── Entry point ──────────────────────────────────────────
-console.log("s11: error recovery");
-console.log("输入问题，回车发送。输入 q 退出。\n");
+// ── 入口 ──────────────────────────────────────────
+print("s11: Error Recovery — 三条恢复路径 + 指数退避", "cyan");
+print("输入问题，回车发送。输入 q 退出。\n", "green");
 
 const rl = readline.createInterface({
   input: process.stdin,
@@ -466,9 +469,9 @@ let context = updateContext();
 while (true) {
   let query: string;
   try {
-    query = await rl.question("\x1b[36ms11 >> \x1b[0m");
+    query = await rl.question(colorize("s11 >> ", "cyan"));
   } catch {
-    break; // stdin closed (Ctrl+D)
+    break; // stdin 关闭（Ctrl+D）
   }
   const q = query.trim().toLowerCase();
   if (q === "" || q === "q" || q === "exit") break;
@@ -476,7 +479,7 @@ while (true) {
   history.push({ role: "user", content: query });
   const finalText = await agentLoop(history, context);
   context = updateContext();
-  console.log(finalText);
-  console.log();
+  print(finalText, "green");
+  print();
 }
 rl.close();

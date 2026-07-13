@@ -74,7 +74,7 @@ describe("memory files", () => {
       "Use tabs everywhere.",
     );
 
-    expect(memoryFilenames(tmp)).toEqual(["user-tabs.md"]); // slug, excludes MEMORY.md
+    expect(memoryFilenames(tmp)).toEqual(["user-tabs.md"]); // slug 化文件名，排除 MEMORY.md
     expect(readMemoryIndex(tmp)).toContain(
       "- [User Tabs](user-tabs.md) — prefers tabs over spaces",
     );
@@ -123,7 +123,7 @@ describe("selectRelevantMemories", () => {
   });
 
   it("falls back to keyword matching when the model call fails", async () => {
-    const client = fakeClient(); // no responses → create throws → fallback
+    const client = fakeClient(); // 无预设响应 → create 抛错 → 走关键词兜底
 
     const selected = await selectRelevantMemories(
       tmp,
@@ -145,7 +145,7 @@ describe("selectRelevantMemories", () => {
     );
 
     expect(selected).toEqual([]);
-    expect(client.messages.create).not.toHaveBeenCalled(); // short-circuits before any API call
+    expect(client.messages.create).not.toHaveBeenCalled(); // 无记忆文件即提前短路，不发任何 API
     fs.rmSync(empty, { recursive: true, force: true });
   });
 });
@@ -218,7 +218,7 @@ describe("agentLoop", () => {
         "tool_use",
       ),
       fakeMessage([textBlock("done")], "end_turn"),
-      fakeMessage([textBlock("[]")], "end_turn"), // extractMemories → nothing
+      fakeMessage([textBlock("[]")], "end_turn"), // extractMemories：无新记忆
     );
     const messages: Anthropic.MessageParam[] = [
       { role: "user", content: "go" },
@@ -234,7 +234,7 @@ describe("agentLoop", () => {
     expect(client.messages.create).toHaveBeenCalledTimes(3);
     const toolResults = messages[2].content as Anthropic.ToolResultBlockParam[];
     expect(toolResults[0].content).toBe("hi");
-    expect(memoryFilenames(tmp)).toEqual([]); // no memory written
+    expect(memoryFilenames(tmp)).toEqual([]); // 未写入任何记忆
   });
 
   it("dispatches task to a subagent and keeps only its summary", async () => {
