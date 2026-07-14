@@ -38,16 +38,24 @@ export interface SessionLogger {
   child(scope: string): SessionLogger;
 }
 
+// 年月日时分秒（系统本地时区，含毫秒）前缀，文件名可用格式；其他模块的落盘文件名
+// （如 s08 的 transcript / tool-result）复用同一格式，保持仓库内时间戳文件名风格统一。
+export function timestampPrefix(): string {
+  const d = new Date();
+  const pad = (n: number, len = 2) => String(n).padStart(len, "0");
+  return (
+    `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T` +
+    `${pad(d.getHours())}-${pad(d.getMinutes())}-${pad(d.getSeconds())}-${pad(d.getMilliseconds(), 3)}`
+  );
+}
+
 export function createLogger(sessionDir: string): SessionLogger {
-  // 文件名前缀只取 session 名前三个字母（如 s07_skill_loading → s07）。
-  const sessionName = path.basename(sessionDir).slice(0, 3);
   const logDir = path.join(sessionDir, ".log");
   fs.mkdirSync(logDir, { recursive: true });
 
-  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const base = path.join(logDir, `${sessionName}-${stamp}`);
-  const json = fs.createWriteStream(`${base}.json`, { flags: "a" });
-  const text = fs.createWriteStream(`${base}.log`, { flags: "a" });
+  const base = path.join(logDir, timestampPrefix());
+  const json = fs.createWriteStream(`${base}_api.json`, { flags: "a" });
+  const text = fs.createWriteStream(`${base}_transcript.log`, { flags: "a" });
 
   const costMeter = createCostMeter();
 

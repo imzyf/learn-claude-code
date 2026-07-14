@@ -152,6 +152,16 @@ describe("microCompact", () => {
     for (const part of collectToolResults(messages))
       expect(part.content).toBe("w".repeat(200));
   });
+
+  it("protects the latest round even when a reminder trails it", () => {
+    const messages: Anthropic.MessageParam[] = [
+      ...parallelToolRound(["p1", "p2", "p3", "p4"], () => "w".repeat(200)),
+      { role: "user", content: "<reminder>Update your todos.</reminder>" },
+    ];
+    microCompact(messages, noopLogger);
+    for (const part of collectToolResults(messages))
+      expect(part.content).toBe("w".repeat(200));
+  });
 });
 
 describe("toolResultBudget", () => {

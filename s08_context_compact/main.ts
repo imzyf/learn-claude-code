@@ -47,7 +47,11 @@ import * as path from "node:path";
 import * as readline from "node:readline/promises";
 import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
-import { createLogger, type SessionLogger } from "../lib/logger";
+import {
+  createLogger,
+  type SessionLogger,
+  timestampPrefix,
+} from "../lib/logger";
 import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
 import { colorize, print } from "../lib/terminal";
 import { printProse, textOf, zodTool } from "../lib/tools";
@@ -86,22 +90,30 @@ const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 //  s08 新增：四层压缩流水线
 // ═══════════════════════════════════════════════════════════
 
-// 五个阈值启动时可用 COMPACT_* 环境变量覆盖（默认值见 defaults.env，
-// 可复制到仓库根目录 .env，pnpm dev 会自动加载）。
+// 七个阈值启动时可用 L{n}_COMPACT_* 环境变量覆盖（前缀是它属于哪一层压缩，
+// 默认值见 defaults.env，可复制到仓库根目录 .env，pnpm dev 会自动加载）。
 // L1 裁剪阈值：消息数超过它就裁掉中间部分。
-const SNIP_MAX_MESSAGES = Number(process.env.COMPACT_SNIP_MAX_MESSAGES ?? 50);
+const SNIP_MAX_MESSAGES = Number(
+  process.env.L1_COMPACT_SNIP_MAX_MESSAGES ?? 50,
+);
+// L1 裁剪时保留的头部消息数（尾部保留数 = maxMessages - 头部）。
+const SNIP_KEEP_HEAD = Number(process.env.L1_COMPACT_SNIP_KEEP_HEAD ?? 3);
 // L2 保留最近 N 条工具结果不动（最后一条消息整条不压），只压缩更早的。
-const KEEP_RECENT = Number(process.env.COMPACT_KEEP_RECENT ?? 3);
+const KEEP_RECENT = Number(process.env.L2_COMPACT_KEEP_RECENT ?? 3);
+// L2 微压缩阈值：单条工具结果短于它就不值得压缩。
+const MICRO_COMPACT_MIN_LENGTH = Number(
+  process.env.L2_COMPACT_MICRO_MIN_LENGTH ?? 120,
+);
 // L3 预算：最新一轮 tool_result 总量超过它才开始落盘。
 const TOOL_RESULT_BUDGET = Number(
-  process.env.COMPACT_TOOL_RESULT_BUDGET ?? 200_000,
+  process.env.L3_COMPACT_TOOL_RESULT_BUDGET ?? 200_000,
 );
 // L3 落盘阈值：单条工具结果超过该长度才值得写到磁盘。
 const PERSIST_THRESHOLD = Number(
-  process.env.COMPACT_PERSIST_THRESHOLD ?? 30_000,
+  process.env.L3_COMPACT_PERSIST_THRESHOLD ?? 30_000,
 );
 // L4 触发阈值：估算大小（JSON 字符数，不是 token）超过它就做 LLM 摘要。
-const CONTEXT_LIMIT = Number(process.env.COMPACT_CONTEXT_LIMIT ?? 50_000);
+const CONTEXT_LIMIT = Number(process.env.L4_COMPACT_CONTEXT_LIMIT ?? 50_000);
 
 // 用 JSON 字符数估算上下文大小 —— 不是 token 数，但零成本，够做阈值判断。
 export const estimateSize = (msgs: Anthropic.MessageParam[]): number =>
@@ -141,8 +153,8 @@ export function snipCompact(
 ): Anthropic.MessageParam[] {
   if (messages.length <= maxMessages) return messages;
 
-  const keepHead = 3;
-  const keepTail = maxMessages - 3;
+  const keepHead = SNIP_KEEP_HEAD;
+  const keepTail = maxMessages - SNIP_KEEP_HEAD;
 
   let headEnd = keepHead;
   let tailStart = messages.length - keepTail;
@@ -184,17 +196,24 @@ export function snipCompact(
     .slice(headEnd, tailStart)
     .map((m, i) => `- [${headEnd + i}] ${m.role}: ${messagePreview(m)}`);
 
-  print(`[COMPACT L1] snip compact: ${snipped} messages removed`, "yellow");
-  logger.section(
-    `[COMPACT L1] snip compact (${snipped} removed)`,
-    removed.join("\n"),
-  );
-
-  return [
+  const next: Anthropic.MessageParam[] = [
     ...messages.slice(0, headEnd),
     { role: "user", content: `[snipped ${snipped} messages]` },
     ...messages.slice(tailStart),
   ];
+  const before = estimateSize(messages);
+  const after = estimateSize(next);
+
+  print(
+    `[COMPACT L1] snip compact: ${snipped} messages removed (${before} → ${after} chars)`,
+    "yellow",
+  );
+  logger.section(
+    `[COMPACT L1] snip compact (${snipped} removed, ${before} → ${after} chars)`,
+    removed.join("\n"),
+  );
+
+  return next;
 }
 
 // L2: microCompact —— 把较早的工具结果换成占位符
@@ -203,16 +222,19 @@ export function microCompact(
   logger: SessionLogger,
 ): Anthropic.MessageParam[] {
   const toolResults = collectToolResults(messages);
-  // 最后一条消息可能是模型还没看到的最新一轮并行结果 —— 整条不压：
-  // 保留数取 KEEP_RECENT 与它的块数中的较大值。
-  const lastRound = collectToolResults(messages.slice(-1)).length;
-  const keep = Math.max(KEEP_RECENT, lastRound);
+  // 最新一轮并行结果模型还没看到 —— 整条不压。末尾可能是 reminder 之类不带
+  // tool_result 的消息，要向上找到最近一条真正带结果的消息，取它的块数。
+  const keep = Math.max(KEEP_RECENT, lastRoundSize(messages));
   if (toolResults.length <= keep) return messages;
+  const before = estimateSize(messages);
 
   // 最近 keep 条之外的长结果原地换成占位符（短结果不值得动）。
   const replaced: string[] = [];
   for (const part of toolResults.slice(0, -keep)) {
-    if (typeof part.content === "string" && part.content.length > 120) {
+    if (
+      typeof part.content === "string" &&
+      part.content.length > MICRO_COMPACT_MIN_LENGTH
+    ) {
       // tool_result 块上有啥记啥：id + 原长度 + 是否 error + 原内容开头预览。
       const flag = part.is_error ? " (error)" : "";
       const preview = part.content.slice(0, 80).replace(/\s+/g, " ").trim();
@@ -224,17 +246,26 @@ export function microCompact(
   }
 
   if (replaced.length > 0) {
+    const after = estimateSize(messages);
     print(
-      `[COMPACT L2] micro compact: ${replaced.length} tool results replaced`,
+      `[COMPACT L2] micro compact: ${replaced.length} tool results replaced (${before} → ${after} chars)`,
       "yellow",
     );
     logger.section(
-      `[COMPACT L2] micro compact (${replaced.length} replaced)`,
+      `[COMPACT L2] micro compact (${replaced.length} replaced, ${before} → ${after} chars)`,
       replaced.join("\n"),
     );
   }
 
   return messages;
+}
+// 从末尾向上找到最近一条真正带 tool_result 的消息，返回它的块数（找不到返回 0）。
+export function lastRoundSize(messages: Anthropic.MessageParam[]): number {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const count = collectToolResults([messages[i]]).length;
+    if (count > 0) return count;
+  }
+  return 0;
 }
 // 按出现顺序收集所有 tool_result 块 —— 返回原对象引用，调用方可原地修改。
 export function collectToolResults(
@@ -270,6 +301,7 @@ export function toolResultBudget(
   // 总量在预算内就什么都不做。
   let total = blocks.reduce((n, b) => n + outputText(b).length, 0);
   if (total <= maxBytes) return messages;
+  const before = estimateSize(messages);
 
   // 从最大的结果开始落盘，直到总量回到预算内。
   const ranked = [...blocks].sort(
@@ -292,12 +324,13 @@ export function toolResultBudget(
   }
 
   if (persisted.length > 0) {
+    const after = estimateSize(messages);
     print(
-      `[COMPACT L3] tool result budget: ${persisted.length} results persisted to disk`,
+      `[COMPACT L3] tool result budget: ${persisted.length} results persisted to disk (${before} → ${after} chars)`,
       "yellow",
     );
     logger.section(
-      `[COMPACT L3] tool result budget (${persisted.length} persisted)`,
+      `[COMPACT L3] tool result budget (${persisted.length} persisted, ${before} → ${after} chars)`,
       persisted.join("\n"),
     );
   }
@@ -309,11 +342,15 @@ export function persistLargeOutput(toolUseId: string, output: string): string {
   if (output.length <= PERSIST_THRESHOLD) return output;
 
   fs.mkdirSync(TOOL_RESULTS_DIR, { recursive: true });
-  const filePath = path.join(TOOL_RESULTS_DIR, `${toolUseId}.txt`);
+  const filePath = path.join(
+    TOOL_RESULTS_DIR,
+    `${timestampPrefix()}_${toolUseId}.txt`,
+  );
   if (!fs.existsSync(filePath)) fs.writeFileSync(filePath, output);
 
-  // 模型看到路径和前 2000 字预览，需要全文时可自行读文件。
-  return `<persisted-output>\nFull output: ${filePath}\nPreview:\n${output.slice(0, 2000)}\n</persisted-output>`;
+  // 模型看到路径和前 N 字预览（N = 阈值的十分之一），需要全文时可自行读文件。
+  const previewLength = Math.floor(PERSIST_THRESHOLD / 10);
+  return `<persisted-output>\nFull output: ${filePath}\nPreview:\n${output.slice(0, previewLength)}\n</persisted-output>`;
 }
 
 // L4: autoCompact —— LLM 完整摘要
@@ -322,14 +359,15 @@ export async function compactHistory(
   deps: Deps,
 ): Promise<Anthropic.MessageParam[]> {
   const transcriptPath = writeTranscript(messages);
+  const totalChars = estimateSize(messages);
   const summary = await summarizeHistory(messages, deps);
 
   print(
-    `[COMPACT L4] compact: ${messages.length} messages → summary (${summary.length} chars)`,
+    `[COMPACT L4] compact: ${messages.length} messages (${totalChars} chars) → summary (${summary.length} chars)`,
     "yellow",
   );
   deps.logger.section(
-    `[COMPACT L4] compact (${messages.length} messages → ${summary.length} chars)`,
+    `[COMPACT L4] compact (${messages.length} messages, ${totalChars} chars → ${summary.length} chars)`,
     `transcript archived: ${transcriptPath}`,
   );
   return [{ role: "user", content: `[Compacted]\n\n${summary}` }];
@@ -339,7 +377,7 @@ function writeTranscript(messages: Anthropic.MessageParam[]): string {
   fs.mkdirSync(TRANSCRIPT_DIR, { recursive: true });
   const filePath = path.join(
     TRANSCRIPT_DIR,
-    `transcript_${Math.floor(Date.now() / 1000)}.jsonl`,
+    `${timestampPrefix()}_messages.jsonl`,
   );
   fs.writeFileSync(
     filePath,
@@ -356,7 +394,7 @@ export async function summarizeHistory(
   // 摘要是独立的子请求：用 child scope 打标记（同 s06 子 agent 的做法），
   // 日志里与主循环的 request/response 区分开，增量计数也互不干扰。
   const logger = deps.logger.child("compact");
-  const conversation = JSON.stringify(messages).slice(0, 80_000);
+  const conversation = JSON.stringify(messages).slice(0, CONTEXT_LIMIT * 1.5);
   const prompt =
     "Summarize this coding-agent conversation so work can continue.\n" +
     "Preserve: 1. current goal, 2. key findings/decisions, 3. files read/changed, " +
@@ -382,8 +420,8 @@ export async function reactiveCompact(
 ): Promise<Anthropic.MessageParam[]> {
   // 与 L4 一样，先把完整历史落盘存档。
   writeTranscript(messages);
-  // 保留最后 5 条消息原样，只摘要之前的部分。
-  let tailStart = Math.max(0, messages.length - 5);
+  // 保留最后 REACTIVE_KEEP_TAIL 条消息原样，只摘要之前的部分。
+  let tailStart = Math.max(0, messages.length - REACTIVE_KEEP_TAIL);
   if (
     tailStart > 0 &&
     tailStart < messages.length &&
@@ -431,6 +469,7 @@ const tools: Anthropic.Tool[] = [
 // ═══════════════════════════════════════════════════════════
 
 const MAX_REACTIVE_RETRIES = 1; // reactive compact 的重试上限
+const REACTIVE_KEEP_TAIL = 5; // reactive compact 保留的尾部消息数
 
 export async function agentLoop(
   messages: Anthropic.MessageParam[],
