@@ -76,7 +76,8 @@ import {
   TOOL_SCHEMAS,
 } from "../s07_skill_loading/main";
 
-// s08 导出自己拥有的东西：压缩流水线（L1~L4 + reactive）+ agentLoop。
+// s08 导出自己拥有的东西：压缩流水线（L1~L4 + reactive）+ agentLoop，
+// 外加装配好的完整工具列表（base + todo + task + load_skill + compact），供 s09 继续叠加。
 // 复用来的符号（技能层 / spawnSubagent / permissionHook / nag）由测试各自从源头 import。
 
 // 运行时产物落在 s08 文件夹下（同 logger 的 .log/）；SKILLS_DIR 复用 s07（仓库根目录的共享输入）。
@@ -93,7 +94,7 @@ const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 // 七个阈值启动时可用 L{n}_COMPACT_* 环境变量覆盖（前缀是它属于哪一层压缩，
 // 默认值见 defaults.env，可复制到仓库根目录 .env，pnpm dev 会自动加载）。
 // L1 裁剪阈值：消息数超过它就裁掉中间部分。
-const SNIP_MAX_MESSAGES = Number(
+export const SNIP_MAX_MESSAGES = Number(
   process.env.L1_COMPACT_SNIP_MAX_MESSAGES ?? 50,
 );
 // L1 裁剪时保留的头部消息数（尾部保留数 = maxMessages - 头部）。
@@ -105,7 +106,7 @@ const MICRO_COMPACT_MIN_LENGTH = Number(
   process.env.L2_COMPACT_MICRO_MIN_LENGTH ?? 120,
 );
 // L3 预算：最新一轮 tool_result 总量超过它才开始落盘。
-const TOOL_RESULT_BUDGET = Number(
+export const TOOL_RESULT_BUDGET = Number(
   process.env.L3_COMPACT_TOOL_RESULT_BUDGET ?? 200_000,
 );
 // L3 落盘阈值：单条工具结果超过该长度才值得写到磁盘。
@@ -113,7 +114,9 @@ const PERSIST_THRESHOLD = Number(
   process.env.L3_COMPACT_PERSIST_THRESHOLD ?? 30_000,
 );
 // L4 触发阈值：估算大小（JSON 字符数，不是 token）超过它就做 LLM 摘要。
-const CONTEXT_LIMIT = Number(process.env.L4_COMPACT_CONTEXT_LIMIT ?? 50_000);
+export const CONTEXT_LIMIT = Number(
+  process.env.L4_COMPACT_CONTEXT_LIMIT ?? 50_000,
+);
 
 // 用 JSON 字符数估算上下文大小 —— 不是 token 数，但零成本，够做阈值判断。
 export const estimateSize = (msgs: Anthropic.MessageParam[]): number =>
@@ -452,7 +455,7 @@ export async function reactiveCompact(
 
 const compactSchema = z.object({ focus: z.string().optional() });
 
-const tools: Anthropic.Tool[] = [
+export const tools: Anthropic.Tool[] = [
   ...s07Tools,
   // s08 新增：compact（触发 compactHistory，不是空操作）
   zodTool(
@@ -468,7 +471,7 @@ const tools: Anthropic.Tool[] = [
 //  compact 工具单独拦截，API 报超长时应急重试。
 // ═══════════════════════════════════════════════════════════
 
-const MAX_REACTIVE_RETRIES = 1; // reactive compact 的重试上限
+export const MAX_REACTIVE_RETRIES = 1; // reactive compact 的重试上限
 const REACTIVE_KEEP_TAIL = 5; // reactive compact 保留的尾部消息数
 
 export async function agentLoop(

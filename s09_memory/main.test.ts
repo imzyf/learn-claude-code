@@ -1,11 +1,11 @@
 /**
  * s09_memory/main.test.ts
  *
- * s09 的新增点是记忆系统。记忆函数都接受一个目录参数（analogous to s07 的
- * scanSkills(dir)），测试指向一个临时目录，读写真实文件验证往返；
+ * s09 只新增记忆系统，其余（工具表 / hook / nag / 技能层 / 压缩）整套沿用 s07/s08
+ * 的装配，由各自的测试覆盖。这里聚焦记忆函数：接受目录参数，指向临时目录读写真实文件验证往返；
  * selectRelevantMemories 用 fake client 走 LLM 挑选，client 抛错时回退关键词匹配。
  * agentLoop 指向空的临时记忆目录：loadMemories 无文件即短路，末尾 extractMemories
- * 收到 "[]" 不写盘。压缩预处理器/subagent 复用 s08。
+ * 收到 "[]" 不写盘。
  */
 import * as fs from "node:fs";
 import type Anthropic from "@anthropic-ai/sdk";
@@ -19,20 +19,17 @@ import {
   toolUseBlock,
   useTempDir,
 } from "../lib/testing";
+import { createHooks } from "../s04_hooks/main";
+// nag 计数器是 s05 的模块级状态，每个测试前复位（同 s08 的做法）。
+import { resetNagCounter } from "../s05_todo_write/main";
 import {
   agentLoop,
-  collectToolResults,
   listMemoryFiles,
   memoryFilenames,
   messageText,
-  microCompact,
-  parseFrontmatter,
   readMemoryFile,
   readMemoryIndex,
   selectRelevantMemories,
-  snipCompact,
-  spawnSubagent,
-  summarizeHistory,
   writeMemoryFile,
 } from "./main";
 
@@ -42,16 +39,18 @@ useTempDir(import.meta.dirname, (dir) => {
   tmp = dir;
 });
 
+beforeEach(() => {
+  resetNagCounter();
+});
+
+// 记忆函数与 agentLoop 共用 s06 的 Deps（client + logger + hooks）；测试用裸 hook 实例。
+const baseDeps = () => ({
+  logger: noopLogger,
+  hooks: createHooks(noopLogger),
+});
+
 // ── parseFrontmatter / messageText (pure) ─────────────────
 describe("pure helpers", () => {
-  it("parseFrontmatter keeps a later '---' in the body", () => {
-    const { meta, body } = parseFrontmatter(
-      "---\nname: x\n---\nabove\n---\nbelow",
-    );
-    expect(meta.name).toBe("x");
-    expect(body).toBe("above\n---\nbelow");
-  });
-
   it("messageText reads string content and text blocks", () => {
     expect(messageText({ role: "user", content: "plain" })).toBe("plain");
     expect(
@@ -90,6 +89,12 @@ describe("memory files", () => {
     );
   });
 
+  it("round-trips a description with YAML-special characters", () => {
+    writeMemoryFile(tmp, "DB Config", "project", 'host: localhost "x"', "...");
+    const [file] = listMemoryFiles(tmp);
+    expect(file.description).toBe('host: localhost "x"');
+  });
+
   it("returns null for a missing file and empty index for an empty dir", () => {
     expect(readMemoryFile(tmp, "nope.md")).toBeNull();
     expect(readMemoryIndex(tmp)).toBe("");
@@ -116,7 +121,7 @@ describe("selectRelevantMemories", () => {
     const selected = await selectRelevantMemories(
       tmp,
       [{ role: "user", content: "help with the database" }],
-      { client, logger: noopLogger },
+      { ...baseDeps(), client },
     );
 
     expect(selected).toEqual(["database-config.md"]);
@@ -128,7 +133,7 @@ describe("selectRelevantMemories", () => {
     const selected = await selectRelevantMemories(
       tmp,
       [{ role: "user", content: "tell me about the database setup" }],
-      { client, logger: noopLogger },
+      { ...baseDeps(), client },
     );
 
     expect(selected).toEqual(["database-config.md"]);
@@ -141,7 +146,7 @@ describe("selectRelevantMemories", () => {
     const selected = await selectRelevantMemories(
       empty,
       [{ role: "user", content: "anything" }],
-      { client, logger: noopLogger },
+      { ...baseDeps(), client },
     );
 
     expect(selected).toEqual([]);
@@ -150,67 +155,15 @@ describe("selectRelevantMemories", () => {
   });
 });
 
-// ── compaction preprocessors (pure) ───────────────────────
-describe("compaction", () => {
-  it("snipCompact leaves short histories untouched", () => {
-    const messages: Anthropic.MessageParam[] = [
-      { role: "user", content: "hi" },
-    ];
-    expect(snipCompact(messages, 50)).toBe(messages);
-  });
-
-  it("microCompact compacts old long results, keeps recent ones", () => {
-    const round = (id: string, out: string): Anthropic.MessageParam[] => [
-      {
-        role: "assistant",
-        content: [toolUseBlock(id, "bash", { command: "echo" })],
-      },
-      {
-        role: "user",
-        content: [{ type: "tool_result", tool_use_id: id, content: out }],
-      },
-    ];
-    const messages: Anthropic.MessageParam[] = [
-      ...round("t1", "x".repeat(200)),
-      ...round("t2", "r1"),
-      ...round("t3", "r2"),
-      ...round("t4", "r3"),
-    ];
-    microCompact(messages);
-    const results = collectToolResults(messages);
-    expect(results[0].content).toBe("[Earlier tool result compacted.]");
-    expect(results[3].content).toBe("r3");
-  });
-});
-
-// ── summarizeHistory (fake client) ────────────────────────
-describe("summarizeHistory", () => {
-  it("returns the model's summary text", async () => {
-    const client = fakeClient(
-      fakeMessage([textBlock("short summary")], "end_turn"),
-    );
-    const summary = await summarizeHistory(
-      [{ role: "user", content: "history" }],
-      {
-        client,
-        logger: noopLogger,
-      },
-    );
-    expect(summary).toBe("short summary");
-  });
-});
-
-// ── spawnSubagent ─────────────────────────────────────────
-describe("spawnSubagent", () => {
-  it("returns the subagent's final text", async () => {
-    const client = fakeClient(fakeMessage([textBlock("answer")], "end_turn"));
-    const result = await spawnSubagent("do x", { client, logger: noopLogger });
-    expect(result).toBe("answer");
-  });
-});
-
 // ── agentLoop (empty memory dir) ──────────────────────────
 describe("agentLoop", () => {
+  // skills 为空 registry：SYSTEM 里技能清单为 "(no skills found)"，不影响分发。
+  const loopDeps = () => ({
+    ...baseDeps(),
+    skills: {},
+    memoryDir: tmp,
+  });
+
   it("executes a plain tool call, then extraction finds nothing new", async () => {
     const client = fakeClient(
       fakeMessage(
@@ -224,11 +177,7 @@ describe("agentLoop", () => {
       { role: "user", content: "go" },
     ];
 
-    const result = await agentLoop(messages, {
-      client,
-      logger: noopLogger,
-      memoryDir: tmp,
-    });
+    const result = await agentLoop(messages, { ...loopDeps(), client });
 
     expect(result).toBe("done");
     expect(client.messages.create).toHaveBeenCalledTimes(3);
@@ -251,11 +200,7 @@ describe("agentLoop", () => {
       { role: "user", content: "go" },
     ];
 
-    const result = await agentLoop(messages, {
-      client,
-      logger: noopLogger,
-      memoryDir: tmp,
-    });
+    const result = await agentLoop(messages, { ...loopDeps(), client });
 
     expect(result).toBe("parent done");
     const toolResults = messages[2].content as Anthropic.ToolResultBlockParam[];
