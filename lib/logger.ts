@@ -112,7 +112,7 @@ export function createLogger(sessionDir: string): SessionLogger {
         );
 
         writeTranscript(
-          `REQUEST ${traceId} ${scope}`,
+          `REQUEST ${traceId}`,
           `${messages.length} messages (${newMessages.length} new), ${chars} chars`,
         );
       },
@@ -135,7 +135,7 @@ export function createLogger(sessionDir: string): SessionLogger {
 
         const u = res.usage;
         writeTranscript(
-          `ASSISTANT ${traceId} ${scope} (${u.input_tokens} in / ${u.output_tokens} out / ` +
+          `ASSISTANT ${traceId} (${u.input_tokens} in / ${u.output_tokens} out / ` +
             `${u.cache_creation_input_tokens ?? 0} cache-w / ` +
             `${u.cache_read_input_tokens ?? 0} cache-r${costMeter.costSuffix(u)})`,
           formatBlocks(res.content),

@@ -57,7 +57,6 @@ import {
 } from "../s03_permission/main";
 // 来自 s04：hook 系统（createHooks 实例）与三个通用 hook，原样复用。
 import {
-  contextInjectHook,
   createHooks,
   type HookSystem,
   logHook,
@@ -198,7 +197,6 @@ export function permissionHook(
 
 // 默认 hook 注册收进函数，只在入口调用一次；import 该模块不产生副作用。
 export function registerDefaultHooks(hooks: HookSystem): void {
-  hooks.register("UserPromptSubmit", contextInjectHook);
   hooks.register("PreToolUse", permissionHook);
   hooks.register("PreToolUse", logHook);
   hooks.register("Stop", summaryHook);
@@ -206,7 +204,7 @@ export function registerDefaultHooks(hooks: HookSystem): void {
   hooks.logRegistration();
 }
 
-// 入口层 helper：建 hook 实例 + 注册默认 hook，s05/s07/s08 入口复用。
+// 入口层 helper：建 hook 实例 + 注册默认 hook，s05/s06.. 入口复用。
 export function loadHooks(logger: SessionLogger): HookSystem {
   const hooks = createHooks(logger);
   registerDefaultHooks(hooks);

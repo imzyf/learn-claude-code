@@ -88,114 +88,69 @@ import {
 const MODULE_DIR = import.meta.dirname;
 const MEMORY_DIR = path.join(MODULE_DIR, ".memory");
 
+const memoryIndexPath = (dir: string): string => path.join(dir, "MEMORY.md");
 const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 // agentLoop 的完整依赖：Deps（client + logger + hooks）+ 技能表 + 记忆目录。
 // system 不进 deps —— 记忆索引每轮都会变，由 agentLoop 自行重建（s07/s08 的 system 是静态的）。
 export type LoopDeps = Deps & { skills: SkillRegistry; memoryDir: string };
 
-const memoryIndexPath = (dir: string): string => path.join(dir, "MEMORY.md");
-
 // ═══════════════════════════════════════════════════════════
 //  s09 新增：记忆系统
 // ═══════════════════════════════════════════════════════════
 
 // Python 用一个 MEMORY_TYPES 列表；TS 里用联合类型表达同一个约束。
-type MemoryType = "user" | "feedback" | "project" | "reference";
-
+export type MemoryType = "user" | "feedback" | "project" | "reference";
+// 记忆文件的元数据 + 内容。
 export type MemoryFile = {
   filename: string;
   name: string;
   description: string;
-  type: string;
+  type: MemoryType;
   body: string;
 };
 
-// 写入一个带 YAML frontmatter 的记忆文件，并重建索引。
-export function writeMemoryFile(
+// STEP 1：在 s07 的技能版 SYSTEM 之上追加记忆索引 + 使用说明。
+export function buildSystem(
+  skills: SkillRegistry,
   dir: string,
-  name: string,
-  memType: string,
-  description: string,
-  body: string,
+  logger: SessionLogger,
 ): string {
-  const slug = name.toLowerCase().replaceAll(" ", "-").replaceAll("/", "-");
-  const filepath = path.join(dir, `${slug}.md`);
-  fs.mkdirSync(dir, { recursive: true });
-  // frontmatter 交给 yaml.stringify，name/description 里的冒号、引号等特殊字符自动转义。
-  const frontmatter = stringifyYaml({
-    name,
-    description,
-    type: memType,
-  }).trim();
-  fs.writeFileSync(filepath, `---\n${frontmatter}\n---\n\n${body}\n`);
-  rebuildIndex(dir);
-  return filepath;
+  const index = readMemoryIndex(dir);
+  const memoriesSection = index ? `\n\nMemories available:\n${index}` : "";
+  const systemPrompt =
+    buildSkillSystem(skills) +
+    `${memoriesSection}\n` +
+    "Relevant memories are injected below. Respect user preferences from memory.\n" +
+    "When the user says 'remember' or expresses a clear preference, extract it as a memory.";
+
+  logger.section("SYSTEM PROMPT", systemPrompt);
+
+  return systemPrompt;
 }
 
-// 列出目录下所有记忆文件名（排除索引 MEMORY.md），按名排序。
-export function memoryFilenames(dir: string): string[] {
-  if (!fs.existsSync(dir)) return [];
-  return fs
-    .readdirSync(dir)
-    .filter((f) => f.endsWith(".md") && f !== "MEMORY.md")
-    .sort();
-}
+// STEP 2：加载相关记忆的内容，包成一段注入上下文的文本。
+export async function loadMemories(
+  dir: string,
+  messages: Anthropic.MessageParam[],
+  deps: Deps,
+): Promise<string> {
+  // 先挑出相关记忆文件，无命中直接返回空串。
+  const selectedFiles = await selectRelevantMemories(dir, messages, deps);
+  if (!selectedFiles.length) return "";
 
-// 由所有记忆文件重建 MEMORY.md 索引。
-export function rebuildIndex(dir: string): void {
-  const lines: string[] = [];
-  for (const filename of memoryFilenames(dir)) {
-    const raw = fs.readFileSync(path.join(dir, filename), "utf8");
-    const { meta, body } = parseFrontmatter(raw);
-    const name = meta.name ?? path.basename(filename, ".md");
-    const desc = meta.description ?? (body.split("\n")[0] ?? "").slice(0, 80);
-    lines.push(`- [${name}](${filename}) — ${desc}`);
+  // 构建注入文本 <relevant_memories> ... </relevant_memories>。
+  const parts = ["<relevant_memories>"];
+  for (const filename of selectedFiles) {
+    const content = readMemoryFile(dir, filename);
+    if (content) parts.push(content);
   }
-  fs.writeFileSync(
-    memoryIndexPath(dir),
-    lines.length ? `${lines.join("\n")}\n` : "",
-  );
-}
+  parts.push("</relevant_memories>");
 
-// 读取 MEMORY.md 索引（每轮注入 SYSTEM）。
-export function readMemoryIndex(dir: string): string {
-  const indexPath = memoryIndexPath(dir);
-  if (!fs.existsSync(indexPath)) return "";
-  return fs.readFileSync(indexPath, "utf8").trim();
-}
+  deps.logger.section("MEMORY LOAD", parts.join("\n\n"));
 
-// 读取单个记忆文件的完整内容，不存在返回 null。
-export function readMemoryFile(dir: string, filename: string): string | null {
-  const filepath = path.join(dir, filename);
-  if (!fs.existsSync(filepath)) return null;
-  return fs.readFileSync(filepath, "utf8");
+  return parts.join("\n\n");
 }
-
-// 列出所有记忆文件及其元数据。
-export function listMemoryFiles(dir: string): MemoryFile[] {
-  return memoryFilenames(dir).map((filename) => {
-    const raw = fs.readFileSync(path.join(dir, filename), "utf8");
-    const { meta, body } = parseFrontmatter(raw);
-    return {
-      filename,
-      name: meta.name ?? path.basename(filename, ".md"),
-      description: meta.description ?? "",
-      type: meta.type ?? "user",
-      body,
-    };
-  });
-}
-
-// 取一条消息的文本（字符串内容或 text 块）。
-export function messageText(m: Anthropic.MessageParam): string {
-  if (typeof m.content === "string") return m.content;
-  return m.content
-    .map((b) => (b.type === "text" ? b.text : ""))
-    .filter(Boolean)
-    .join(" ");
-}
-
 // 用最近对话去匹配记忆的 name/description，挑出相关记忆文件名。
 // 先让 LLM 选（返回下标数组），失败则回退到 name+description 上的关键词匹配。
 export async function selectRelevantMemories(
@@ -204,12 +159,14 @@ export async function selectRelevantMemories(
   deps: Deps,
   maxItems = 5,
 ): Promise<string[]> {
-  const { client, logger } = deps;
+  const { client, logger: sessionLogger } = deps;
+  const logger = sessionLogger.child("select_relevant_memories");
   const files = listMemoryFiles(dir);
   if (!files.length) return [];
 
   // 收集最近的用户输入作为上下文。
   const recentTexts: string[] = [];
+  // 最近三条用户消息（倒序）拼成一段，截断到 2000 字符。
   for (let i = messages.length - 1; i >= 0 && recentTexts.length < 3; i--) {
     if (messages[i].role === "user") recentTexts.push(messageText(messages[i]));
   }
@@ -233,7 +190,7 @@ export async function selectRelevantMemories(
     const request: Anthropic.MessageParam[] = [
       { role: "user", content: prompt },
     ];
-    logger.request(request);
+    logger.request(request, true);
     const response = await client.messages.create({
       model: MODEL_ID,
       max_tokens: 200,
@@ -251,10 +208,20 @@ export async function selectRelevantMemories(
           if (selected.length >= maxItems) break;
         }
       }
+
+      logger.console(
+        `[Memory] select relevant by LLM: ${selected.join(", ")}`,
+        "yellow",
+      );
+
       return selected;
     }
-  } catch {
+  } catch (e) {
     // 落到下面的关键词匹配兜底。
+    logger.console(
+      `[Memory] LLM select failed, fallback to keyword match ${errMsg(e)}`,
+      "red",
+    );
   }
 
   // 兜底：拿较长的词去 name + description 里做关键词匹配。
@@ -270,42 +237,83 @@ export async function selectRelevantMemories(
       if (selected.length >= maxItems) break;
     }
   }
+  logger.console(
+    `[Memory] select relevant by keyword: ${selected.join(", ")}`,
+    "yellow",
+  );
   return selected;
 }
-
-// 加载相关记忆的内容，包成一段注入上下文的文本。
-export async function loadMemories(
-  dir: string,
-  messages: Anthropic.MessageParam[],
-  deps: Deps,
-): Promise<string> {
-  const selectedFiles = await selectRelevantMemories(dir, messages, deps);
-  if (!selectedFiles.length) return "";
-
-  const parts = ["<relevant_memories>"];
-  for (const filename of selectedFiles) {
-    const content = readMemoryFile(dir, filename);
-    if (content) parts.push(content);
+// 列出所有记忆文件及其元数据。
+export function listMemoryFiles(dir: string): MemoryFile[] {
+  return memoryFilenames(dir).map((filename) => {
+    const raw = fs.readFileSync(path.join(dir, filename), "utf8");
+    const { meta, body } = parseFrontmatter(raw);
+    return {
+      filename,
+      name: meta.name ?? path.basename(filename, ".md"),
+      description: meta.description ?? "",
+      type: toMemoryType(meta.type),
+      body,
+    };
+  });
+}
+// 列出目录下所有记忆文件名（排除索引 MEMORY.md），按名排序。
+export function memoryFilenames(dir: string): string[] {
+  if (!fs.existsSync(dir)) return [];
+  return fs
+    .readdirSync(dir)
+    .filter((f) => f.endsWith(".md") && f !== "MEMORY.md")
+    .sort();
+}
+// 把来源不可信的字符串（frontmatter / LLM 输出）收窄成 MemoryType，非法值退回 "user"。
+function toMemoryType(value: string | undefined): MemoryType {
+  switch (value) {
+    case "user":
+    case "feedback":
+    case "project":
+    case "reference":
+      return value;
+    default:
+      return "user";
   }
-  parts.push("</relevant_memories>");
-  return parts.join("\n\n");
+}
+// 读取 MEMORY.md 索引（每轮注入 SYSTEM）。
+export function readMemoryIndex(dir: string): string {
+  const indexPath = memoryIndexPath(dir);
+  if (!fs.existsSync(indexPath)) return "";
+  return fs.readFileSync(indexPath, "utf8").trim();
+}
+// 读取单个记忆文件的完整内容，不存在返回 null。
+export function readMemoryFile(dir: string, filename: string): string | null {
+  const filepath = path.join(dir, filename);
+  if (!fs.existsSync(filepath)) return null;
+  return fs.readFileSync(filepath, "utf8");
+}
+// 取一条消息的文本（字符串内容或 text 块）。
+export function messageText(m: Anthropic.MessageParam): string {
+  if (typeof m.content === "string") return m.content;
+  return m.content
+    .map((b) => (b.type === "text" ? b.text : ""))
+    .filter(Boolean)
+    .join(" ");
 }
 
+// STEP 4：从最近对话里提取新记忆，每轮结束后运行。
 type ExtractedMemory = {
   name?: string;
   type?: string;
   description?: string;
   body?: string;
 };
-
-// 从最近对话里提取新记忆，每轮结束后运行。
 export async function extractMemories(
   dir: string,
   messages: Anthropic.MessageParam[],
   deps: Deps,
 ): Promise<void> {
-  const { client, logger } = deps;
+  const { client, logger: sessionLogger } = deps;
+  const logger = sessionLogger.child("extract_memories");
   const dialogueParts: string[] = [];
+  // 只取最近 10 条消息，避免 prompt 太长。
   for (const m of messages.slice(-10)) {
     const content = messageText(m);
     if (content.trim()) dialogueParts.push(`${m.role}: ${content}`);
@@ -335,42 +343,84 @@ export async function extractMemories(
     const request: Anthropic.MessageParam[] = [
       { role: "user", content: prompt },
     ];
-    logger.request(request);
+    logger.request(request, true);
     const response = await client.messages.create({
       model: MODEL_ID,
       max_tokens: 800,
       messages: request,
     });
     logger.response(response);
+
     const text = textOf(response);
     const match = text.match(/\[[\s\S]*\]/);
     if (!match) return;
+
     const items: ExtractedMemory[] = JSON.parse(match[0]);
     if (!items.length) return;
-    let count = 0;
+    const names: string[] = [];
     for (const mem of items) {
       const name = mem.name ?? `memory_${Math.floor(Date.now() / 1000)}`;
-      const memType: string = mem.type ?? ("user" satisfies MemoryType);
+      const memType = toMemoryType(mem.type);
       if (mem.description && mem.body) {
         writeMemoryFile(dir, name, memType, mem.description, mem.body);
-        count += 1;
+        names.push(name);
       }
     }
-    if (count)
-      logger.console(`[Memory] extracted ${count} new memories`, "yellow");
-  } catch {
+
+    logger.console(
+      `[Memory] extracted ${names.length} new memories: ${names.join(", ")}`,
+      "yellow",
+    );
+  } catch (e) {
     // 提取是尽力而为，出错也不能中断主循环。
+    logger.console(`[Memory] extract failed: ${errMsg(e)}`, "red");
   }
 }
+// 写入一个带 YAML frontmatter 的记忆文件，并重建索引。
+export function writeMemoryFile(
+  dir: string,
+  name: string,
+  memType: MemoryType,
+  description: string,
+  body: string,
+): string {
+  const slug = name.toLowerCase().replaceAll(" ", "-").replaceAll("/", "-");
+  const filepath = path.join(dir, `${slug}.md`);
+  fs.mkdirSync(dir, { recursive: true });
+  // frontmatter 交给 yaml.stringify，name/description 里的冒号、引号等特殊字符自动转义。
+  const frontmatter = stringifyYaml({
+    name,
+    description,
+    type: memType,
+  }).trim();
+  fs.writeFileSync(filepath, `---\n${frontmatter}\n---\n\n${body}\n`);
+  rebuildIndex(dir);
+  return filepath;
+}
+// 由所有记忆文件重建 MEMORY.md 索引。
+export function rebuildIndex(dir: string): void {
+  const lines: string[] = [];
+  for (const filename of memoryFilenames(dir)) {
+    const raw = fs.readFileSync(path.join(dir, filename), "utf8");
+    const { meta, body } = parseFrontmatter(raw);
+    const name = meta.name ?? path.basename(filename, ".md");
+    const desc = meta.description ?? (body.split("\n")[0] ?? "").slice(0, 80);
+    lines.push(`- [${name}](${filename}) — ${desc}`);
+  }
+  fs.writeFileSync(
+    memoryIndexPath(dir),
+    lines.length ? `${lines.join("\n")}\n` : "",
+  );
+}
 
+// STEP 5：合并重复/过期记忆，文件数 ≥ 阈值时触发。
 const CONSOLIDATE_THRESHOLD = 10;
-
-// 合并重复/过期记忆，文件数 ≥ 阈值时触发。
 export async function consolidateMemories(
   dir: string,
   deps: Deps,
 ): Promise<void> {
-  const { client, logger } = deps;
+  const { client, logger: sessionLogger } = deps;
+  const logger = sessionLogger.child("consolidate_memories");
   const files = listMemoryFiles(dir);
   if (files.length < CONSOLIDATE_THRESHOLD) return;
 
@@ -394,7 +444,7 @@ export async function consolidateMemories(
     const request: Anthropic.MessageParam[] = [
       { role: "user", content: prompt },
     ];
-    logger.request(request);
+    logger.request(request, true);
     const response = await client.messages.create({
       model: MODEL_ID,
       max_tokens: 3000,
@@ -411,37 +461,28 @@ export async function consolidateMemories(
       fs.unlinkSync(path.join(dir, filename));
     }
 
+    const names: string[] = [];
     for (const mem of items) {
       const name = mem.name ?? `memory_${Math.floor(Date.now() / 1000)}`;
       if (mem.description && mem.body) {
         writeMemoryFile(
           dir,
           name,
-          mem.type ?? "user",
+          toMemoryType(mem.type),
           mem.description,
           mem.body,
         );
+        names.push(name);
       }
     }
     logger.console(
-      `[Memory] consolidated ${files.length} → ${items.length} memories`,
+      `[Memory] consolidated ${files.length} → ${items.length} memories: ${names.join(", ")}`,
       "yellow",
     );
-  } catch {
+  } catch (e) {
     // 整合是尽力而为，出错也不能中断主循环。
+    logger.console(`[Memory] consolidate failed: ${errMsg(e)}`, "red");
   }
-}
-
-// s09：在 s07 的技能版 SYSTEM 之上追加记忆索引 + 使用说明。
-export function buildSystem(skills: SkillRegistry, dir: string): string {
-  const index = readMemoryIndex(dir);
-  const memoriesSection = index ? `\n\nMemories available:\n${index}` : "";
-  return (
-    buildSkillSystem(skills) +
-    `${memoriesSection}\n` +
-    "Relevant memories are injected below. Respect user preferences from memory.\n" +
-    "When the user says 'remember' or expresses a clear preference, extract it as a memory."
-  );
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -455,16 +496,17 @@ export async function agentLoop(
   deps: LoopDeps,
 ): Promise<string> {
   const { client, logger, hooks, skills, memoryDir } = deps;
-  // 应急压缩（reactive）的连续使用次数，一次 API 调用成功即复位。
   let reactiveRetries = 0;
-  // s09：本轮用户输入开始时挑一次相关记忆，只注入请求副本，不进历史。
+  // s09（STEP 2）：本轮开始挑一次相关记忆，注入请求副本。
   const memoriesContent = await loadMemories(memoryDir, messages, deps);
+  //
   const last = messages[messages.length - 1];
+  // s09 记忆注入锚点：末尾消息若是纯字符串内容，记下它的下标（本轮用户输入）。
   const memoryTurn =
     last && typeof last.content === "string" ? messages.length - 1 : null;
-  // s09：SYSTEM（技能清单 + 记忆索引）每轮用户输入构建一次；记忆更新发生在本轮返回前。
-  const system = buildSystem(skills, memoryDir);
-  // s07 的 handler 表按 S07LoopDeps 收依赖（load_skill 要 skills，task 要 client 等），补上 system。
+
+  // s09（STEP 1）：本轮开始把 MEMORY.md 索引拼进 SYSTEM（技能清单 + 记忆索引）。
+  const system = buildSystem(skills, memoryDir, logger);
   const dispatchDeps: S07LoopDeps = { ...deps, system };
 
   while (true) {
@@ -472,15 +514,13 @@ export async function agentLoop(
     // s09：留一份压缩前快照，供本轮结束时精确提取记忆。
     const preCompact = structuredClone(messages);
 
-    // s08：三个预处理器（0 次 API 调用，先做便宜的）。顺序对齐 CC 源码：budget → snip → micro
+    // s08：三个预处理器：budget → snip → micro
     replaceMessages(
       messages,
       toolResultBudget(messages, TOOL_RESULT_BUDGET, logger),
     );
     replaceMessages(messages, snipCompact(messages, SNIP_MAX_MESSAGES, logger));
     replaceMessages(messages, microCompact(messages, logger));
-
-    // s08：仍超阈值 → LLM 摘要（1 次 API 调用）
     if (estimateSize(messages) > CONTEXT_LIMIT) {
       logger.console("[COMPACT L4] auto compact", "yellow");
       replaceMessages(messages, await compactHistory(messages, deps));
@@ -490,17 +530,21 @@ export async function agentLoop(
     try {
       // s09：记忆只进请求时的临时副本 —— 历史本身保持干净。
       let requestMessages = messages;
+      // 取回锚点消息 —— 压缩可能改动过 messages，下标越界就放弃注入。
       const turn =
         memoryTurn !== null && memoryTurn < messages.length
           ? messages[memoryTurn]
           : null;
       if (memoriesContent && turn && typeof turn.content === "string") {
+        // 复制一份数组，只改副本里的这一条，历史保持干净。
         requestMessages = messages.slice();
+        // 把相关记忆拼到本轮用户输入前面。
         requestMessages[memoryTurn as number] = {
           role: "user",
           content: `${memoriesContent}\n\n${turn.content}`,
         };
       }
+
       logger.request(requestMessages, true);
       response = await client.messages.create({
         model: MODEL_ID,
@@ -510,10 +554,10 @@ export async function agentLoop(
         max_tokens: 8000,
       });
       logger.response(response);
+
       reactiveRetries = 0; // API 调用成功即复位
     } catch (e) {
       const msg = errMsg(e).toLowerCase();
-      // 只兜「上下文超长」这一类错误，且有重试上限；其他错误照常抛出。
       if (
         (msg.includes("prompt_too_long") || msg.includes("too many tokens")) &&
         reactiveRetries < MAX_REACTIVE_RETRIES
@@ -534,9 +578,11 @@ export async function agentLoop(
         messages.push({ role: "user", content: force });
         continue;
       }
-      // s09：对话告一段落 —— 用压缩前快照提取新记忆，必要时整理。
+      // s09（step 4）：对话告一段落 —— 用压缩前快照提取新记忆，必要时整理。
       await extractMemories(memoryDir, preCompact, deps);
+      // s09（step 5）：文件数达阈值时合并去重（未到阈值内部直接返回）。
       await consolidateMemories(memoryDir, deps);
+
       return textOf(response);
     }
 
@@ -550,14 +596,6 @@ export async function agentLoop(
         continue;
       }
 
-      // s08：compact 工具用摘要重写整个历史，不能再追加对应的 tool_result
-      // （会变成孤立引用，被 API 拒绝）—— 直接用摘要本身继续循环。
-      if (block.name === "compact") {
-        replaceMessages(messages, await compactHistory(messages, deps));
-        didCompact = true;
-        break; // 结束本轮，用压缩后的上下文重新开始
-      }
-
       const blocked = await hooks.trigger("PreToolUse", block);
       if (blocked) {
         results.push({
@@ -566,6 +604,13 @@ export async function agentLoop(
           content: blocked,
         });
         continue;
+      }
+
+      // s08：compact 工具用摘要重写整个历史，不能再追加对应的 tool_result
+      if (block.name === "compact") {
+        replaceMessages(messages, await compactHistory(messages, deps));
+        didCompact = true;
+        break; // 结束本轮，用压缩后的上下文重新开始
       }
 
       const schema = TOOL_SCHEMAS[block.name];
@@ -603,7 +648,6 @@ if (import.meta.main) {
 
   logger.config({
     model: MODEL_ID,
-    system: buildSystem(skills, MEMORY_DIR),
     tools,
   });
 

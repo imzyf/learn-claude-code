@@ -550,15 +550,6 @@ export async function agentLoop(
         continue;
       }
 
-      // s08：compact 工具用摘要重写整个历史。请求它的那次 tool_use 也会被摘要抹掉，
-      // 所以不能再追加对应的 tool_result（会变成孤立引用，下一次请求被 API 拒绝）
-      // —— 直接用摘要本身继续循环。
-      if (block.name === "compact") {
-        replaceMessages(messages, await compactHistory(messages, deps));
-        didCompact = true;
-        break; // 结束本轮，用压缩后的上下文重新开始
-      }
-
       const blocked = await hooks.trigger("PreToolUse", block);
       if (blocked) {
         results.push({
@@ -567,6 +558,16 @@ export async function agentLoop(
           content: blocked,
         });
         continue;
+      }
+
+      // s08：compact 工具用摘要重写整个历史。请求它的那次 tool_use 也会被摘要抹掉，
+      // 所以不能再追加对应的 tool_result（会变成孤立引用，下一次请求被 API 拒绝）
+      // —— 直接用摘要本身继续循环。放在 PreToolUse 之后，让 compact 和其他工具一样
+      // 可以被 hook 拦截（比如 permissionHook）。
+      if (block.name === "compact") {
+        replaceMessages(messages, await compactHistory(messages, deps));
+        didCompact = true;
+        break; // 结束本轮，用压缩后的上下文重新开始
       }
 
       const schema = TOOL_SCHEMAS[block.name];
