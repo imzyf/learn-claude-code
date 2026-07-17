@@ -3,7 +3,8 @@
  *
  * s09 只新增记忆系统，其余（工具表 / hook / nag / 技能层 / 压缩）整套沿用 s07/s08
  * 的装配，由各自的测试覆盖。这里聚焦记忆函数：接受目录参数，指向临时目录读写真实文件验证往返；
- * selectRelevantMemories 用 fake client 走 LLM 挑选，client 抛错时回退关键词匹配。
+ * selectRelevantMemories 用 fake client 走 LLM 挑选，client 抛错时回退关键词匹配；
+ * extractMemories / consolidateMemories 验证写盘、非法条目过滤，以及出错时不动旧文件。
  * agentLoop 指向空的临时记忆目录：loadMemories 无文件即短路，末尾 extractMemories
  * 收到 "[]" 不写盘。
  */
@@ -24,7 +25,11 @@ import { createHooks } from "../s04_hooks/main";
 import { resetNagCounter } from "../s05_todo_write/main";
 import {
   agentLoop,
+  buildSystem,
+  consolidateMemories,
+  extractMemories,
   listMemoryFiles,
+  loadMemories,
   memoryFilenames,
   messageText,
   readMemoryFile,
@@ -152,6 +157,205 @@ describe("selectRelevantMemories", () => {
     expect(selected).toEqual([]);
     expect(client.messages.create).not.toHaveBeenCalled(); // 无记忆文件即提前短路，不发任何 API
     fs.rmSync(empty, { recursive: true, force: true });
+  });
+});
+
+// ── buildSystem (STEP 1: memory index into SYSTEM) ────────
+describe("buildSystem", () => {
+  it("appends the memory index when memories exist", () => {
+    writeMemoryFile(tmp, "editor-prefs", "user", "tabs not spaces", "...");
+
+    const system = buildSystem({}, tmp, noopLogger);
+
+    expect(system).toContain("Memories available:");
+    expect(system).toContain(
+      "- [editor-prefs](editor-prefs.md) — tabs not spaces",
+    );
+  });
+
+  it("omits the memories section for an empty dir", () => {
+    const system = buildSystem({}, tmp, noopLogger);
+
+    expect(system).not.toContain("Memories available:");
+    expect(system).toContain("Relevant memories are injected below.");
+  });
+});
+
+// ── loadMemories (STEP 2: wrap selected contents) ─────────
+describe("loadMemories", () => {
+  it("wraps selected memory contents in <relevant_memories>", async () => {
+    writeMemoryFile(
+      tmp,
+      "database-config",
+      "project",
+      "postgres settings",
+      "Use port 5432.",
+    );
+    const client = fakeClient(fakeMessage([textBlock("[0]")], "end_turn"));
+
+    const content = await loadMemories(
+      tmp,
+      [{ role: "user", content: "help with the database" }],
+      { ...baseDeps(), client },
+    );
+
+    expect(content).toMatch(/^<relevant_memories>/);
+    expect(content).toMatch(/<\/relevant_memories>$/);
+    expect(content).toContain("Use port 5432.");
+  });
+
+  it("returns an empty string when nothing is selected", async () => {
+    writeMemoryFile(tmp, "editor-prefs", "user", "tabs not spaces", "...");
+    const client = fakeClient(fakeMessage([textBlock("[]")], "end_turn"));
+
+    const content = await loadMemories(
+      tmp,
+      [{ role: "user", content: "unrelated topic" }],
+      { ...baseDeps(), client },
+    );
+
+    expect(content).toBe("");
+  });
+});
+
+// ── extractMemories (STEP 4: write path + guards) ─────────
+describe("extractMemories", () => {
+  const dialogue: Anthropic.MessageParam[] = [
+    { role: "user", content: "I prefer tabs, remember that" },
+  ];
+
+  it("writes extracted memories and narrows invalid types", async () => {
+    const client = fakeClient(
+      fakeMessage(
+        [
+          textBlock(
+            JSON.stringify([
+              {
+                name: "user-tabs",
+                type: "banana",
+                description: "prefers tabs",
+                body: "Use tabs.",
+              },
+            ]),
+          ),
+        ],
+        "end_turn",
+      ),
+    );
+
+    await extractMemories(tmp, dialogue, { ...baseDeps(), client });
+
+    expect(memoryFilenames(tmp)).toEqual(["user-tabs.md"]);
+    const [file] = listMemoryFiles(tmp);
+    expect(file.type).toBe("user"); // 非法 type 收窄回 "user"
+    expect(readMemoryIndex(tmp)).toContain("user-tabs.md");
+  });
+
+  it("skips items missing description or body", async () => {
+    const client = fakeClient(
+      fakeMessage(
+        [
+          textBlock(
+            JSON.stringify([
+              { name: "valid", type: "project", description: "d", body: "b" },
+              { name: "no-body", type: "project", description: "d" },
+            ]),
+          ),
+        ],
+        "end_turn",
+      ),
+    );
+
+    await extractMemories(tmp, dialogue, { ...baseDeps(), client });
+
+    expect(memoryFilenames(tmp)).toEqual(["valid.md"]);
+  });
+
+  it("swallows client errors without writing", async () => {
+    const client = fakeClient(); // 无预设响应 → create 抛错
+
+    await expect(
+      extractMemories(tmp, dialogue, { ...baseDeps(), client }),
+    ).resolves.toBeUndefined();
+
+    expect(memoryFilenames(tmp)).toEqual([]);
+  });
+
+  it("skips the API call entirely for an empty dialogue", async () => {
+    const client = fakeClient();
+
+    await extractMemories(tmp, [{ role: "user", content: "   " }], {
+      ...baseDeps(),
+      client,
+    });
+
+    expect(client.messages.create).not.toHaveBeenCalled();
+  });
+});
+
+// ── consolidateMemories (STEP 5: threshold + rewrite) ─────
+describe("consolidateMemories", () => {
+  // 阈值 CONSOLIDATE_THRESHOLD = 10（main.ts 内部常量）。
+  const seedFiles = (count: number) => {
+    for (let i = 0; i < count; i++) {
+      writeMemoryFile(tmp, `mem-${i}`, "project", `desc ${i}`, `body ${i}`);
+    }
+  };
+
+  it("does nothing below the threshold", async () => {
+    seedFiles(2);
+    const client = fakeClient();
+
+    await consolidateMemories(tmp, { ...baseDeps(), client });
+
+    expect(client.messages.create).not.toHaveBeenCalled();
+    expect(memoryFilenames(tmp)).toHaveLength(2);
+  });
+
+  it("replaces old files with the consolidated result at the threshold", async () => {
+    seedFiles(10);
+    const client = fakeClient(
+      fakeMessage(
+        [
+          textBlock(
+            JSON.stringify([
+              {
+                name: "merged",
+                type: "project",
+                description: "all in one",
+                body: "merged body",
+              },
+            ]),
+          ),
+        ],
+        "end_turn",
+      ),
+    );
+
+    await consolidateMemories(tmp, { ...baseDeps(), client });
+
+    expect(memoryFilenames(tmp)).toEqual(["merged.md"]);
+    expect(readMemoryIndex(tmp)).toBe("- [merged](merged.md) — all in one");
+  });
+
+  it("keeps old files intact when the client call fails", async () => {
+    seedFiles(10);
+    const client = fakeClient();
+
+    await consolidateMemories(tmp, { ...baseDeps(), client });
+
+    expect(memoryFilenames(tmp)).toHaveLength(10);
+  });
+
+  it("keeps old files intact when the response has no JSON array", async () => {
+    seedFiles(10);
+    const client = fakeClient(
+      fakeMessage([textBlock("cannot consolidate")], "end_turn"),
+    );
+
+    await consolidateMemories(tmp, { ...baseDeps(), client });
+
+    expect(memoryFilenames(tmp)).toHaveLength(10);
   });
 });
 
