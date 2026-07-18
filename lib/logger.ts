@@ -82,7 +82,11 @@ export function createLogger(sessionDir: string): SessionLogger {
       config(data: Record<string, unknown>) {
         json.write(`${JSON.stringify({ scope, config: data }, null, 2)}\n`);
         if (typeof data.model === "string") {
-          costMeter.load(data.model);
+          // GLM 系列在 LiteLLM catalog 里以 zai/ 为前缀，取价时补上。
+          const modelId = data.model.startsWith("glm")
+            ? `zai/${data.model}`
+            : data.model;
+          costMeter.load(modelId);
         }
       },
 

@@ -101,7 +101,13 @@ describe("updateContext", () => {
 
   it("reports the enabled tools and empty memories when no index exists", () => {
     const context = updateContext(path.join(tmp, "MEMORY.md"));
-    expect(context.enabled_tools).toEqual(["bash", "read_file", "write_file"]);
+    expect(context.enabled_tools).toEqual([
+      "bash",
+      "read_file",
+      "write_file",
+      "edit_file",
+      "glob",
+    ]);
     expect(context.memories).toBe("");
   });
 
