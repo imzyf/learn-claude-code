@@ -66,6 +66,8 @@ export function createLogger(sessionDir: string): SessionLogger {
     let loggedMessages = 0;
     // traceId：request 生成并写入 .json，response 复用并写进 .log，用于两份文件对照。
     let traceId = "";
+    // request 记下开始时间，response 算出耗时（ms）。
+    let requestStartedAt = 0;
 
     function writeTranscript(title: string, body: string): void {
       const time = new Date().toTimeString().slice(0, 8);
@@ -96,6 +98,7 @@ export function createLogger(sessionDir: string): SessionLogger {
 
       request(messages: Anthropic.MessageParam[], full = false) {
         traceId = randomBytes(4).toString("hex");
+        requestStartedAt = Date.now();
         const newMessages = full ? messages : messages.slice(loggedMessages);
         const chars = JSON.stringify(messages).length;
         loggedMessages = messages.length;
@@ -122,12 +125,15 @@ export function createLogger(sessionDir: string): SessionLogger {
       },
 
       response(res: Anthropic.Message) {
+        const elapsedMs = Date.now() - requestStartedAt;
+
         json.write(
           `${JSON.stringify(
             {
               ts: new Date().toISOString(),
               traceId,
               tag: "api_response",
+              elapsed_ms: elapsedMs,
               // 子 scope 标注来源；main 省略 scope key。
               ...(scope !== "main" ? { scope } : {}),
               message: res,
@@ -139,9 +145,9 @@ export function createLogger(sessionDir: string): SessionLogger {
 
         const u = res.usage;
         writeTranscript(
-          `ASSISTANT ${traceId} (${u.input_tokens} in / ${u.output_tokens} out / ` +
+          `ASSISTANT ${traceId} ${elapsedMs}ms (${u.input_tokens} in / ${u.output_tokens} out / ` +
             `${u.cache_creation_input_tokens ?? 0} cache-w / ` +
-            `${u.cache_read_input_tokens ?? 0} cache-r${costMeter.costSuffix(u)})`,
+            `${u.cache_read_input_tokens ?? 0} cache-r / ${costMeter.costSuffix(u)})`,
           formatBlocks(res.content),
         );
       },

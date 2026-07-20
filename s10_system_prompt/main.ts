@@ -19,7 +19,6 @@
  */
 
 import * as fs from "node:fs";
-import * as path from "node:path";
 import * as readline from "node:readline/promises";
 import type Anthropic from "@anthropic-ai/sdk";
 import { createLogger, type SessionLogger } from "../lib/logger";
@@ -29,10 +28,10 @@ import { printProse, textOf } from "../lib/tools";
 // 来自 s02：tool 定义 + schema 表；来自 s03：不含权限检查的基础 dispatch 表。
 import { TOOL_SCHEMAS, tools } from "../s02_tool_use/main";
 import { TOOL_HANDLERS } from "../s03_permission/main";
+// 来自 s09：记忆索引路径，s11 也复用同一份。
+import { MEMORY_INDEX } from "../s09_memory/main";
 
 const WORKDIR = process.cwd();
-const MEMORY_DIR = path.join(WORKDIR, ".memory");
-const MEMORY_INDEX = path.join(MEMORY_DIR, "MEMORY.md");
 
 // 以便每轮工具后重新推导 context。
 export type Deps = { client: ModelClient; logger: SessionLogger };
@@ -86,7 +85,7 @@ export function getSystemPrompt(context: Context): string {
 
   const loaded = ["identity", "tools", "workspace"];
   if (context.memories) loaded.push("memory");
-  print(`  [assembled] sections: ${loaded.join(", ")}`, "green");
+  print(`  [assembled] sections: ${loaded.join(", ")}`, "gray");
   return lastPrompt;
 }
 
@@ -171,8 +170,8 @@ export async function agentLoop(
 
     const results: Anthropic.ToolResultBlockParam[] = [];
     for (const block of response.content) {
+      printProse(block);
       if (block.type !== "tool_use") {
-        printProse(block);
         continue;
       }
       const schema = TOOL_SCHEMAS[block.name];

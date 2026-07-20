@@ -85,9 +85,11 @@ import {
 // 复用来的符号（工具表 / hook / 压缩）由测试各自从源头 import。
 
 // 记忆落在项目根的 .memory/（同 s07 的 SKILLS_DIR，以 process.cwd() 为项目根）。
-const MEMORY_DIR = path.join(process.cwd(), ".memory");
+export const MEMORY_DIR = path.join(process.cwd(), ".memory");
 
 const memoryIndexPath = (dir: string): string => path.join(dir, "MEMORY.md");
+// 默认记忆索引：s10 / s11 直接复用这个路径，不再各自拼接。
+export const MEMORY_INDEX = memoryIndexPath(MEMORY_DIR);
 const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 // agentLoop 的完整依赖：Deps（client + logger + hooks）+ 技能表 + 记忆目录。

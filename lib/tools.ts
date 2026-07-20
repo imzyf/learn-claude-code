@@ -42,14 +42,16 @@ export function textOf(response: Anthropic.Message): string {
   }
 }
 
-// 打印助手回复里的自然语言 block（相对 tool_use 而言）：正文 text（green）、
-// thinking 推理独白（blue）。tool_use 等其它类型忽略，留给调用方分发。
+// 打印助手回复的各类 block：正文 text（green）、thinking 推理独白（blue）、
+// tool_use 工具调用意图 name + input（cyan）。工具的实际执行仍由调用方负责。
 export function printProse(block: Anthropic.ContentBlock): void {
   if (block.type === "text") {
     const text = block.text.trim();
-    if (text) print(text, "green");
+    if (text) print(`🤖 ${text}`, "green");
   } else if (block.type === "thinking") {
     const text = block.thinking.trim();
     if (text) print(`💭 ${text}`, "blue");
+  } else if (block.type === "tool_use") {
+    print(`🔧 ${block.name}(${JSON.stringify(block.input)})`, "cyan");
   }
 }
