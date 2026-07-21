@@ -34,7 +34,6 @@ const WORKDIR = process.cwd();
 const MEMORY_DIR = path.join(WORKDIR, ".memory");
 const MEMORY_INDEX = path.join(MEMORY_DIR, "MEMORY.md");
 
-// client 与 logger 通过参数注入到 agentLoop。agentLoop 还需要记忆索引路径，
 // 以便每轮工具后重新推导 context。
 export type Deps = { client: ModelClient; logger: SessionLogger };
 export type LoopDeps = Deps & { memoryIndex: string };
@@ -48,14 +47,48 @@ const PROMPT_SECTIONS = {
   identity: "You are a coding agent. Act, don't explain.",
   tools: `Available tools: ${Object.keys(TOOL_HANDLERS).join(", ")}.`,
   workspace: `Working directory: ${WORKDIR}`,
+  // 记忆片段只在 .memory/MEMORY.md 存在时才加载（依据真实状态，而非关键词）。
   memory: "Relevant memories are injected below when available.",
 };
 
+// 由真实状态推导出的 context。
 export type Context = {
   enabled_tools: string[];
   workspace: string;
   memories: string;
 };
+
+// 上次组装的 context key（JSON.stringify 后的字符串），用于进程内缓存。
+// e.g. {"enabled_tools":["file_read","file_write"],"workspace":"/path/to/workdir","memories":"..."}
+let lastContextKey: string | null = null;
+// 上次组装的 system prompt，避免重复拼接。
+let lastPrompt: string | null = null;
+
+// 缓存包装 —— context 变了才重新组装。
+// 这里有两层完全不同的「缓存」，别混淆：
+//   1. 进程内缓存（就是本函数）：context 没变就复用 lastPrompt，只省本地重复拼接字符串的 CPU，跟 API 计费无关。
+//   2. API 层的 prompt cache（真正省 token/钱的那层）：由请求里的 cache_control 断点决定，本 client 没开（见 client.messages.create）。
+//
+// Claude Code 的两种做法：
+//   a. SYSTEM_PROMPT_DYNAMIC_BOUNDARY —— 把 system 切成 [稳定段 | 动态段]，
+//      把 cache 断点放在稳定段之后。这样注入 memory 只让动态尾段失效，
+//      前面的稳定段 + tools 定义照样命中，失效半径被限制住。
+//   b. 干脆不往 system 里塞易变内容，而是用 <system-reminder> 把 memory /
+//      日期注入到 message 流的**末尾**，让 system + tools 前缀永远稳定。
+export function getSystemPrompt(context: Context): string {
+  const key = contextKey(context);
+  if (key === lastContextKey && lastPrompt) {
+    print("  [cache hit] system prompt unchanged", "gray");
+    return lastPrompt;
+  }
+  lastContextKey = key;
+  lastPrompt = assembleSystemPrompt(context);
+
+  const loaded = ["identity", "tools", "workspace"];
+  if (context.memories) loaded.push("memory");
+  print(`  [assembled] sections: ${loaded.join(", ")}`, "green");
+  return lastPrompt;
+}
 
 // 根据当前 context 挑选并拼接 prompt 片段。
 export function assembleSystemPrompt(context: Context): string {
@@ -73,38 +106,15 @@ export function assembleSystemPrompt(context: Context): string {
 
   return sections.join("\n\n");
 }
-
-let lastContextKey: string | null = null;
-let lastPrompt: string | null = null;
-
-// 测试用：重置进程内缓存，隔离用例。
-export function resetPromptCache(): void {
-  lastContextKey = null;
-  lastPrompt = null;
-}
-
 // JSON.stringify 保持插入顺序；传入排序后的 key 数组让序列化结果确定
 // （对应 Python 的 json.dumps(sort_keys=True)）—— 比对对象身份更可靠，
 // 重建但内容相同的 context 也能命中缓存。
 export const contextKey = (context: Context): string =>
   JSON.stringify(context, Object.keys(context).sort());
-
-// 缓存包装 —— context 变了才重新组装。
-// 这层缓存只省进程内的重复拼接；真正的 Claude Code 还会靠稳定的片段顺序 +
-// SYSTEM_PROMPT_DYNAMIC_BOUNDARY 保护 API 层的 prompt cache。
-export function getSystemPrompt(context: Context): string {
-  const key = contextKey(context);
-  if (key === lastContextKey && lastPrompt) {
-    print("  [cache hit] system prompt unchanged", "gray");
-    return lastPrompt;
-  }
-  lastContextKey = key;
-  lastPrompt = assembleSystemPrompt(context);
-
-  const loaded = ["identity", "tools", "workspace"];
-  if (context.memories) loaded.push("memory");
-  print(`  [assembled] sections: ${loaded.join(", ")}`, "green");
-  return lastPrompt;
+// 测试用：重置进程内缓存，隔离用例。
+export function resetPromptCache(): void {
+  lastContextKey = null;
+  lastPrompt = null;
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -112,6 +122,7 @@ export function getSystemPrompt(context: Context): string {
 // ═══════════════════════════════════════════════════════════
 
 // 由真实状态推导 context：有哪些工具、记忆文件是否存在。
+// 在 agentLoop 里每轮工具后重新推导 context 并重组 prompt。
 export function updateContext(memoryIndex: string): Context {
   let memories = "";
   if (fs.existsSync(memoryIndex)) {
@@ -127,16 +138,24 @@ export function updateContext(memoryIndex: string): Context {
 // ═══════════════════════════════════════════════════════════
 //  agentLoop —— 用组装出来的 system prompt，替代写死的 SYSTEM
 // ═══════════════════════════════════════════════════════════
-
 export async function agentLoop(
   messages: Anthropic.MessageParam[],
   context: Context,
   deps: LoopDeps,
 ): Promise<string> {
   const { client, logger, memoryIndex } = deps;
+  // 先组装 system prompt，避免每轮工具都重复拼接。
   let system = getSystemPrompt(context);
+
   while (true) {
-    logger.request(messages);
+    logger.section(
+      "SYSTEM PROMPT",
+      `enabled_tools: ${JSON.stringify(context.enabled_tools)}` +
+        `\nworkspace: ${context.workspace}` +
+        `\nmemories:\n${context.memories}` +
+        `\n\nPrompt:\n${system}`,
+    );
+    logger.request(messages, true);
     const response = await client.messages.create({
       model: MODEL_ID,
       system,
@@ -182,8 +201,7 @@ export async function agentLoop(
 if (import.meta.main) {
   const client = createClient();
   const logger = createLogger(import.meta.dirname);
-  let context = updateContext(MEMORY_INDEX);
-  logger.config({ model: MODEL_ID, system: getSystemPrompt(context), tools });
+  logger.config({ model: MODEL_ID, tools });
 
   print("s10: System Prompt — 运行时组装 + 缓存", "cyan");
   print("输入问题，回车发送。输入 q 退出。\n", "green");
@@ -198,6 +216,10 @@ if (import.meta.main) {
   });
 
   const history: Anthropic.MessageParam[] = [];
+
+  // 先推导 context 并组装 prompt。
+  let context = updateContext(MEMORY_INDEX);
+
   while (true) {
     let query: string;
     try {
@@ -215,6 +237,8 @@ if (import.meta.main) {
       logger,
       memoryIndex: MEMORY_INDEX,
     });
+
+    // 每轮工具后重新推导 context 并重组 prompt。
     context = updateContext(MEMORY_INDEX);
     print(finalText, "green");
     print();
