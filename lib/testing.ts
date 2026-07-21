@@ -39,6 +39,7 @@ export function useTempDir(
 export const noopLogger: SessionLogger = {
   request() {},
   response() {},
+  responseError() {},
   toolResult() {},
   console() {},
   config() {},

@@ -24,6 +24,8 @@ export interface SessionLogger {
   request(messages: Anthropic.MessageParam[], full?: boolean): void;
   // API 返回后：记录响应内容与 token / 成本。
   response(res: Anthropic.Message): void;
+  // API 出错后：记录错误响应，与 request 成对（复用同一 traceId）。
+  responseError(err: unknown): void;
 
   // 记录一次工具执行的命令与输出。
   toolResult(command: string, output: string): void;
@@ -149,6 +151,38 @@ export function createLogger(sessionDir: string): SessionLogger {
             `${u.cache_creation_input_tokens ?? 0} cache-w / ` +
             `${u.cache_read_input_tokens ?? 0} cache-r / ${costMeter.costSuffix(u)})`,
           formatBlocks(res.content),
+        );
+      },
+
+      responseError(err: unknown) {
+        const elapsedMs = Date.now() - requestStartedAt;
+        let status: number | undefined;
+        if (typeof err === "object" && err !== null && "status" in err) {
+          const s = err.status;
+          if (typeof s === "number") status = s;
+        }
+        const name = err instanceof Error ? err.name : "Error";
+        const message = err instanceof Error ? err.message : String(err);
+
+        json.write(
+          `${JSON.stringify(
+            {
+              ts: new Date().toISOString(),
+              traceId,
+              tag: "api_error",
+              elapsed_ms: elapsedMs,
+              // 子 scope 标注来源；main 省略 scope key。
+              ...(scope !== "main" ? { scope } : {}),
+              error: { name, status, message },
+            },
+            null,
+            2,
+          )}\n`,
+        );
+
+        writeTranscript(
+          `ERROR ${traceId} ${elapsedMs}ms`,
+          `${name}${status !== undefined ? ` (${status})` : ""}: ${message}`,
         );
       },
 

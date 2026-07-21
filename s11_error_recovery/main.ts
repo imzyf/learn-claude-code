@@ -28,7 +28,7 @@
  * TS 特有说明：
  *   - client.messages.create 默认会自己重试 429/529；per-request
  *     `maxRetries: 0` 是为了让本文件教学用的重试层成为唯一一层
- *   - FALLBACK_MODEL_ID 环境变量用来选择 529 时的备用模型
+ *   - S11_FALLBACK_MODEL_ID 环境变量用来选择 529 时的备用模型
  *
  * Usage:
  *     pnpm dev s11_error_recovery/main.ts
@@ -54,7 +54,7 @@ import {
 } from "../s10_system_prompt/main";
 
 const PRIMARY_MODEL = MODEL_ID;
-const FALLBACK_MODEL = process.env.FALLBACK_MODEL_ID;
+const FALLBACK_MODEL = process.env.S11_FALLBACK_MODEL_ID;
 
 const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -64,10 +64,12 @@ export type Deps = { client: ModelClient; logger: SessionLogger };
 export type LoopDeps = Deps & { memoryIndex: string };
 
 // ── 常量 ──
-// max_tokens 升级后的上限（首次撞上限时升到这里）。
-const ESCALATED_MAX_TOKENS = 64_000;
 // 每次请求的初始 max_tokens。
-const DEFAULT_MAX_TOKENS = 8000;
+const DEFAULT_MAX_TOKENS = Number(process.env.S11_DEFAULT_MAX_TOKENS ?? 8000);
+// max_tokens 升级后的上限（首次撞上限时升到这里）。
+const ESCALATED_MAX_TOKENS = Number(
+  process.env.S11_ESCALATED_MAX_TOKENS ?? 64_000,
+);
 // 64K 仍被截断时，续写 prompt 的最多次数。
 const MAX_RECOVERY_RETRIES = 3;
 // withRetry 对瞬时错误（429/529）的最多重试次数。
@@ -88,7 +90,7 @@ const CONTINUATION_PROMPT =
 export class RecoveryState {
   // 是否已把 max_tokens 从 8K 升到 64K（只升一次）。
   hasEscalated = false;
-  // 已用掉的续写次数。
+  // 连续 max_tokens 续写的次数，最多 3 次。
   recoveryCount = 0;
   // 连续 529 计数，任一次成功即清零。
   consecutive529 = 0;
@@ -98,33 +100,16 @@ export class RecoveryState {
   currentModel = PRIMARY_MODEL;
 }
 
-// 带抖动的指数退避（秒）；Retry-After 优先。
-export function retryDelay(attempt: number, retryAfter?: number): number {
-  if (retryAfter) return retryAfter;
-  // 指数退避 + 25% 抖动，最大 32 秒。
-  const base = Math.min(BASE_DELAY_MS * 2 ** attempt, 32_000) / 1000;
-  const jitter = Math.random() * base * 0.25;
-  return base + jitter;
-}
-
-// Anthropic SDK 的 APIError 带 status；取不到时下面兜底看错误文本。
-export function errorStatus(e: unknown): number | undefined {
-  if (typeof e === "object" && e !== null && "status" in e) {
-    const s = (e as { status?: unknown }).status;
-    if (typeof s === "number") return s;
-  }
-  return undefined;
-}
-
-/**
- * 瞬时错误（429/529）的指数退避。
- * 非瞬时错误重新抛出，交给外层处理。
- */
+// withRetry 包装器：处理 429/529，外层处理其余错误。
+// 1. 429 限流 -> 指数退避
+// 2. 529 过载 -> 指数退避 + 切备用模型
+// 3. 非瞬时错误 -> 重新抛出，交给外层 try/catch
 export async function withRetry<T>(
   fn: () => Promise<T>,
   state: RecoveryState,
   logger: SessionLogger,
 ): Promise<T> {
+  // 429/529 也算瞬时错误，最多重试 MAX_RETRIES 次。
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     try {
       const result = await fn();
@@ -155,6 +140,7 @@ export async function withRetry<T>(
         msg.includes("529")
       ) {
         state.consecutive529 += 1;
+        // 连续 529 达到阈值，切换到备用模型（如果配置了）。
         if (state.consecutive529 >= MAX_CONSECUTIVE_529) {
           if (FALLBACK_MODEL) {
             state.currentModel = FALLBACK_MODEL;
@@ -167,11 +153,12 @@ export async function withRetry<T>(
             state.consecutive529 = 0;
             logger.console(
               `  [529 x${MAX_CONSECUTIVE_529}]` +
-                ` no FALLBACK_MODEL_ID configured, continuing retry`,
+                ` no S11_FALLBACK_MODEL_ID configured, continuing retry`,
               "red",
             );
           }
         }
+        // 529 也做指数退避
         const delay = retryDelay(attempt);
         logger.console(
           `  [529 overloaded] retry ${attempt + 1}/${MAX_RETRIES},` +
@@ -188,7 +175,22 @@ export async function withRetry<T>(
   }
   throw new Error(`Max retries (${MAX_RETRIES}) exceeded`);
 }
-
+// 带抖动的指数退避（秒）；Retry-After 优先。
+export function retryDelay(attempt: number, retryAfter?: number): number {
+  if (retryAfter) return retryAfter;
+  // 指数退避 + 25% 抖动，最大 32 秒。
+  const base = Math.min(BASE_DELAY_MS * 2 ** attempt, 32_000) / 1000;
+  const jitter = Math.random() * base * 0.25;
+  return base + jitter;
+}
+// Anthropic SDK 的 APIError 带 status；取不到时下面兜底看错误文本。
+export function errorStatus(e: unknown): number | undefined {
+  if (typeof e === "object" && e !== null && "status" in e) {
+    const s = (e as { status?: unknown }).status;
+    if (typeof s === "number") return s;
+  }
+  return undefined;
+}
 // 判断 API 错误是否属于「prompt/上下文过长」。
 export function isPromptTooLongError(e: unknown): boolean {
   const msg = errMsg(e).toLowerCase();
@@ -199,7 +201,6 @@ export function isPromptTooLongError(e: unknown): boolean {
     msg.includes("max_context_window")
   );
 }
-
 /**
  * 应急压缩 —— 教学版只保留最后 N 条消息。
  * 真实 CC 会用 LLM 生成压缩摘要再重试；这里简化为只留尾部，
@@ -238,20 +239,34 @@ export async function agentLoop(
   let maxTokens = DEFAULT_MAX_TOKENS;
 
   while (true) {
+    logger.section(
+      "RECOVERY STATE",
+      JSON.stringify({ state, max_tokens: maxTokens }),
+    );
     // ── LLM 调用：withRetry 处理 429/529，外层处理其余错误 ──
-    const callLLM = () =>
-      client.messages.create(
-        {
-          model: state.currentModel,
-          system,
-          messages,
-          tools,
-          max_tokens: maxTokens,
-        },
-        { maxRetries: 0 }, // 退避由上面的 withRetry 负责，不交给 SDK
-      );
+    // 放进 callLLM：每次尝试（首次 + withRetry 每次重试）都成对记录，
+    // 成功走 response，出错走 responseError，保证按 traceId 配对。
+    const callLLM = async () => {
+      logger.request(messages, true);
+      try {
+        const res = await client.messages.create(
+          {
+            model: state.currentModel,
+            system,
+            messages,
+            tools,
+            max_tokens: maxTokens,
+          },
+          { maxRetries: 0 }, // 退避由上面的 withRetry 负责，不交给 SDK
+        );
+        logger.response(res);
+        return res;
+      } catch (e) {
+        logger.responseError(e);
+        throw e;
+      }
+    };
 
-    logger.request(messages, true);
     let result: Anthropic.Message;
     try {
       result = await withRetry(callLLM, state, logger);
@@ -259,6 +274,7 @@ export async function agentLoop(
       // 路径 2：prompt_too_long -> 应急压缩（一次）
       if (isPromptTooLongError(e)) {
         if (!state.hasAttemptedReactiveCompact) {
+          // 只做一次应急压缩，保留最后几条消息。
           messages.splice(
             0,
             messages.length,
@@ -283,7 +299,6 @@ export async function agentLoop(
       messages.push({ role: "assistant", content: errText });
       return errText;
     }
-    logger.response(result);
 
     // ── 路径 1：max_tokens（stop_reason "max_tokens"）-> 升级或续写 ──
     if (result.stop_reason === "max_tokens") {
@@ -297,7 +312,7 @@ export async function agentLoop(
         );
         continue;
       }
-      // 64K 仍被截断：保存截断输出 + 续写 prompt
+      // 第二次及以后：追加被截断的输出，续写 prompt
       messages.push({ role: "assistant", content: result.content });
       if (state.recoveryCount < MAX_RECOVERY_RETRIES) {
         messages.push({ role: "user", content: CONTINUATION_PROMPT });
