@@ -22,14 +22,17 @@ smoke: ## One-shot API call to verify the setup
 
 ##@ Checks
 
-test: ## Run the test suite once
-	pnpm test
+# Remove leftover .tmp/ dirs created by tests (excluding node_modules).
+CLEAN_TMP = find . -type d -name .tmp -not -path '*/node_modules/*' -exec rm -rf {} +
+
+test: ## Run the test suite once, then remove leftover .tmp/ dirs
+	pnpm test; status=$$?; $(CLEAN_TMP); exit $$status
 
 typecheck: ## Type-check without emitting
 	pnpm typecheck
 
-lint: ## Lint and auto-fix with Biome
-	pnpm lint:fix
+lint: ## Lint and auto-fix with Biome, then remove leftover .tmp/ dirs
+	pnpm lint:fix; status=$$?; $(CLEAN_TMP); exit $$status
 
 lint-check: ## Check lint and formatting without writing (used by CI)
 	pnpm lint
