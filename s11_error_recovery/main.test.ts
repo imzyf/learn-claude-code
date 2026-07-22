@@ -25,6 +25,7 @@ import {
   isPromptTooLongError,
   RecoveryState,
   reactiveCompact,
+  retryAfterSeconds,
   retryDelay,
   withRetry,
 } from "./main";
@@ -88,6 +89,44 @@ describe("errorStatus", () => {
   it("returns undefined when there is no status", () => {
     expect(errorStatus(new Error("plain"))).toBeUndefined();
     expect(errorStatus("just a string")).toBeUndefined();
+  });
+});
+
+// ── retryAfterSeconds ─────────────────────────────────────
+describe("retryAfterSeconds", () => {
+  it("reads a Headers object via get()", () => {
+    const e = Object.assign(new Error("rate"), {
+      headers: new Headers({ "retry-after": "12" }),
+    });
+    expect(retryAfterSeconds(e, noopLogger)).toBe(12);
+  });
+
+  it("reads a plain record header", () => {
+    const e = Object.assign(new Error("rate"), {
+      headers: { "retry-after": "5" },
+    });
+    expect(retryAfterSeconds(e, noopLogger)).toBe(5);
+  });
+
+  it("returns undefined without a usable header", () => {
+    expect(
+      retryAfterSeconds(new Error("no headers"), noopLogger),
+    ).toBeUndefined();
+    expect(
+      retryAfterSeconds(
+        Object.assign(new Error("x"), { headers: {} }),
+        noopLogger,
+      ),
+    ).toBeUndefined();
+    // HTTP-date 格式不是纯数字，忽略走指数退避
+    expect(
+      retryAfterSeconds(
+        Object.assign(new Error("x"), {
+          headers: { "retry-after": "Wed, 21 Oct 2025 07:28:00 GMT" },
+        }),
+        noopLogger,
+      ),
+    ).toBeUndefined();
   });
 });
 

@@ -120,9 +120,9 @@ export async function withRetry<T>(
       const msg = errMsg(e).toLowerCase();
       const status = errorStatus(e);
 
-      // 429 限流 -> 指数退避
+      // 429 限流 -> 指数退避（有 retry-after 头则优先用它）
       if (status === 429 || name.includes("ratelimit") || msg.includes("429")) {
-        const delay = retryDelay(attempt);
+        const delay = retryDelay(attempt, retryAfterSeconds(e, logger));
         logger.console(
           `  [429 rate limit] retry ${attempt + 1}/${MAX_RETRIES},` +
             ` wait ${delay.toFixed(1)}s`,
@@ -158,8 +158,8 @@ export async function withRetry<T>(
             );
           }
         }
-        // 529 也做指数退避
-        const delay = retryDelay(attempt);
+        // 529 也做指数退避（有 retry-after 头则优先用它）
+        const delay = retryDelay(attempt, retryAfterSeconds(e, logger));
         logger.console(
           `  [529 overloaded] retry ${attempt + 1}/${MAX_RETRIES},` +
             ` wait ${delay.toFixed(1)}s`,
@@ -190,6 +190,22 @@ export function errorStatus(e: unknown): number | undefined {
     if (typeof s === "number") return s;
   }
   return undefined;
+}
+// 从 API 错误的 retry-after 头取秒数；429/529 时服务端可能给出建议等待时长。
+// 只认秒数格式（Anthropic 返回的形式），HTTP-date 格式忽略走指数退避。
+export function retryAfterSeconds(
+  e: unknown,
+  logger: SessionLogger,
+): number | undefined {
+  const headers = (e as { headers?: unknown } | null)?.headers;
+  const raw =
+    headers instanceof Headers
+      ? headers.get("retry-after")
+      : (headers as Record<string, string> | undefined)?.["retry-after"];
+  const secs = Number(raw);
+  if (!Number.isFinite(secs) || secs <= 0) return undefined;
+  logger.console(`  [retry-after] server asked ${secs}s`, "yellow");
+  return secs;
 }
 // 判断 API 错误是否属于「prompt/上下文过长」。
 export function isPromptTooLongError(e: unknown): boolean {

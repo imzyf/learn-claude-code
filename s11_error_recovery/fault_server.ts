@@ -7,10 +7,10 @@
  *
  * 用法（开两个终端）：
  *   1) 起代理：
- *        FAULT_STATUS=529 FAULT_TIMES=4 pnpm dev s11_error_recovery/fault_server.ts
+ *        FAULT_STATUS=529 FAULT_TIMES=2 pnpm dev s11_error_recovery/fault_server.ts
  *        FAULT_STATUS=429 FAULT_TIMES=2 pnpm dev s11_error_recovery/fault_server.ts
  *   2) 跑 s11 并指向它（base URL 不带 /v1，SDK 自己会补）：
- *        ANTHROPIC_BASE_URL=http://localhost:8787 pnpm dev s11_error_recovery/main.ts
+ *        ANTHROPIC_BASE_URL=http://localhost:8787 make s11
  *
  * 环境变量：
  *   PORT          监听端口，默认 8787
@@ -71,7 +71,7 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(FAULT_STATUS, {
       "content-type": "application/json",
       // 429 带 Retry-After 更真实；withRetry 目前不读它，但无害。
-      ...(FAULT_STATUS === 429 ? { "retry-after": "1" } : {}),
+      ...(FAULT_STATUS === 429 ? { "retry-after": "3" } : {}),
     });
     res.end(errorBody(FAULT_STATUS));
     return;
