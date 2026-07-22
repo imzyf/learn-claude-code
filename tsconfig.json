@@ -1,15 +1,15 @@
 {
   "compilerOptions": {
-    "target": "ES2023",
-    "module": "Preserve",
-    "moduleResolution": "bundler",
-    "types": ["node"],
-    "strict": true,
-    "noEmit": true,
-    "esModuleInterop": true,
-    "skipLibCheck": true,
-    "verbatimModuleSyntax": true
+    "target": "ES2023", // 输出 JS 的语法版本目标，可用到 ES2023 特性
+    "module": "Preserve", // 保留源码的 import/export 原样，交给 bundler 处理
+    "moduleResolution": "bundler", // 按打包器方式解析模块，可省略 .js 后缀
+    "types": ["node"], // 只加载 @types/node 全局类型（process、Buffer 等）
+    "strict": true, // 打开全部严格类型检查（写高质量 TS 必开）
+    "noEmit": true, // 只做类型检查，不生成 JS（编译交给 esbuild）
+    "esModuleInterop": true, // 兼容 CommonJS 包的默认导入
+    "skipLibCheck": true, // 跳过第三方 .d.ts 的类型检查，加快编译
+    "verbatimModuleSyntax": true // 严格区分类型导入与值导入（仅类型须用 import type）
   },
-  "include": ["**/*.ts"],
-  "exclude": ["node_modules", "bin"]
+  "include": ["**/*.ts"], // 检查所有 .ts 文件
+  "exclude": ["node_modules", "bin"] // 排除这些目录，不检查
 }

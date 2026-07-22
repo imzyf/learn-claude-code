@@ -1,0 +1,17 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.5.3/schema.json",
+  // 接入 git：读取 .gitignore，被忽略的文件不参与格式化/检查
+  "vcs": { "enabled": true, "clientKind": "git", "useIgnoreFile": true },
+  // 处理范围：包含全部，但排除 bin 目录和所有 .svg 文件（! 为排除）
+  "files": { "includes": ["**", "!**/*.svg"] },
+  // 格式化风格：用空格缩进，宽度 2
+  "formatter": { "indentStyle": "space", "indentWidth": 2 },
+  "linter": {
+    "rules": {
+      "preset": "recommended", // 启用官方推荐规则集（可选 recommended | all | none）
+      "suspicious": { "noExplicitAny": "off" } // 关掉「禁止 any」，允许显式写 any
+    }
+  },
+  // 保存时自动整理 import 顺序
+  "assist": { "actions": { "source": { "organizeImports": "on" } } }
+}

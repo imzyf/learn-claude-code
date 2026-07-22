@@ -1,2 +1,4 @@
+# 允许运行 install/build 脚本的依赖白名单。
+# pnpm 出于安全默认会拦截这些脚本，把信任的包列在这里。
 allowBuilds:
-  esbuild: true
+  esbuild: true # esbuild 靠 postinstall 脚本下载当前系统对应的原生二进制，不放行就装不上、无法运行
