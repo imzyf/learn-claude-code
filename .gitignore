@@ -9,3 +9,4 @@ node_modules/
 .memory/
 .tasks/
 .claude/memory.json
+.scheduled_tasks.json

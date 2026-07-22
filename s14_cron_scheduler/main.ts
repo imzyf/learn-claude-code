@@ -4,598 +4,187 @@
  * 独立的定时器 + 队列处理器。
  *
  * 相比 s13 的变化：
- *   + CronJob 类型（id、cron、prompt、recurring、durable）
- *   + cronMatches：五段式 cron 表达式匹配，DOM/DOW 采用 OR 语义
+ *   工具层、任务系统、后台任务、prompt 组装继续直接复用，不再内联：
+ *     基础工具 handler 复用 s03，任务系统（makeTaskHandlers）复用 s12，
+ *     后台任务（BackgroundState / shouldRunBackground / startBackgroundTask /
+ *     collectBackgroundResults）与带 run_in_background 的 tools / TOOL_SCHEMAS
+ *     复用 s13，getSystemPrompt / Context 复用 s12 / s10，MEMORY_INDEX 复用 s09。
+ *     s11 的错误恢复在此照旧省略。
+ *   本文件只新增 cron 调度器这一层：
+ *   + CronJob 类型（id / cron / prompt / recurring / durable）
+ *   + CronState：scheduledJobs / cronQueue / lastFiredAt，由 session 持有、跨轮复用
+ *   + cronFor：croner 模式的构造+缓存单一入口，匹配与校验都走它
+ *     （DOM/DOW 的 OR 语义、步长/区间/校验都由库负责，不再手写字段匹配；
+ *      匹配内联进 runCronTick，校验靠构造抛错，均无需单独函数）
  *   + scheduleJob / cancelJob：注册/移除 cron 任务（带校验）
- *   + cron 调度器：1 秒间隔的定时器，把匹配的任务触发进 cronQueue
- *   + 队列处理器：200 毫秒间隔，在 agent 空闲时投递排队中的任务
- *   + 持久化存储：.scheduled_tasks.json（重启后仍保留）
- *   + 3 个新工具：schedule_cron、list_crons、cancel_cron
+ *   + runCronTick：单次扫描，把匹配的任务推进 cronQueue（定时器每秒调用）
+ *   + consumeCronQueue / hasCronQueue：agentLoop 与队列处理器读取触发结果
+ *   + makeCronHandlers + 3 个新工具：schedule_cron / list_crons / cancel_cron
+ *   + updateContext override：enabled_tools 补上 3 个 cron 工具
+ *   + agentLoop 在 s13 的基础上，循环开头多一步「消费 cron 队列 -> 注入 messages」
  *
  * 四个层次：
- *   1. 调度器：定时器检查时间 -> 触发匹配的任务
+ *   1. 调度器：1s 定时器检查时间 -> 触发匹配的任务进 cronQueue
  *   2. 队列：cronQueue 把调度器和 agent 循环解耦
- *   3. 队列处理器：当有排队任务且 agent 空闲时唤醒 agent
+ *   3. 队列处理器：有排队任务且 agent 空闲时唤醒 agent
  *   4. 消费者：agentLoop 消费排队任务，把它们注入 messages
  *
  * TS 特有说明：
- *   - Python 的守护线程 -> setInterval(...).unref() 定时器
- *   - Python 的 agent_lock -> agentBusy 布尔值（单线程事件循环）：
- *     用户输入要等它释放，队列处理器在它被占用时会跳过
- *     （相当于 acquire(blocking=False) 的效果）
- *   - JS 的 Date.getDay() 本身就用 cron 的 Sunday=0 约定（Python 那边需要转换）
+ *   - Python 的守护线程 -> setInterval(...).unref() 定时器；REPL 关闭时进程可正常退出。
+ *   - Python 的 agent_lock / threading.Lock -> agentBusy 布尔值（单线程事件循环，
+ *     无需真锁）：用户输入阻塞等待它释放，队列处理器在它被占用时直接跳过
+ *     （相当于 acquire(blocking=False)）。cron 状态的读写都在同一事件循环线程，
+ *     调度器 tick 与 consumeCronQueue 天然互斥，也不需要 cron_lock。
+ *   - cron 匹配/校验由 croner 库负责（new Cron(expr).match(date)）；无回调构造
+ *     只解析、不启动定时器，模式实例按表达式缓存复用。轮询架构与 code.py 保持一致。
+ *   - CronState 的 durablePath 可注入，测试传临时路径做隔离（对齐 s12 的 tasksDir）。
  *
  * Usage:
  *     pnpm dev s14_cron_scheduler/main.ts
  */
 
-import { exec, spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as readline from "node:readline/promises";
-import { promisify } from "node:util";
 import type Anthropic from "@anthropic-ai/sdk";
+import { Cron } from "croner";
 import { z } from "zod";
-import { createClient, MODEL_ID } from "../lib/model";
-import { textOf, zodTool } from "../lib/tools";
-
-const client = createClient();
-
-const WORKDIR = process.cwd();
-const MEMORY_DIR = path.join(WORKDIR, ".memory");
-const MEMORY_INDEX = path.join(MEMORY_DIR, "MEMORY.md");
+import { createLogger, type SessionLogger } from "../lib/logger";
+import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
+import { colorize, print } from "../lib/terminal";
+import { printProse, textOf, zodTool } from "../lib/tools";
+// 来自 s03：不含权限检查的基础 dispatch 表（前台 bash 走这里的同步 runBash）。
+import { TOOL_HANDLERS as BASE_TOOL_HANDLERS } from "../s03_permission/main";
+// 来自 s09：记忆索引路径。
+import { MEMORY_INDEX } from "../s09_memory/main";
+// 来自 s10：只借 Context 类型。
+import type { Context } from "../s10_system_prompt/main";
+// 来自 s12：任务工具工厂、prompt 组装，以及 memory/workspace 的 context 推导。
+import {
+  getSystemPrompt,
+  makeTaskHandlers,
+  updateContext as taskUpdateContext,
+} from "../s12_task_system/main";
+// 来自 s13：后台任务层 + 带 run_in_background 的 bash（tools / TOOL_SCHEMAS 已是
+// 「基础 + 任务 + bash 覆盖」的合并）。s14 在其上再叠加 cron 工具。
+import {
+  BackgroundState,
+  collectBackgroundResults,
+  TOOL_SCHEMAS as S13_TOOL_SCHEMAS,
+  tools as s13Tools,
+  shouldRunBackground,
+  startBackgroundTask,
+} from "../s13_background_tasks/main";
 
 const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
-const execAsync = promisify(exec);
 
-// ═══════════════════════════════════════════════════════════
-//  FROM s12 (synced): Task System
-// ═══════════════════════════════════════════════════════════
+type Handlers = Partial<Record<string, (input: any) => string>>;
 
-const TASKS_DIR = path.join(WORKDIR, ".tasks");
-fs.mkdirSync(TASKS_DIR, { recursive: true });
-
-type TaskStatus = "pending" | "in_progress" | "completed";
-
-type Task = {
-  id: string;
-  subject: string;
-  description: string;
-  status: TaskStatus;
-  owner: string | null;
-  blockedBy: string[];
+// deps 与 s13 一致：client + logger + memoryIndex + 跨轮的 background 状态；
+// 另加跨轮的 cron 状态。tasksDir 可选，透传给 makeTaskHandlers 做测试隔离。
+export type Deps = { client: ModelClient; logger: SessionLogger };
+export type LoopDeps = Deps & {
+  memoryIndex: string;
+  background: BackgroundState;
+  cron: CronState;
+  tasksDir?: string;
 };
 
-const taskPath = (taskId: string) => path.join(TASKS_DIR, `${taskId}.json`);
-
-function createTask(
-  subject: string,
-  description = "",
-  blockedBy: string[] = [],
-): Task {
-  const task: Task = {
-    id: `task_${Math.floor(Date.now() / 1000)}_${String(Math.floor(Math.random() * 10_000)).padStart(4, "0")}`,
-    subject,
-    description,
-    status: "pending",
-    owner: null,
-    blockedBy,
-  };
-  saveTask(task);
-  return task;
-}
-
-function saveTask(task: Task): void {
-  fs.writeFileSync(taskPath(task.id), JSON.stringify(task, null, 2));
-}
-
-function loadTask(taskId: string): Task {
-  return JSON.parse(fs.readFileSync(taskPath(taskId), "utf8")) as Task;
-}
-
-function listTasks(): Task[] {
-  return fs
-    .readdirSync(TASKS_DIR)
-    .filter((f) => f.startsWith("task_") && f.endsWith(".json"))
-    .sort()
-    .map(
-      (f) =>
-        JSON.parse(fs.readFileSync(path.join(TASKS_DIR, f), "utf8")) as Task,
-    );
-}
-
-// Return full task details as JSON.
-function getTask(taskId: string): string {
-  return JSON.stringify(loadTask(taskId), null, 2);
-}
-
-/**
- * Check if all blockedBy dependencies are completed.
- * Missing dependencies are treated as blocked.
- */
-function canStart(taskId: string): boolean {
-  const task = loadTask(taskId);
-  for (const depId of task.blockedBy) {
-    if (!fs.existsSync(taskPath(depId))) return false;
-    if (loadTask(depId).status !== "completed") return false;
-  }
-  return true;
-}
-
-function claimTask(taskId: string, owner = "agent"): string {
-  const task = loadTask(taskId);
-  if (task.status !== "pending") {
-    return `Task ${taskId} is ${task.status}, cannot claim`;
-  }
-  if (!canStart(taskId)) {
-    const deps = task.blockedBy.filter(
-      (d) => !fs.existsSync(taskPath(d)) || loadTask(d).status !== "completed",
-    );
-    return `Blocked by: [${deps.join(", ")}]`;
-  }
-  task.owner = owner;
-  task.status = "in_progress";
-  saveTask(task);
-  console.log(
-    `  \x1b[36m[claim] ${task.subject} → in_progress (owner: ${owner})\x1b[0m`,
-  );
-  return `Claimed ${task.id} (${task.subject})`;
-}
-
-function completeTask(taskId: string): string {
-  const task = loadTask(taskId);
-  if (task.status !== "in_progress") {
-    return `Task ${taskId} is ${task.status}, cannot complete`;
-  }
-  task.status = "completed";
-  saveTask(task);
-  const unblocked = listTasks()
-    .filter(
-      (t) => t.status === "pending" && t.blockedBy.length > 0 && canStart(t.id),
-    )
-    .map((t) => t.subject);
-  console.log(`  \x1b[32m[complete] ${task.subject} ✓\x1b[0m`);
-  let msg = `Completed ${task.id} (${task.subject})`;
-  if (unblocked.length) {
-    msg += `\nUnblocked: ${unblocked.join(", ")}`;
-    console.log(`  \x1b[33m[unblocked] ${unblocked.join(", ")}\x1b[0m`);
-  }
-  return msg;
-}
-
 // ═══════════════════════════════════════════════════════════
-//  FROM s10 (synced): Prompt Assembly
+//  s14 新增：Cron 调度器
 // ═══════════════════════════════════════════════════════════
 
-const PROMPT_SECTIONS = {
-  identity: "You are a coding agent. Act, don't explain.",
-  tools:
-    "Available tools: bash, read_file, write_file, " +
-    "create_task, list_tasks, get_task, claim_task, complete_task, " +
-    "schedule_cron, list_crons, cancel_cron.",
-  workspace: `Working directory: ${WORKDIR}`,
-  memory: "Relevant memories are injected below when available.",
-};
+// 默认持久化路径，落在 s14 自己的目录下（对齐 s12 的 .tasks/）。
+export const DURABLE_PATH = path.join(
+  import.meta.dirname,
+  ".scheduled_tasks.json",
+);
 
-type Context = {
-  enabled_tools: string[];
-  workspace: string;
-  memories: string;
-};
-
-function assembleSystemPrompt(context: Context): string {
-  const sections = [
-    PROMPT_SECTIONS.identity,
-    PROMPT_SECTIONS.tools,
-    PROMPT_SECTIONS.workspace,
-  ];
-  if (context.memories) {
-    sections.push(`Relevant memories:\n${context.memories}`);
-  }
-  return sections.join("\n\n");
-}
-
-let lastContextKey: string | null = null;
-let lastPrompt: string | null = null;
-
-const contextKey = (context: Context): string =>
-  JSON.stringify(context, Object.keys(context).sort());
-
-function getSystemPrompt(context: Context): string {
-  const key = contextKey(context);
-  if (key === lastContextKey && lastPrompt) {
-    return lastPrompt;
-  }
-  lastContextKey = key;
-  lastPrompt = assembleSystemPrompt(context);
-  return lastPrompt;
-}
-
-// ═══════════════════════════════════════════════════════════
-//  FROM s02 (unchanged): Basic tools
-// ═══════════════════════════════════════════════════════════
-
-function safePath(p: string): string {
-  const resolved = path.resolve(WORKDIR, p);
-  if (resolved !== WORKDIR && !resolved.startsWith(WORKDIR + path.sep)) {
-    throw new Error(`Path escapes workspace: ${p}`);
-  }
-  return resolved;
-}
-
-// run_in_background is handled by agentLoop dispatch, not here
-function runBash(command: string): string {
-  const r = spawnSync(command, {
-    shell: true,
-    cwd: WORKDIR,
-    encoding: "utf8",
-    timeout: 120_000,
-  });
-  if (r.error) {
-    const code = (r.error as NodeJS.ErrnoException).code;
-    if (code === "ETIMEDOUT") return "Error: Timeout (120s)";
-    return `Error: ${r.error.message}`;
-  }
-  const out = ((r.stdout ?? "") + (r.stderr ?? "")).trim();
-  return out ? out.slice(0, 50_000) : "(no output)";
-}
-
-// Async variant for background execution — keeps the event loop free.
-async function runBashAsync(command: string): Promise<string> {
-  try {
-    const { stdout, stderr } = await execAsync(command, {
-      cwd: WORKDIR,
-      timeout: 120_000,
-      maxBuffer: 10 * 1024 * 1024,
-    });
-    const out = (stdout + stderr).trim();
-    return out ? out.slice(0, 50_000) : "(no output)";
-  } catch (e) {
-    const err = e as { stdout?: string; stderr?: string; killed?: boolean };
-    if (err.killed) return "Error: Timeout (120s)";
-    const out = ((err.stdout ?? "") + (err.stderr ?? "")).trim();
-    return out ? out.slice(0, 50_000) : `Error: ${errMsg(e)}`;
-  }
-}
-
-function runRead(p: string, limit?: number): string {
-  try {
-    let lines = fs.readFileSync(safePath(p), "utf8").split("\n");
-    if (limit && limit < lines.length) {
-      lines = [
-        ...lines.slice(0, limit),
-        `... (${lines.length - limit} more lines)`,
-      ];
-    }
-    return lines.join("\n");
-  } catch (e) {
-    return `Error: ${errMsg(e)}`;
-  }
-}
-
-function runWrite(p: string, content: string): string {
-  try {
-    const filePath = safePath(p);
-    fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    fs.writeFileSync(filePath, content);
-    return `Wrote ${Buffer.byteLength(content)} bytes to ${p}`;
-  } catch (e) {
-    return `Error: ${errMsg(e)}`;
-  }
-}
-
-// ── Task tools ──
-
-function runCreateTask(
-  subject: string,
-  description = "",
-  blockedBy?: string[],
-): string {
-  const task = createTask(subject, description, blockedBy ?? []);
-  const deps = blockedBy?.length ? ` (blockedBy: ${blockedBy.join(", ")})` : "";
-  console.log(`  \x1b[34m[create] ${task.subject}${deps}\x1b[0m`);
-  return `Created ${task.id}: ${task.subject}${deps}`;
-}
-
-function runListTasks(): string {
-  const tasks = listTasks();
-  if (!tasks.length) return "No tasks. Use create_task to add some.";
-  const icons: Record<TaskStatus, string> = {
-    pending: "○",
-    in_progress: "●",
-    completed: "✓",
-  };
-  return tasks
-    .map((t) => {
-      const icon = icons[t.status] ?? "?";
-      const deps = t.blockedBy.length
-        ? ` (blockedBy: ${t.blockedBy.join(", ")})`
-        : "";
-      const owner = t.owner ? ` [${t.owner}]` : "";
-      return `  ${icon} ${t.id}: ${t.subject} [${t.status}]${owner}${deps}`;
-    })
-    .join("\n");
-}
-
-function runGetTask(taskId: string): string {
-  try {
-    return getTask(taskId);
-  } catch {
-    return `Error: Task ${taskId} not found`;
-  }
-}
-
-function runClaimTask(taskId: string): string {
-  return claimTask(taskId, "agent");
-}
-
-function runCompleteTask(taskId: string): string {
-  return completeTask(taskId);
-}
-
-// ═══════════════════════════════════════════════════════════
-//  FROM s13 (synced): Background Tasks
-// ═══════════════════════════════════════════════════════════
-
-let bgCounter = 0;
-type BgTask = {
-  toolCallId: string;
-  command: string;
-  status: "running" | "completed";
-};
-const backgroundTasks: Record<string, BgTask> = {};
-const backgroundResults: Record<string, string> = {};
-
-// Fallback heuristic: commands likely to take > 30s.
-function isSlowOperation(toolName: string, toolInput: any): boolean {
-  if (toolName !== "bash") return false;
-  const cmd = String(toolInput.command ?? "").toLowerCase();
-  const slowKeywords = [
-    "install",
-    "build",
-    "test",
-    "deploy",
-    "compile",
-    "docker build",
-    "pip install",
-    "npm install",
-    "cargo build",
-    "pytest",
-    "make",
-  ];
-  return slowKeywords.some((kw) => cmd.includes(kw));
-}
-
-// Model explicit request takes priority; fallback to heuristic.
-function shouldRunBackground(toolName: string, toolInput: any): boolean {
-  if (toolInput.run_in_background) return true;
-  return isSlowOperation(toolName, toolInput);
-}
-
-// Execute a tool call, return output.
-function executeTool(toolName: string, input: any): string {
-  const handler = TOOL_HANDLERS[toolName];
-  if (handler) return handler(input);
-  return `Unknown tool: ${toolName}`;
-}
-
-// Run tool in a detached async worker. Returns background task ID.
-function startBackgroundTask(
-  toolName: string,
-  toolCallId: string,
-  input: any,
-): string {
-  bgCounter += 1;
-  const bgId = `bg_${String(bgCounter).padStart(4, "0")}`;
-  const cmd = String(input.command ?? toolName);
-
-  backgroundTasks[bgId] = { toolCallId, command: cmd, status: "running" };
-  void (async () => {
-    const result =
-      toolName === "bash"
-        ? await runBashAsync(String(input.command ?? ""))
-        : executeTool(toolName, input);
-    backgroundTasks[bgId].status = "completed";
-    backgroundResults[bgId] = result;
-  })();
-
-  console.log(
-    `  \x1b[33m[background] dispatched ${bgId}: ${cmd.slice(0, 40)}\x1b[0m`,
-  );
-  return bgId;
-}
-
-// Collect completed background results as task_notification messages.
-function collectBackgroundResults(): string[] {
-  const readyIds = Object.entries(backgroundTasks)
-    .filter(([, task]) => task.status === "completed")
-    .map(([id]) => id);
-  const notifications: string[] = [];
-  for (const bgId of readyIds) {
-    const task = backgroundTasks[bgId];
-    delete backgroundTasks[bgId];
-    const output = backgroundResults[bgId] ?? "";
-    delete backgroundResults[bgId];
-    const summary = output.slice(0, 200);
-    notifications.push(
-      `<task_notification>\n` +
-        `  <task_id>${bgId}</task_id>\n` +
-        `  <status>completed</status>\n` +
-        `  <command>${task.command}</command>\n` +
-        `  <summary>${summary}</summary>\n` +
-        `</task_notification>`,
-    );
-    console.log(
-      `  \x1b[32m[background done] ${bgId}: ${task.command.slice(0, 40)} (${output.length} chars)\x1b[0m`,
-    );
-  }
-  return notifications;
-}
-
-// ═══════════════════════════════════════════════════════════
-//  NEW in s14: Cron Scheduler
-// ═══════════════════════════════════════════════════════════
-
-const DURABLE_PATH = path.join(WORKDIR, ".scheduled_tasks.json");
-
-type CronJob = {
+export type CronJob = {
   id: string;
   cron: string; // "0 9 * * *"
-  prompt: string; // message to inject when fired
-  recurring: boolean; // true = recurring, false = one-shot
-  durable: boolean; // true = persist to disk
+  prompt: string; // 触发时注入的消息
+  recurring: boolean; // true = 周期，false = 一次性
+  durable: boolean; // true = 持久化到磁盘
 };
 
-const scheduledJobs = new Map<string, CronJob>();
-const cronQueue: CronJob[] = [];
-const lastFiredAt = new Map<string, string>(); // job_id → "YYYY-MM-DD HH:MM"
+// cron 生命周期状态：由 session 持有、跨轮复用（对齐 code.py 的模块全局）。
+// durablePath 可注入，测试传临时路径做隔离。
+export class CronState {
+  // 已注册的任务，按 job.id 索引。
+  scheduledJobs = new Map<string, CronJob>();
+  // 已触发、等待投递给 agent 的任务。
+  cronQueue: CronJob[] = [];
+  // job.id -> "YYYY-MM-DD HH:MM"，防止同一分钟内重复触发。
+  lastFiredAt = new Map<string, string>();
 
-const isDigits = (s: string) => /^\d+$/.test(s);
-
-// Match a single cron field against a value.
-function cronFieldMatches(field: string, value: number): boolean {
-  if (field === "*") return true;
-  if (field.startsWith("*/")) {
-    const step = Number(field.slice(2));
-    return step > 0 && value % step === 0;
-  }
-  if (field.includes(",")) {
-    return field.split(",").some((f) => cronFieldMatches(f.trim(), value));
-  }
-  if (field.includes("-")) {
-    const i = field.indexOf("-");
-    return (
-      Number(field.slice(0, i)) <= value && value <= Number(field.slice(i + 1))
-    );
-  }
-  return value === Number(field);
+  constructor(public durablePath: string = DURABLE_PATH) {}
 }
 
-/**
- * Check if a 5-field cron expression matches the given Date.
- * Standard cron semantics: DOM and DOW use OR when both are constrained.
- */
-function cronMatches(cronExpr: string, dt: Date): boolean {
-  const fields = cronExpr.trim().split(/\s+/);
-  if (fields.length !== 5) return false;
-  const [minute, hour, dom, month, dow] = fields;
-  const dowVal = dt.getDay(); // JS: Sunday=0, same as cron
-
-  const m = cronFieldMatches(minute, dt.getMinutes());
-  const h = cronFieldMatches(hour, dt.getHours());
-  const domOk = cronFieldMatches(dom, dt.getDate());
-  const monthOk = cronFieldMatches(month, dt.getMonth() + 1);
-  const dowOk = cronFieldMatches(dow, dowVal);
-
-  // Minute, hour, month must all match
-  if (!(m && h && monthOk)) return false;
-  // DOM and DOW: if both constrained, either matching is enough (OR)
-  const domUnconstrained = dom === "*";
-  const dowUnconstrained = dow === "*";
-  if (domUnconstrained && dowUnconstrained) return true;
-  if (domUnconstrained) return dowOk;
-  if (dowUnconstrained) return domOk;
-  return domOk || dowOk;
-}
-
-// Validate a single cron field value is within [lo, hi].
-function validateCronField(
-  field: string,
-  lo: number,
-  hi: number,
-): string | null {
-  if (field === "*") return null;
-  if (field.startsWith("*/")) {
-    const stepStr = field.slice(2);
-    if (!isDigits(stepStr)) return `Invalid step: ${field}`;
-    if (Number(stepStr) <= 0) return `Step must be > 0: ${field}`;
-    return null;
-  }
-  if (field.includes(",")) {
-    for (const part of field.split(",")) {
-      const err = validateCronField(part.trim(), lo, hi);
-      if (err) return err;
-    }
-    return null;
-  }
-  if (field.includes("-")) {
-    const i = field.indexOf("-");
-    const loStr = field.slice(0, i);
-    const hiStr = field.slice(i + 1);
-    if (!isDigits(loStr) || !isDigits(hiStr)) return `Invalid range: ${field}`;
-    const a = Number(loStr);
-    const b = Number(hiStr);
-    if (a < lo || a > hi || b < lo || b > hi)
-      return `Range ${field} out of bounds [${lo}-${hi}]`;
-    if (a > b) return `Range start > end: ${field}`;
-    return null;
-  }
-  if (!isDigits(field)) return `Invalid field: ${field}`;
-  const val = Number(field);
-  if (val < lo || val > hi) return `Value ${val} out of bounds [${lo}-${hi}]`;
-  return null;
-}
-
-// Validate a cron expression. Returns error message or null.
-function validateCron(cronExpr: string): string | null {
-  const fields = cronExpr.trim().split(/\s+/);
-  if (fields.length !== 5) return `Expected 5 fields, got ${fields.length}`;
-  const bounds: [number, number][] = [
-    [0, 59],
-    [0, 23],
-    [1, 31],
-    [1, 12],
-    [0, 6],
-  ];
-  const names = ["minute", "hour", "day-of-month", "month", "day-of-week"];
-  for (let i = 0; i < 5; i++) {
-    const err = validateCronField(fields[i], bounds[i][0], bounds[i][1]);
-    if (err) return `${names[i]}: ${err}`;
-  }
-  return null;
-}
-
-// Persist durable jobs to .scheduled_tasks.json.
-function saveDurableJobs(): void {
-  const durable = [...scheduledJobs.values()].filter((j) => j.durable);
-  fs.writeFileSync(DURABLE_PATH, JSON.stringify(durable, null, 2));
-}
-
-// Load durable jobs from disk on startup.
-function loadDurableJobs(): void {
-  if (!fs.existsSync(DURABLE_PATH)) return;
+// 启动时从磁盘加载 durable 任务；损坏或非法的任务跳过。
+export function loadDurableJobs(state: CronState, logger: SessionLogger): void {
+  if (!fs.existsSync(state.durablePath)) return;
   try {
-    const jobs = JSON.parse(fs.readFileSync(DURABLE_PATH, "utf8")) as CronJob[];
+    const jobs = JSON.parse(
+      fs.readFileSync(state.durablePath, "utf8"),
+    ) as CronJob[];
     let loaded = 0;
     for (const job of jobs) {
-      const err = validateCron(job.cron);
-      if (err) {
-        console.log(
-          `  \x1b[31m[cron] skipping invalid job ${job.id}: ${err}\x1b[0m`,
+      try {
+        cronFor(job.cron); // 构造抛错即非法，跳过
+      } catch (e) {
+        logger.console(
+          `  [cron] skipping invalid job ${job.id}: ${errMsg(e)}`,
+          "red",
         );
         continue;
       }
-      scheduledJobs.set(job.id, job);
+      state.scheduledJobs.set(job.id, job);
       loaded += 1;
     }
-    if (loaded) {
-      console.log(`  \x1b[35m[cron] loaded ${loaded} durable job(s)\x1b[0m`);
-    }
+    if (loaded)
+      logger.console(`  [cron] loaded ${loaded} durable job(s)`, "magenta");
   } catch {
-    // corrupted durable file: start empty
+    // 持久化文件损坏：从空开始。
+    logger.console(
+      `  [cron] failed to load durable jobs, starting empty`,
+      "red",
+    );
   }
 }
 
-// Register a new cron job. Returns CronJob or error string.
-function scheduleJob(
+// croner 每个模式解析一次即可复用；match 是纯计算、不启定时器，可安全缓存。
+const patternCache = new Map<string, Cron>();
+function cronFor(expr: string): Cron {
+  let cron = patternCache.get(expr);
+  if (!cron) {
+    cron = new Cron(expr);
+    patternCache.set(expr, cron);
+  }
+  return cron;
+}
+
+// 把 durable 任务持久化到磁盘。
+export function saveDurableJobs(state: CronState): void {
+  const durable = [...state.scheduledJobs.values()].filter((j) => j.durable);
+  fs.writeFileSync(state.durablePath, JSON.stringify(durable, null, 2));
+}
+
+// 注册一个 cron 任务，返回 CronJob 或错误字符串。
+export function scheduleJob(
+  state: CronState,
   cron: string,
   prompt: string,
-  recurring = true,
-  durable = true,
+  recurring: boolean,
+  durable: boolean,
+  logger: SessionLogger,
 ): CronJob | string {
-  const err = validateCron(cron);
-  if (err) return err;
+  try {
+    cronFor(cron); // 构造抛错即非法，把错误信息回传给调用方
+  } catch (e) {
+    return errMsg(e);
+  }
   const job: CronJob = {
     id: `cron_${String(Math.floor(Math.random() * 1_000_000)).padStart(6, "0")}`,
     cron,
@@ -603,93 +192,107 @@ function scheduleJob(
     recurring,
     durable,
   };
-  scheduledJobs.set(job.id, job);
-  if (durable) saveDurableJobs();
-  console.log(
-    `  \x1b[35m[cron register] ${job.id} '${cron}' → ${prompt.slice(0, 40)}\x1b[0m`,
+  state.scheduledJobs.set(job.id, job);
+  if (durable) saveDurableJobs(state);
+  logger.console(
+    `  [cron register] ${job.id} '${cron}' → ${prompt.slice(0, 40)}`,
+    "magenta",
   );
   return job;
 }
 
-// Cancel a cron job.
-function cancelJob(jobId: string): string {
-  const job = scheduledJobs.get(jobId);
+// 移除一个 cron 任务。
+export function cancelJob(
+  state: CronState,
+  jobId: string,
+  logger: SessionLogger,
+): string {
+  const job = state.scheduledJobs.get(jobId);
   if (!job) return `Job ${jobId} not found`;
-  scheduledJobs.delete(jobId);
-  if (job.durable) saveDurableJobs();
-  console.log(`  \x1b[31m[cron cancel] ${jobId}\x1b[0m`);
+  state.scheduledJobs.delete(jobId);
+  if (job.durable) saveDurableJobs(state);
+  logger.console(`  [cron cancel] ${jobId}`, "red");
   return `Cancelled ${jobId}`;
 }
 
-/**
- * Independent 1s interval timer (Python: daemon thread), fires matching jobs.
- * Individual job errors are caught to prevent one bad job from killing the
- * scheduler. unref() lets the process exit when the REPL closes.
- */
-function startCronScheduler(): void {
-  setInterval(() => {
-    const now = new Date();
-    const pad = (n: number) => String(n).padStart(2, "0");
-    // Date-aware marker prevents daily jobs from skipping on day 2+
-    const minuteMarker =
-      `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ` +
-      `${pad(now.getHours())}:${pad(now.getMinutes())}`;
-    for (const job of [...scheduledJobs.values()]) {
-      try {
-        if (cronMatches(job.cron, now)) {
-          if (lastFiredAt.get(job.id) !== minuteMarker) {
-            cronQueue.push(job);
-            lastFiredAt.set(job.id, minuteMarker);
-            console.log(
-              `  \x1b[35m[cron fire] ${job.id} → ${job.prompt.slice(0, 40)}\x1b[0m`,
-            );
-          }
-          if (!job.recurring) {
-            scheduledJobs.delete(job.id);
-            if (job.durable) saveDurableJobs();
-          }
+// 单次扫描：把匹配当前时间的任务推进 cronQueue，一次性任务触发后即移除。
+// 单个任务出错就地捕获，避免一个坏任务拖垮整个调度器。
+export function runCronTick(
+  state: CronState,
+  now: Date,
+  logger: SessionLogger,
+): void {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  // 含日期的标记，避免每日任务在第 2 天起被跳过。
+  const minuteMarker =
+    `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ` +
+    `${pad(now.getHours())}:${pad(now.getMinutes())}`;
+  // 秒清零：5 段 cron 是分钟粒度，抹掉秒让整分钟内任意时刻都能命中。
+  // 匹配交给 croner（DOM/DOW 的 OR、步长/区间/列表都由库负责）；构造抛错即非法，
+  // 由下方每个 job 的 try/catch 兜底（已注册任务都过了校验，实际到不了）。
+  const atMinute = new Date(now);
+  atMinute.setSeconds(0, 0);
+  for (const job of [...state.scheduledJobs.values()]) {
+    try {
+      if (cronFor(job.cron).match(atMinute)) {
+        if (state.lastFiredAt.get(job.id) !== minuteMarker) {
+          state.cronQueue.push(job);
+          state.lastFiredAt.set(job.id, minuteMarker);
+          logger.console(
+            `  [cron fire] ${job.id} → ${job.prompt.slice(0, 40)}`,
+            "magenta",
+          );
         }
-      } catch (e) {
-        console.log(`  \x1b[31m[cron error] ${job.id}: ${errMsg(e)}\x1b[0m`);
+        if (!job.recurring) {
+          state.scheduledJobs.delete(job.id);
+          if (job.durable) saveDurableJobs(state);
+        }
       }
+    } catch (e) {
+      logger.console(`  [cron error] ${job.id}: ${errMsg(e)}`, "red");
     }
-  }, 1000).unref();
+  }
 }
 
-// Consume fired jobs from cronQueue (called by agentLoop).
-function consumeCronQueue(): CronJob[] {
-  const fired = [...cronQueue];
-  cronQueue.length = 0;
+// 拉起 1s 定时器（守护线程的 TS 版），unref 让 REPL 关闭时进程可退出。
+export function startCronScheduler(
+  state: CronState,
+  logger: SessionLogger,
+): NodeJS.Timeout {
+  const timer = setInterval(() => runCronTick(state, new Date(), logger), 1000);
+  timer.unref();
+  return timer;
+}
+
+// 取出已触发的任务（agentLoop 调用），清空队列。
+export function consumeCronQueue(state: CronState): CronJob[] {
+  const fired = [...state.cronQueue];
+  state.cronQueue.length = 0;
   return fired;
 }
 
-// Return whether fired cron jobs are waiting to be delivered.
-function hasCronQueue(): boolean {
-  return cronQueue.length > 0;
+// 是否有已触发、等待投递的任务。
+export function hasCronQueue(state: CronState): boolean {
+  return state.cronQueue.length > 0;
 }
 
-// Load durable jobs on startup, then start the scheduler timer
-loadDurableJobs();
-startCronScheduler();
-console.log("  \x1b[35m[cron] scheduler timer started\x1b[0m");
+// ── cron 工具 handler ─────────────────────────────────────
 
-// ── Cron tools ──
-
-function runScheduleCron(
+export function runScheduleCron(
+  state: CronState,
   cron: string,
   prompt: string,
-  recurring = true,
-  durable = true,
+  recurring: boolean,
+  durable: boolean,
+  logger: SessionLogger,
 ): string {
-  const result = scheduleJob(cron, prompt, recurring, durable);
-  if (typeof result === "string") {
-    return `Error: ${result}`;
-  }
+  const result = scheduleJob(state, cron, prompt, recurring, durable, logger);
+  if (typeof result === "string") return `Error: ${result}`;
   return `Scheduled ${result.id}: '${cron}' → ${prompt}`;
 }
 
-function runListCrons(): string {
-  const jobs = [...scheduledJobs.values()];
+export function runListCrons(state: CronState): string {
+  const jobs = [...state.scheduledJobs.values()];
   if (!jobs.length) return "No cron jobs. Use schedule_cron to add one.";
   return jobs
     .map((j) => {
@@ -700,30 +303,38 @@ function runListCrons(): string {
     .join("\n");
 }
 
-function runCancelCron(jobId: string): string {
-  return cancelJob(jobId);
+export function runCancelCron(
+  state: CronState,
+  jobId: string,
+  logger: SessionLogger,
+): string {
+  return cancelJob(state, jobId, logger);
 }
 
-// ── Tool definitions ──
+// cron handler 需要 cron 状态 + logger，用工厂闭包捕获，再与基础/任务 handler 合并。
+export function makeCronHandlers(
+  state: CronState,
+  logger: SessionLogger,
+): Handlers {
+  return {
+    schedule_cron: ({ cron, prompt, recurring, durable }) =>
+      runScheduleCron(
+        state,
+        cron,
+        prompt,
+        recurring ?? true,
+        durable ?? true,
+        logger,
+      ),
+    list_crons: () => runListCrons(state),
+    cancel_cron: ({ job_id }) => runCancelCron(state, job_id, logger),
+  };
+}
 
-const bashSchema = z.object({
-  command: z.string(),
-  run_in_background: z.boolean().optional(),
-});
-const readSchema = z.object({
-  path: z.string(),
-  limit: z.number().int().optional(),
-});
-const writeSchema = z.object({ path: z.string(), content: z.string() });
-const createTaskSchema = z.object({
-  subject: z.string(),
-  description: z.string().optional(),
-  blockedBy: z.array(z.string()).optional(),
-});
-const listTasksSchema = z.object({});
-const getTaskSchema = z.object({ task_id: z.string() });
-const claimTaskSchema = z.object({ task_id: z.string() });
-const completeTaskSchema = z.object({ task_id: z.string() });
+// ═══════════════════════════════════════════════════════════
+//  s14 新增：cron 工具定义，叠加到 s13 的工具集之上
+// ═══════════════════════════════════════════════════════════
+
 const scheduleCronSchema = z.object({
   cron: z.string().describe("5-field cron expression"),
   prompt: z.string().describe("Message to inject when fired"),
@@ -733,35 +344,7 @@ const scheduleCronSchema = z.object({
 const listCronsSchema = z.object({});
 const cancelCronSchema = z.object({ job_id: z.string() });
 
-const tools: Anthropic.Tool[] = [
-  zodTool("bash", "Run a shell command.", bashSchema),
-  zodTool("read_file", "Read file contents.", readSchema),
-  zodTool("write_file", "Write content to a file.", writeSchema),
-  zodTool(
-    "create_task",
-    "Create a new task with optional blockedBy dependencies.",
-    createTaskSchema,
-  ),
-  zodTool(
-    "list_tasks",
-    "List all tasks with status, owner, and dependencies.",
-    listTasksSchema,
-  ),
-  zodTool(
-    "get_task",
-    "Get full details of a specific task by ID.",
-    getTaskSchema,
-  ),
-  zodTool(
-    "claim_task",
-    "Claim a pending task. Sets owner, changes status to in_progress.",
-    claimTaskSchema,
-  ),
-  zodTool(
-    "complete_task",
-    "Complete an in-progress task. Reports unblocked downstream tasks.",
-    completeTaskSchema,
-  ),
+const cronTools: Anthropic.Tool[] = [
   zodTool(
     "schedule_cron",
     "Schedule a cron job. cron is 5-field: min hour dom month dow.",
@@ -771,71 +354,62 @@ const tools: Anthropic.Tool[] = [
   zodTool("cancel_cron", "Cancel a cron job by ID.", cancelCronSchema),
 ];
 
-const TOOL_SCHEMAS: Partial<Record<string, z.ZodObject>> = {
-  bash: bashSchema,
-  read_file: readSchema,
-  write_file: writeSchema,
-  create_task: createTaskSchema,
-  list_tasks: listTasksSchema,
-  get_task: getTaskSchema,
-  claim_task: claimTaskSchema,
-  complete_task: completeTaskSchema,
+// tools 以 s13（基础 + 任务 + bash 覆盖）为底，追加 3 个 cron 工具。
+export const tools: Anthropic.Tool[] = [...s13Tools, ...cronTools];
+
+// schema 表同理：以 s13 为底，追加 cron schema。
+export const TOOL_SCHEMAS: Partial<Record<string, z.ZodObject>> = {
+  ...S13_TOOL_SCHEMAS,
   schedule_cron: scheduleCronSchema,
   list_crons: listCronsSchema,
   cancel_cron: cancelCronSchema,
 };
 
-const TOOL_HANDLERS: Partial<Record<string, (input: any) => string>> = {
-  bash: ({ command }) => runBash(command),
-  read_file: ({ path, limit }) => runRead(path, limit),
-  write_file: ({ path, content }) => runWrite(path, content),
-  create_task: ({ subject, description, blockedBy }) =>
-    runCreateTask(subject, description ?? "", blockedBy),
-  list_tasks: () => runListTasks(),
-  get_task: ({ task_id }) => runGetTask(task_id),
-  claim_task: ({ task_id }) => runClaimTask(task_id),
-  complete_task: ({ task_id }) => runCompleteTask(task_id),
-  schedule_cron: ({ cron, prompt, recurring, durable }) =>
-    runScheduleCron(cron, prompt, recurring ?? true, durable ?? true),
-  list_crons: () => runListCrons(),
-  cancel_cron: ({ job_id }) => runCancelCron(job_id),
-};
+// 合并后的工具名（基础 + 任务 + 后台 bash + cron），用于填 enabled_tools。
+export const TOOL_NAMES: string[] = tools.map((t) => t.name);
 
-// ── Context ──
-
-// Derive context from real state.
-function updateContext(): Context {
-  let memories = "";
-  if (fs.existsSync(MEMORY_INDEX)) {
-    memories = fs.readFileSync(MEMORY_INDEX, "utf8").trim();
-  }
-  return {
-    enabled_tools: Object.keys(TOOL_HANDLERS),
-    workspace: WORKDIR,
-    memories,
-  };
+// 复用 s12 的 memory/workspace 推导，只把 enabled_tools 换成含 cron 的完整列表，
+// 这样 getSystemPrompt 组装出的「Available tools」也会带上 cron 工具。
+export function updateContext(memoryIndex: string): Context {
+  return { ...taskUpdateContext(memoryIndex), enabled_tools: TOOL_NAMES };
 }
 
 // ═══════════════════════════════════════════════════════════
-//  agentLoop — simplified, focused on cron scheduler
+//  agentLoop —— 精简版，聚焦 cron 调度（省略 s11 的错误恢复）
 // ═══════════════════════════════════════════════════════════
-// Teaching code keeps a basic agent loop. S11's full error recovery is omitted.
-// startCronScheduler produces work; startQueueProcessor wakes this loop when
-// queued work exists and no other agent turn is running.
+// startCronScheduler 产出工作；startQueueProcessor 在有排队任务且无其他 agent
+// 轮次运行时唤醒本循环；agentLoop 在循环开头消费 cron 队列并注入 messages。
 
-async function agentLoop(
+export async function agentLoop(
   messages: Anthropic.MessageParam[],
   context: Context,
+  deps: LoopDeps,
 ): Promise<string> {
+  const { client, logger, memoryIndex, tasksDir, background, cron } = deps;
   let system = getSystemPrompt(context);
+  // 基础工具（前台 bash / 文件工具）+ 任务工具 + cron 工具。
+  const handlers: Handlers = {
+    ...BASE_TOOL_HANDLERS,
+    ...makeTaskHandlers(logger, tasksDir),
+    ...makeCronHandlers(cron, logger),
+  };
+
   while (true) {
-    // Layer 4: consume fired cron jobs → inject as messages
-    const fired = consumeCronQueue();
+    // Layer 4：消费已触发的 cron 任务，作为 user 消息注入。
+    const fired = consumeCronQueue(cron);
     for (const job of fired) {
       messages.push({ role: "user", content: `[Scheduled] ${job.prompt}` });
-      console.log(`  \x1b[35m[inject cron] ${job.prompt.slice(0, 50)}\x1b[0m`);
+      logger.console(`  [inject cron] ${job.prompt.slice(0, 50)}`, "magenta");
     }
 
+    logger.section(
+      "SYSTEM PROMPT",
+      `enabled_tools: ${JSON.stringify(Object.keys(handlers))}` +
+        `\nworkspace: ${context.workspace}` +
+        `\n\nBackgroundState:\n${JSON.stringify(background)}` +
+        `\n\nCronState: ${cron.scheduledJobs.size} job(s), queue=${cron.cronQueue.length}`,
+    );
+    logger.request(messages, true);
     let response: Anthropic.Message;
     try {
       response = await client.messages.create({
@@ -846,10 +420,13 @@ async function agentLoop(
         max_tokens: 8000,
       });
     } catch (e) {
-      const errText = `[Error] ${e instanceof Error ? e.name : "Error"}: ${errMsg(e)}`;
+      logger.responseError(e);
+      const name = e instanceof Error ? e.name : "Error";
+      const errText = `[Error] ${name}: ${errMsg(e)}`;
       messages.push({ role: "assistant", content: errText });
       return errText;
     }
+    logger.response(response);
 
     messages.push({ role: "assistant", content: response.content });
     if (response.stop_reason !== "tool_use") {
@@ -858,21 +435,37 @@ async function agentLoop(
 
     const results: Anthropic.ToolResultBlockParam[] = [];
     for (const block of response.content) {
-      if (block.type !== "tool_use") continue;
-      console.log(`\x1b[36m> ${block.name}\x1b[0m`);
+      printProse(block);
+      if (block.type !== "tool_use") {
+        continue;
+      }
       const schema = TOOL_SCHEMAS[block.name];
       const input = schema ? schema.parse(block.input) : (block.input as any);
 
+      // 后台执行：模型显式请求 run_in_background 或启发式判断为慢操作。
       if (shouldRunBackground(block.name, input)) {
-        const bgId = startBackgroundTask(block.name, block.id, input);
+        const backgroundId = startBackgroundTask(
+          background,
+          handlers,
+          block.name,
+          block.id,
+          input,
+          logger,
+        );
         results.push({
           type: "tool_result",
           tool_use_id: block.id,
-          content: `[Background task ${bgId} started] Result will be available when complete.`,
+          content:
+            `[Background task ${backgroundId} started] ` +
+            `Command: ${input.command ?? ""}. ` +
+            `Result will be available when complete.`,
         });
       } else {
-        const output = executeTool(block.name, input);
-        console.log(output.slice(0, 300));
+        // 前台执行：同步调用 handler，返回结果。
+        const handler = handlers[block.name];
+        const output =
+          handler && schema ? handler(input) : `Unknown: ${block.name}`;
+        logger.toolResult(block.name, output);
         results.push({
           type: "tool_result",
           tool_use_id: block.id,
@@ -881,89 +474,115 @@ async function agentLoop(
       }
     }
 
-    // tool_result blocks and background notifications share one user message
-    const bgNotifications = collectBackgroundResults();
+    // tool_result 块和后台通知一起放进同一条 user 消息。
+    const backgroundNotifications = collectBackgroundResults(
+      background,
+      logger,
+    );
     const content: Anthropic.ContentBlockParam[] = [
       ...results,
-      ...bgNotifications.map((n) => ({ type: "text" as const, text: n })),
+      ...backgroundNotifications.map((n) => ({
+        type: "text" as const,
+        text: n,
+      })),
     ];
     messages.push({ role: "user", content });
+    if (backgroundNotifications.length) {
+      logger.section(
+        "INJECTED BACKGROUND NOTIFICATIONS",
+        backgroundNotifications.join("\n\n"),
+      );
+    }
 
-    context = updateContext();
+    context = updateContext(memoryIndex);
     system = getSystemPrompt(context);
   }
 }
 
-// ── Session state + agent lock ──────────────────────────
+// ── 入口 ──────────────────────────────────────────
+if (import.meta.main) {
+  const client = createClient();
+  const logger = createLogger(import.meta.dirname);
+  logger.config({ model: MODEL_ID, tools });
 
-const sessionHistory: Anthropic.MessageParam[] = [];
-let sessionContext = updateContext();
+  print("s14: Cron Scheduler — 独立定时器 + 队列处理器", "cyan");
+  print("输入问题，回车发送。输入 q 退出。\n", "green");
 
-// Single-threaded analog of Python's agent_lock: the queue processor skips
-// when held (acquire(blocking=False)); user input waits for it.
-let agentBusy = false;
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+  rl.on("SIGINT", () => {
+    rl.close();
+    process.exit(0);
+  });
 
-// Run one agent turn. Caller must hold the agent lock (agentBusy === true).
-async function runAgentTurnLocked(userQuery?: string): Promise<void> {
-  if (userQuery !== undefined) {
-    sessionHistory.push({ role: "user", content: userQuery });
+  const history: Anthropic.MessageParam[] = [];
+  // 后台状态与 cron 状态各一份，跨轮复用。
+  const background = new BackgroundState();
+  const cron = new CronState();
+  let context = updateContext(MEMORY_INDEX);
+
+  // 启动时加载持久化任务，再拉起 1s 定时器。
+  loadDurableJobs(cron, logger);
+  startCronScheduler(cron, logger);
+  logger.console("  [cron] scheduler timer started", "magenta");
+
+  // agentBusy：单线程事件循环里 Python agent_lock 的等价物。
+  let agentBusy = false;
+  async function runAgentTurnLocked(userQuery?: string): Promise<void> {
+    if (userQuery !== undefined) {
+      history.push({ role: "user", content: userQuery });
+    }
+    const finalText = await agentLoop(history, context, {
+      client,
+      logger,
+      memoryIndex: MEMORY_INDEX,
+      background,
+      cron,
+    });
+    context = updateContext(MEMORY_INDEX);
+    print(finalText, "green");
+    print();
   }
-  const finalText = await agentLoop(sessionHistory, sessionContext);
-  sessionContext = updateContext();
-  console.log(finalText);
-  console.log();
-}
 
-// Auto-deliver fired cron jobs when the agent is idle.
-function startQueueProcessor(): void {
-  setInterval(async () => {
-    if (!hasCronQueue() || agentBusy) return;
+  // 队列处理器：cron 触发的任务在 agent 空闲时自动投递（200ms 轮询）。
+  const queueProcessor = setInterval(async () => {
+    if (!hasCronQueue(cron) || agentBusy) return;
     agentBusy = true;
     try {
-      if (!hasCronQueue()) return;
-      console.log(
-        "\n  \x1b[35m[queue processor] delivering scheduled work\x1b[0m",
+      if (!hasCronQueue(cron)) return;
+      logger.console(
+        "\n  [queue processor] delivering scheduled work",
+        "magenta",
       );
       await runAgentTurnLocked();
     } finally {
       agentBusy = false;
     }
-  }, 200).unref();
-}
+  }, 200);
+  queueProcessor.unref();
+  logger.console("  [queue processor] started", "magenta");
 
-// ── Entry point ──────────────────────────────────────────
-console.log("s14: cron scheduler");
-console.log("输入问题，回车发送。输入 q 退出。\n");
+  while (true) {
+    let query: string;
+    try {
+      query = await rl.question(colorize("s14 >> ", "cyan"));
+    } catch {
+      break; // stdin 关闭（Ctrl+D）
+    }
+    const q = query.trim().toLowerCase();
+    if (q === "" || q === "q" || q === "exit") break;
 
-const rl = readline.createInterface({
-  input: process.stdin,
-  output: process.stdout,
-});
-rl.on("SIGINT", () => {
+    // 阻塞式获取锁：等队列处理器跑完当前一轮。
+    while (agentBusy) await sleep(100);
+    agentBusy = true;
+    try {
+      logger.userInput(query);
+      await runAgentTurnLocked(query);
+    } finally {
+      agentBusy = false;
+    }
+  }
   rl.close();
-  process.exit(0);
-});
-
-startQueueProcessor();
-console.log("  \x1b[35m[queue processor] started\x1b[0m");
-
-while (true) {
-  let query: string;
-  try {
-    query = await rl.question("\x1b[36ms14 >> \x1b[0m");
-  } catch {
-    break; // stdin closed (Ctrl+D)
-  }
-  const q = query.trim().toLowerCase();
-  if (q === "" || q === "q" || q === "exit") break;
-
-  // Blocking acquire: wait until the queue processor finishes its turn
-  while (agentBusy) await sleep(100);
-  agentBusy = true;
-  try {
-    await runAgentTurnLocked(query);
-  } finally {
-    agentBusy = false;
-  }
 }
-rl.close();
