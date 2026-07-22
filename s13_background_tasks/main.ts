@@ -4,424 +4,131 @@
  * 异步后台执行 + 通知注入。
  *
  * 相比 s12 的变化：
- *   + backgroundTasks / backgroundResults 用于跟踪生命周期
- *   + shouldRunBackground：模型通过 run_in_background 参数显式请求
+ *   工具层、任务系统、prompt 组装、context 推导继续直接复用，不再内联：
+ *     基础工具 handler 复用 s03，任务系统（tools / TOOL_SCHEMAS / makeTaskHandlers）
+ *     复用 s12，getSystemPrompt / updateContext / Context 复用 s10，
+ *     MEMORY_INDEX 复用 s09。s11 的错误恢复在此照旧省略。
+ *   本文件只新增后台任务这一层：
+ *   + BackgroundState：counter / tasks / results，跟踪一次 loop 内的后台生命周期
  *   + isSlowOperation：模型未指定时的兜底启发式判断
+ *   + shouldRunBackground：模型通过 run_in_background 参数显式请求，否则回退启发式
  *   + startBackgroundTask：分发给一个游离的异步 worker，返回后台任务 id
  *   + collectBackgroundResults：收集已完成的任务，以通知形式返回
- *   + agentLoop：慢操作 -> 后台执行 + 占位符，再注入通知
- *   + 通知使用 <task_notification> 格式，不复用原来的 tool call id
+ *   + agentLoop：慢操作 -> 后台执行 + 占位符，再注入 <task_notification> 通知
+ *   + bash 工具覆盖 s02 版本，新增 run_in_background 参数
  *
  * TS 特有说明：
  *   - Python 用 threading.Thread + Lock；Node 的事件循环是单线程的，
- *     所以这里用一个游离的 Promise 代替守护线程，也不需要锁
- *   - 后台 bash 使用异步 exec（独立子进程），保证命令运行期间事件循环
- *     不被阻塞
+ *     所以这里用一个游离的 Promise 代替守护线程，也不需要锁。
+ *     后台状态由 session 持有、跨轮传入（对齐 code.py 的模块全局），
+ *     这样上一轮派发、本轮才完成的任务仍能被后续 tool_use 迭代收走。
+ *   - 后台 bash 用异步 exec（独立子进程），保证命令运行期间事件循环不被阻塞；
+ *     前台 bash 仍走 s03 的同步 runBash。
  *   - tool_result 块和文本通知一起放进同一条 user 消息（content 是数组，
- *     可以混装多种 block），和 Python 的做法一致
- *
- * 说明：为了聚焦后台任务本身，教学代码保留了一个基础版 agent 循环。
- * S11 完整的错误恢复机制（RecoveryState、退避、升级、应急压缩、备用模型）
- * 在此省略。
+ *     可以混装多种 block），和 Python 的做法一致。
  *
  * Usage:
  *     pnpm dev s13_background_tasks/main.ts
  */
 
-import { exec, spawnSync } from "node:child_process";
-import * as fs from "node:fs";
-import * as path from "node:path";
+import { exec } from "node:child_process";
 import * as readline from "node:readline/promises";
 import { promisify } from "node:util";
 import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
-import { createClient, MODEL_ID } from "../lib/model";
+import { createLogger, type SessionLogger } from "../lib/logger";
+import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
 import { colorize, print } from "../lib/terminal";
 import { printProse, textOf, zodTool } from "../lib/tools";
-
-const client = createClient();
+// 来自 s03：不含权限检查的基础 dispatch 表（前台 bash 走这里的同步 runBash）。
+import { TOOL_HANDLERS as BASE_TOOL_HANDLERS } from "../s03_permission/main";
+// 来自 s09：记忆索引路径，s10 也复用同一份。
+import { MEMORY_INDEX } from "../s09_memory/main";
+// 来自 s10：只借 Context 类型（prompt 组装 / context 推导改用 s12 的版本）。
+import type { Context } from "../s10_system_prompt/main";
+// 来自 s12：任务系统 —— tools/TOOL_SCHEMAS 已是「基础 + 任务」的合并，
+// makeTaskHandlers 工厂闭包捕获 logger + 存储目录；getSystemPrompt / updateContext
+// 是 s12 接管后的版本，「Available tools」已含任务工具。s13 同名覆盖 bash 不改工具名，
+// 直接复用。
+import {
+  getSystemPrompt,
+  makeTaskHandlers,
+  TOOL_SCHEMAS as S12_TOOL_SCHEMAS,
+  tools as s12Tools,
+  updateContext,
+} from "../s12_task_system/main";
 
 const WORKDIR = process.cwd();
-const MEMORY_DIR = path.join(WORKDIR, ".memory");
-const MEMORY_INDEX = path.join(MEMORY_DIR, "MEMORY.md");
-
 const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const execAsync = promisify(exec);
 
-// ═══════════════════════════════════════════════════════════
-//  来自 s12（同步）：任务系统
-// ═══════════════════════════════════════════════════════════
-
-const TASKS_DIR = path.join(WORKDIR, ".tasks");
-fs.mkdirSync(TASKS_DIR, { recursive: true });
-
-type TaskStatus = "pending" | "in_progress" | "completed";
-
-type Task = {
-  id: string;
-  subject: string;
-  description: string;
-  status: TaskStatus;
-  owner: string | null;
-  blockedBy: string[];
+// deps 与 s12 一致：client + logger + memoryIndex（每轮工具后重新推导 context）；
+// tasksDir 可选，透传给 makeTaskHandlers，测试注入临时目录做隔离。
+// background：后台状态由 session 持有并跨轮传入。
+export type Deps = { client: ModelClient; logger: SessionLogger };
+export type LoopDeps = Deps & {
+  memoryIndex: string;
+  background: BackgroundState;
+  tasksDir?: string;
 };
 
-const taskPath = (taskId: string) => path.join(TASKS_DIR, `${taskId}.json`);
-
-function createTask(
-  subject: string,
-  description = "",
-  blockedBy: string[] = [],
-): Task {
-  const task: Task = {
-    id: `task_${Math.floor(Date.now() / 1000)}_${String(Math.floor(Math.random() * 10_000)).padStart(4, "0")}`,
-    subject,
-    description,
-    status: "pending",
-    owner: null,
-    blockedBy,
-  };
-  saveTask(task);
-  return task;
-}
-
-function saveTask(task: Task): void {
-  fs.writeFileSync(taskPath(task.id), JSON.stringify(task, null, 2));
-}
-
-function loadTask(taskId: string): Task {
-  return JSON.parse(fs.readFileSync(taskPath(taskId), "utf8")) as Task;
-}
-
-function listTasks(): Task[] {
-  return fs
-    .readdirSync(TASKS_DIR)
-    .filter((f) => f.startsWith("task_") && f.endsWith(".json"))
-    .sort()
-    .map(
-      (f) =>
-        JSON.parse(fs.readFileSync(path.join(TASKS_DIR, f), "utf8")) as Task,
-    );
-}
-
-// 返回任务的完整详情（JSON）。
-function getTask(taskId: string): string {
-  return JSON.stringify(loadTask(taskId), null, 2);
-}
-
-/**
- * 检查 blockedBy 依赖是否全部完成。
- * 依赖缺失即视为被阻塞。
- */
-function canStart(taskId: string): boolean {
-  const task = loadTask(taskId);
-  for (const depId of task.blockedBy) {
-    if (!fs.existsSync(taskPath(depId))) return false;
-    if (loadTask(depId).status !== "completed") return false;
-  }
-  return true;
-}
-
-function claimTask(taskId: string, owner = "agent"): string {
-  const task = loadTask(taskId);
-  if (task.status !== "pending") {
-    return `Task ${taskId} is ${task.status}, cannot claim`;
-  }
-  if (!canStart(taskId)) {
-    const deps = task.blockedBy.filter(
-      (d) => !fs.existsSync(taskPath(d)) || loadTask(d).status !== "completed",
-    );
-    return `Blocked by: [${deps.join(", ")}]`;
-  }
-  task.owner = owner;
-  task.status = "in_progress";
-  saveTask(task);
-  print(`  [claim] ${task.subject} → in_progress (owner: ${owner})`, "cyan");
-  return `Claimed ${task.id} (${task.subject})`;
-}
-
-function completeTask(taskId: string): string {
-  const task = loadTask(taskId);
-  if (task.status !== "in_progress") {
-    return `Task ${taskId} is ${task.status}, cannot complete`;
-  }
-  task.status = "completed";
-  saveTask(task);
-  const unblocked = listTasks()
-    .filter(
-      (t) => t.status === "pending" && t.blockedBy.length > 0 && canStart(t.id),
-    )
-    .map((t) => t.subject);
-  print(`  [complete] ${task.subject} ✓`, "green");
-  let msg = `Completed ${task.id} (${task.subject})`;
-  if (unblocked.length) {
-    msg += `\nUnblocked: ${unblocked.join(", ")}`;
-    print(`  [unblocked] ${unblocked.join(", ")}`, "yellow");
-  }
-  return msg;
-}
+type Handlers = Partial<Record<string, (input: any) => string>>;
 
 // ═══════════════════════════════════════════════════════════
-//  来自 s10（同步）：Prompt 组装
+//  s13 覆盖：bash 工具新增 run_in_background 参数
 // ═══════════════════════════════════════════════════════════
 
-const PROMPT_SECTIONS = {
-  identity: "You are a coding agent. Act, don't explain.",
-  tools:
-    "Available tools: bash, read_file, write_file, " +
-    "create_task, list_tasks, get_task, claim_task, complete_task.",
-  workspace: `Working directory: ${WORKDIR}`,
-  memory: "Relevant memories are injected below when available.",
-};
-
-type Context = {
-  enabled_tools: string[];
-  workspace: string;
-  memories: string;
-};
-
-function assembleSystemPrompt(context: Context): string {
-  const sections = [
-    PROMPT_SECTIONS.identity,
-    PROMPT_SECTIONS.tools,
-    PROMPT_SECTIONS.workspace,
-  ];
-  if (context.memories) {
-    sections.push(`Relevant memories:\n${context.memories}`);
-  }
-  return sections.join("\n\n");
-}
-
-let lastContextKey: string | null = null;
-let lastPrompt: string | null = null;
-
-const contextKey = (context: Context): string =>
-  JSON.stringify(context, Object.keys(context).sort());
-
-function getSystemPrompt(context: Context): string {
-  const key = contextKey(context);
-  if (key === lastContextKey && lastPrompt) {
-    return lastPrompt;
-  }
-  lastContextKey = key;
-  lastPrompt = assembleSystemPrompt(context);
-  return lastPrompt;
-}
-
-// ═══════════════════════════════════════════════════════════
-//  来自 s02（原样复用）：基础工具
-// ═══════════════════════════════════════════════════════════
-
-function safePath(p: string): string {
-  const resolved = path.resolve(WORKDIR, p);
-  if (resolved !== WORKDIR && !resolved.startsWith(WORKDIR + path.sep)) {
-    throw new Error(`Path escapes workspace: ${p}`);
-  }
-  return resolved;
-}
-
-// run_in_background 由 agentLoop 分发处理，这里不管
-function runBash(command: string): string {
-  const r = spawnSync(command, {
-    shell: true,
-    cwd: WORKDIR,
-    encoding: "utf8",
-    timeout: 120_000,
-  });
-  if (r.error) {
-    const code = (r.error as NodeJS.ErrnoException).code;
-    if (code === "ETIMEDOUT") return "Error: Timeout (120s)";
-    return `Error: ${r.error.message}`;
-  }
-  const out = ((r.stdout ?? "") + (r.stderr ?? "")).trim();
-  return out ? out.slice(0, 50_000) : "(no output)";
-}
-
-// 后台执行用的异步版本 —— 不阻塞事件循环。
-async function runBashAsync(command: string): Promise<string> {
-  try {
-    const { stdout, stderr } = await execAsync(command, {
-      cwd: WORKDIR,
-      timeout: 120_000,
-      maxBuffer: 10 * 1024 * 1024,
-    });
-    const out = (stdout + stderr).trim();
-    return out ? out.slice(0, 50_000) : "(no output)";
-  } catch (e) {
-    // exec 在非零退出码时 reject；已捕获的输出仍挂在 error 上
-    const err = e as { stdout?: string; stderr?: string; killed?: boolean };
-    if (err.killed) return "Error: Timeout (120s)";
-    const out = ((err.stdout ?? "") + (err.stderr ?? "")).trim();
-    return out ? out.slice(0, 50_000) : `Error: ${errMsg(e)}`;
-  }
-}
-
-function runRead(p: string, limit?: number): string {
-  try {
-    let lines = fs.readFileSync(safePath(p), "utf8").split("\n");
-    if (limit && limit < lines.length) {
-      lines = [
-        ...lines.slice(0, limit),
-        `... (${lines.length - limit} more lines)`,
-      ];
-    }
-    return lines.join("\n");
-  } catch (e) {
-    return `Error: ${errMsg(e)}`;
-  }
-}
-
-function runWrite(p: string, content: string): string {
-  try {
-    const filePath = safePath(p);
-    fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    fs.writeFileSync(filePath, content);
-    return `Wrote ${Buffer.byteLength(content)} bytes to ${p}`;
-  } catch (e) {
-    return `Error: ${errMsg(e)}`;
-  }
-}
-
-// ── 任务工具 ──
-
-function runCreateTask(
-  subject: string,
-  description = "",
-  blockedBy?: string[],
-): string {
-  const task = createTask(subject, description, blockedBy ?? []);
-  const deps = blockedBy?.length ? ` (blockedBy: ${blockedBy.join(", ")})` : "";
-  print(`  [create] ${task.subject}${deps}`, "blue");
-  return `Created ${task.id}: ${task.subject}${deps}`;
-}
-
-function runListTasks(): string {
-  const tasks = listTasks();
-  if (!tasks.length) return "No tasks. Use create_task to add some.";
-  const icons: Record<TaskStatus, string> = {
-    pending: "○",
-    in_progress: "●",
-    completed: "✓",
-  };
-  return tasks
-    .map((t) => {
-      const icon = icons[t.status] ?? "?";
-      const deps = t.blockedBy.length
-        ? ` (blockedBy: ${t.blockedBy.join(", ")})`
-        : "";
-      const owner = t.owner ? ` [${t.owner}]` : "";
-      return `  ${icon} ${t.id}: ${t.subject} [${t.status}]${owner}${deps}`;
-    })
-    .join("\n");
-}
-
-function runGetTask(taskId: string): string {
-  try {
-    return getTask(taskId);
-  } catch {
-    return `Error: Task ${taskId} not found`;
-  }
-}
-
-function runClaimTask(taskId: string): string {
-  return claimTask(taskId, "agent");
-}
-
-function runCompleteTask(taskId: string): string {
-  return completeTask(taskId);
-}
-
-// ── 工具定义 ──
-
+// s02 的 bash 只有 command；这里加 run_in_background，让模型能显式请求后台执行。
 const bashSchema = z.object({
   command: z.string(),
   run_in_background: z.boolean().optional(),
 });
-const readSchema = z.object({
-  path: z.string(),
-  limit: z.number().int().optional(),
-});
-const writeSchema = z.object({ path: z.string(), content: z.string() });
-const createTaskSchema = z.object({
-  subject: z.string(),
-  description: z.string().optional(),
-  blockedBy: z.array(z.string()).optional(),
-});
-const listTasksSchema = z.object({});
-const getTaskSchema = z.object({ task_id: z.string() });
-const claimTaskSchema = z.object({ task_id: z.string() });
-const completeTaskSchema = z.object({ task_id: z.string() });
 
-const tools: Anthropic.Tool[] = [
-  zodTool("bash", "Run a shell command.", bashSchema),
-  zodTool("read_file", "Read file contents.", readSchema),
-  zodTool("write_file", "Write content to a file.", writeSchema),
-  zodTool(
-    "create_task",
-    "Create a new task with optional blockedBy dependencies.",
-    createTaskSchema,
-  ),
-  zodTool(
-    "list_tasks",
-    "List all tasks with status, owner, and dependencies.",
-    listTasksSchema,
-  ),
-  zodTool(
-    "get_task",
-    "Get full details of a specific task by ID.",
-    getTaskSchema,
-  ),
-  zodTool(
-    "claim_task",
-    "Claim a pending task. Sets owner, changes status to in_progress.",
-    claimTaskSchema,
-  ),
-  zodTool(
-    "complete_task",
-    "Complete an in-progress task. Reports unblocked downstream tasks.",
-    completeTaskSchema,
-  ),
-];
+// tools 复用 s12（基础 + 任务），仅把 bash 换成支持 run_in_background 的版本。
+export const tools: Anthropic.Tool[] = s12Tools.map((t) =>
+  t.name === "bash"
+    ? zodTool(
+        "bash",
+        "Run a shell command. Set run_in_background=true for slow operations (install/build/test).",
+        bashSchema,
+      )
+    : t,
+);
 
-const TOOL_SCHEMAS: Partial<Record<string, z.ZodObject>> = {
+// schema 表同理：以 s12 为底，覆盖 bash。
+export const TOOL_SCHEMAS: Partial<Record<string, z.ZodObject>> = {
+  ...S12_TOOL_SCHEMAS,
   bash: bashSchema,
-  read_file: readSchema,
-  write_file: writeSchema,
-  create_task: createTaskSchema,
-  list_tasks: listTasksSchema,
-  get_task: getTaskSchema,
-  claim_task: claimTaskSchema,
-  complete_task: completeTaskSchema,
-};
-
-const TOOL_HANDLERS: Partial<Record<string, (input: any) => string>> = {
-  bash: ({ command }) => runBash(command),
-  read_file: ({ path, limit }) => runRead(path, limit),
-  write_file: ({ path, content }) => runWrite(path, content),
-  create_task: ({ subject, description, blockedBy }) =>
-    runCreateTask(subject, description ?? "", blockedBy),
-  list_tasks: () => runListTasks(),
-  get_task: ({ task_id }) => runGetTask(task_id),
-  claim_task: ({ task_id }) => runClaimTask(task_id),
-  complete_task: ({ task_id }) => runCompleteTask(task_id),
 };
 
 // ═══════════════════════════════════════════════════════════
 //  s13 新增：后台任务
 // ═══════════════════════════════════════════════════════════
 
-// Python 需要给这些加 threading.Lock；Node 单 JS 线程不需要。
-let bgCounter = 0;
-type BgTask = {
+type BackgroundTask = {
   toolCallId: string;
   command: string;
   status: "running" | "completed";
 };
-const backgroundTasks: Record<string, BgTask> = {};
-const backgroundResults: Record<string, string> = {};
 
+// 后台生命周期状态：由 session 持有、跨轮复用，
+// 这样上一轮派发、本轮完成的任务仍能被后续 tool_use 迭代收走。
+// Node 单 JS 线程，不需要 Python 的 threading.Lock。
+export class BackgroundState {
+  // 递增计数器，用于生成 backgroundId。
+  counter = 0;
+  // 进行中/已完成的任务，按 backgroundId 索引。
+  tasks: Record<string, BackgroundTask> = {};
+  // 已完成任务的输出，按 backgroundId 索引。
+  results: Record<string, string> = {};
+}
+// 模型显式请求优先；否则回退到启发式。
+export function shouldRunBackground(toolName: string, toolInput: any): boolean {
+  if (toolInput.run_in_background) return true;
+  return isSlowOperation(toolName, toolInput);
+}
 // 兜底启发式：可能耗时超过 30s 的命令。
-function isSlowOperation(toolName: string, toolInput: any): boolean {
+export function isSlowOperation(toolName: string, toolInput: any): boolean {
   if (toolName !== "bash") return false;
   const cmd = String(toolInput.command ?? "").toLowerCase();
   const slowKeywords = [
@@ -440,97 +147,135 @@ function isSlowOperation(toolName: string, toolInput: any): boolean {
   return slowKeywords.some((kw) => cmd.includes(kw));
 }
 
-// 模型显式请求优先；否则回退到启发式。
-function shouldRunBackground(toolName: string, toolInput: any): boolean {
-  if (toolInput.run_in_background) return true;
-  return isSlowOperation(toolName, toolInput);
-}
-
-// 执行一次工具调用，返回输出。
-function executeTool(toolName: string, input: any): string {
-  const handler = TOOL_HANDLERS[toolName];
-  if (handler) return handler(input);
-  return `Unknown tool: ${toolName}`;
-}
-
-// 在游离的异步 worker 里跑工具（守护线程的 TS 版）。
-// 返回后台任务 ID。
-function startBackgroundTask(
+// 在游离的异步 worker 里跑工具（守护线程的 TS 版），返回后台任务 ID。
+// bash 走异步版本；其余工具是同步 handler，直接调用后置为完成。
+export function startBackgroundTask(
+  state: BackgroundState,
+  handlers: Handlers,
   toolName: string,
   toolCallId: string,
   input: any,
+  logger: SessionLogger,
 ): string {
-  bgCounter += 1;
-  const bgId = `bg_${String(bgCounter).padStart(4, "0")}`;
+  state.counter += 1;
+  const backgroundId = `background_${String(state.counter).padStart(4, "0")}`;
   const cmd = String(input.command ?? toolName);
 
-  backgroundTasks[bgId] = { toolCallId, command: cmd, status: "running" };
+  state.tasks[backgroundId] = { toolCallId, command: cmd, status: "running" };
   void (async () => {
     const result =
       toolName === "bash"
-        ? await runBashAsync(String(input.command ?? ""))
-        : executeTool(toolName, input);
-    backgroundTasks[bgId].status = "completed";
-    backgroundResults[bgId] = result;
+        ? // bash 走异步版本，不阻塞事件循环。
+          await runBashAsync(String(input.command ?? ""), logger)
+        : (handlers[toolName]?.(input) ?? `Unknown tool: ${toolName}`);
+    state.tasks[backgroundId].status = "completed";
+    state.results[backgroundId] = result;
   })();
 
-  print(`  [background] dispatched ${bgId}: ${cmd.slice(0, 40)}`, "yellow");
-  return bgId;
+  logger.console(
+    `  [background] dispatched ${backgroundId}: ${cmd.slice(0, 40)}`,
+    "yellow",
+  );
+  logger.section(
+    "BACKGROUND TASK STARTED",
+    `  <task_id>${backgroundId}</task_id>\n` +
+      `  <tool_name>${toolName}</tool_name>\n` +
+      `  <tool_call_id>${toolCallId}</tool_call_id>\n` +
+      `  <command>${cmd}</command>`,
+  );
+  return backgroundId;
+}
+// 后台执行用的异步 bash —— 独立子进程，不阻塞事件循环。
+// logger 可选：后台调用时传入，把完整输出记进 transcript（测试直接调用时省略）。
+export async function runBashAsync(
+  command: string,
+  logger: SessionLogger,
+): Promise<string> {
+  const result = await execBashAsync(command);
+  print(
+    `  [background done] ${command.slice(0, 40)} (${result.length} chars)`,
+    "blue",
+  );
+  logger.toolResult(`bash[background] ${command}`, result);
+  return result;
+}
+// 实际执行，返回截断后的输出；日志与执行分离，方便复用。
+async function execBashAsync(command: string): Promise<string> {
+  try {
+    const { stdout, stderr } = await execAsync(command, {
+      cwd: WORKDIR,
+      timeout: 120_000,
+      maxBuffer: 10 * 1024 * 1024,
+    });
+    const out = (stdout + stderr).trim();
+    return out ? out.slice(0, 50_000) : "(no output)";
+  } catch (e) {
+    // exec 在非零退出码时 reject；已捕获的输出仍挂在 error 上。
+    const err = e as { stdout?: string; stderr?: string; killed?: boolean };
+    if (err.killed) return "Error: Timeout (120s)";
+    const out = ((err.stdout ?? "") + (err.stderr ?? "")).trim();
+    return out ? out.slice(0, 50_000) : `Error: ${errMsg(e)}`;
+  }
 }
 
-// 收集已完成的后台结果，包装成 task_notification 消息。
-function collectBackgroundResults(): string[] {
-  const readyIds = Object.entries(backgroundTasks)
+// 收集已完成的后台结果，包装成 <task_notification> 文本，并从 state 中清除。
+export function collectBackgroundResults(
+  state: BackgroundState,
+  logger: SessionLogger,
+): string[] {
+  // 挑出已完成的任务 id。
+  const readyIds = Object.entries(state.tasks)
     .filter(([, task]) => task.status === "completed")
     .map(([id]) => id);
+
   const notifications: string[] = [];
-  for (const bgId of readyIds) {
-    const task = backgroundTasks[bgId];
-    delete backgroundTasks[bgId];
-    const output = backgroundResults[bgId] ?? "";
-    delete backgroundResults[bgId];
+  for (const backgroundId of readyIds) {
+    const task = state.tasks[backgroundId];
+    delete state.tasks[backgroundId];
+    const output = state.results[backgroundId] ?? "";
+    delete state.results[backgroundId];
     const summary = output.slice(0, 200);
     notifications.push(
       `<task_notification>\n` +
-        `  <task_id>${bgId}</task_id>\n` +
+        `  <task_id>${backgroundId}</task_id>\n` +
         `  <status>completed</status>\n` +
         `  <command>${task.command}</command>\n` +
         `  <summary>${summary}</summary>\n` +
         `</task_notification>`,
     );
-    print(
-      `  [background done] ${bgId}: ${task.command.slice(0, 40)} (${output.length} chars)`,
-      "green",
+    logger.console(
+      `  [background done] ${backgroundId}: ${task.command.slice(0, 40)} (${output.length} chars)`,
+      "blue",
     );
   }
   return notifications;
 }
 
-// ── Context ──
-
-// 由真实状态推导 context。
-function updateContext(): Context {
-  let memories = "";
-  if (fs.existsSync(MEMORY_INDEX)) {
-    memories = fs.readFileSync(MEMORY_INDEX, "utf8").trim();
-  }
-  return {
-    enabled_tools: Object.keys(TOOL_HANDLERS),
-    workspace: WORKDIR,
-    memories,
-  };
-}
-
 // ═══════════════════════════════════════════════════════════
-//  agentLoop —— 精简版，聚焦后台任务
+//  agentLoop —— 精简版，聚焦后台任务（省略 s11 的错误恢复）
 // ═══════════════════════════════════════════════════════════
 
-async function agentLoop(
+export async function agentLoop(
   messages: Anthropic.MessageParam[],
   context: Context,
+  deps: LoopDeps,
 ): Promise<string> {
+  const { client, logger, memoryIndex, tasksDir, background } = deps;
   let system = getSystemPrompt(context);
+  // 基础工具（前台 bash / 文件工具）+ 任务工具（闭包捕获 logger + 存储目录）。
+  const handlers: Handlers = {
+    ...BASE_TOOL_HANDLERS,
+    ...makeTaskHandlers(logger, tasksDir),
+  };
+
   while (true) {
+    logger.section(
+      "SYSTEM PROMPT",
+      `enabled_tools: ${JSON.stringify(Object.keys(handlers))}` +
+        `\nworkspace: ${context.workspace}` +
+        `\n\nBackgroundState:\n${JSON.stringify(background)}`,
+    );
+    logger.request(messages, true);
     let response: Anthropic.Message;
     try {
       response = await client.messages.create({
@@ -541,10 +286,13 @@ async function agentLoop(
         max_tokens: 8000,
       });
     } catch (e) {
-      const errText = `[Error] ${e instanceof Error ? e.name : "Error"}: ${errMsg(e)}`;
+      logger.responseError(e);
+      const name = e instanceof Error ? e.name : "Error";
+      const errText = `[Error] ${name}: ${errMsg(e)}`;
       messages.push({ role: "assistant", content: errText });
       return errText;
     }
+    logger.response(response);
 
     messages.push({ role: "assistant", content: response.content });
     if (response.stop_reason !== "tool_use") {
@@ -553,27 +301,39 @@ async function agentLoop(
 
     const results: Anthropic.ToolResultBlockParam[] = [];
     for (const block of response.content) {
+      printProse(block);
       if (block.type !== "tool_use") {
-        printProse(block);
         continue;
       }
-      print(`> ${block.name}`, "cyan");
       const schema = TOOL_SCHEMAS[block.name];
       const input = schema ? schema.parse(block.input) : (block.input as any);
 
+      // 后台执行：模型显式请求 run_in_background 或启发式判断为慢操作。
       if (shouldRunBackground(block.name, input)) {
-        const bgId = startBackgroundTask(block.name, block.id, input);
+        // 分发到游离 worker，立即拿到后台任务 id。
+        const backgroundId = startBackgroundTask(
+          background,
+          handlers,
+          block.name,
+          block.id,
+          input,
+          logger,
+        );
+        // 先回占位符 tool_result，真正结果稍后以通知注入。
         results.push({
           type: "tool_result",
           tool_use_id: block.id,
           content:
-            `[Background task ${bgId} started] ` +
+            `[Background task ${backgroundId} started] ` +
             `Command: ${input.command ?? ""}. ` +
             `Result will be available when complete.`,
         });
       } else {
-        const output = executeTool(block.name, input);
-        print(output.slice(0, 300));
+        // 前台执行：同步调用 handler，返回结果。
+        const handler = handlers[block.name];
+        const output =
+          handler && schema ? handler(input) : `Unknown: ${block.name}`;
+        logger.toolResult(block.name, output);
         results.push({
           type: "tool_result",
           tool_use_id: block.id,
@@ -583,54 +343,80 @@ async function agentLoop(
     }
 
     // tool_result 块和文本通知一起放进同一条 user 消息
-    // （content 是数组，可以同时装两种 block）。
-    const bgNotifications = collectBackgroundResults();
+    // （content 是数组，可以同时装两种 block）；通知不复用原来的 tool call id。
+    // 注入后台通知：收集已完成的任务，包装成 <task_notification> 文本块。
+    const backgroundNotifications = collectBackgroundResults(
+      background,
+      logger,
+    );
     const content: Anthropic.ContentBlockParam[] = [
       ...results,
-      ...bgNotifications.map((n) => ({ type: "text" as const, text: n })),
+      ...backgroundNotifications.map((n) => ({
+        type: "text" as const,
+        text: n,
+      })),
     ];
+
     messages.push({ role: "user", content });
-    if (bgNotifications.length) {
-      print(
-        `  [inject] ${bgNotifications.length} background notification(s)`,
-        "green",
+    if (backgroundNotifications.length) {
+      logger.console(
+        `  [inject] ${backgroundNotifications.length} background notification(s)`,
+        "blue",
+      );
+      logger.section(
+        "INJECTED BACKGROUND NOTIFICATIONS",
+        backgroundNotifications.join("\n\n"),
       );
     }
 
-    context = updateContext();
+    context = updateContext(memoryIndex);
     system = getSystemPrompt(context);
   }
 }
 
 // ── 入口 ──────────────────────────────────────────
-print("s13: Background Tasks — 异步后台执行 + 通知注入", "cyan");
-print("输入问题，回车发送。输入 q 退出。\n", "green");
+if (import.meta.main) {
+  const client = createClient();
+  const logger = createLogger(import.meta.dirname);
+  logger.config({ model: MODEL_ID, tools });
 
-const rl = readline.createInterface({
-  input: process.stdin,
-  output: process.stdout,
-});
-rl.on("SIGINT", () => {
-  rl.close();
-  process.exit(0);
-});
+  print("s13: Background Tasks — 异步后台执行 + 通知注入", "cyan");
+  print("输入问题，回车发送。输入 q 退出。\n", "green");
 
-const history: Anthropic.MessageParam[] = [];
-let context = updateContext();
-while (true) {
-  let query: string;
-  try {
-    query = await rl.question(colorize("s13 >> ", "cyan"));
-  } catch {
-    break; // stdin 关闭（Ctrl+D）
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+  rl.on("SIGINT", () => {
+    rl.close();
+    process.exit(0);
+  });
+
+  const history: Anthropic.MessageParam[] = [];
+  // 后台状态一个 session 一份，跨轮复用。
+  const background = new BackgroundState();
+  let context = updateContext(MEMORY_INDEX);
+  while (true) {
+    let query: string;
+    try {
+      query = await rl.question(colorize("s13 >> ", "cyan"));
+    } catch {
+      break; // stdin 关闭（Ctrl+D）
+    }
+    const q = query.trim().toLowerCase();
+    if (q === "" || q === "q" || q === "exit") break;
+
+    logger.userInput(query);
+    history.push({ role: "user", content: query });
+    const finalText = await agentLoop(history, context, {
+      client,
+      logger,
+      memoryIndex: MEMORY_INDEX,
+      background,
+    });
+    context = updateContext(MEMORY_INDEX);
+    print(finalText, "green");
+    print();
   }
-  const q = query.trim().toLowerCase();
-  if (q === "" || q === "q" || q === "exit") break;
-
-  history.push({ role: "user", content: query });
-  const finalText = await agentLoop(history, context);
-  context = updateContext();
-  print(finalText, "green");
-  print();
+  rl.close();
 }
-rl.close();

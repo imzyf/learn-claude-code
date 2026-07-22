@@ -21,8 +21,11 @@
  * TS 特有说明：
  *   - 任务工具的 handler 需要 logger 打印状态迁移，所以用 makeTaskHandlers(logger)
  *     工厂闭包捕获 logger，再与 s03 的纯分发表合并（基础工具不依赖 logger）。
- *   - system prompt 的「Available tools」文案来自 s10（固定基础五工具），
- *     任务工具通过 API 的 tools 数组直达模型，不影响调用。
+ *   - 工具集在 s12 变了（多了 5 个任务工具），system prompt 的「Available tools」
+ *     也得跟上。s10 的 assembleSystemPrompt 把这行写死成基础五工具、忽略了
+ *     context.enabled_tools，所以 s12 在这里接管 prompt 组装：updateContext 用
+ *     合并后的工具名填 enabled_tools，getSystemPrompt 依据它组装（复用 s10 的
+ *     contextKey 缓存）。s13 同名覆盖 bash、工具名不变，直接复用这里。
  *
  * Usage:
  *     pnpm dev s12_task_system/main.ts
@@ -46,11 +49,12 @@ import {
 import { TOOL_HANDLERS as BASE_TOOL_HANDLERS } from "../s03_permission/main";
 // 来自 s09：记忆索引路径，s10 也复用同一份。
 import { MEMORY_INDEX } from "../s09_memory/main";
-// 来自 s10：运行时组装 + 缓存的 system prompt，及依据真实状态推导的 context。
+// 来自 s10：复用 Context 类型、缓存 key，以及 memory/workspace 的推导逻辑
+// （deriveBaseContext）。「Available tools」这行 s10 写死了，s12 在下面自己接管。
 import {
   type Context,
-  getSystemPrompt,
-  updateContext,
+  contextKey,
+  updateContext as deriveBaseContext,
 } from "../s10_system_prompt/main";
 
 // deps 与 s10/s11 一致：client + logger，另加 memoryIndex（每轮工具后重新推导 context）。
@@ -305,6 +309,49 @@ export function makeTaskHandlers(
 }
 
 // ═══════════════════════════════════════════════════════════
+//  s12 override：让 system prompt 反映合并后的工具集
+// ═══════════════════════════════════════════════════════════
+
+// 合并后的工具名（基础 + 任务）。s13 只是同名覆盖 bash，工具名与此一致，故可复用。
+export const TOOL_NAMES: string[] = tools.map((t) => t.name);
+
+// 复用 s10 的 memory/workspace 推导，只把 enabled_tools 换成合并后的工具名。
+export function updateContext(memoryIndex: string): Context {
+  return { ...deriveBaseContext(memoryIndex), enabled_tools: TOOL_NAMES };
+}
+
+// 进程内缓存（同 s10：context 没变就复用上次结果，只省本地拼接，不影响 API 计费）。
+let lastContextKey: string | null = null;
+let lastPrompt: string | null = null;
+
+// 组装 prompt：tools 行改由 context.enabled_tools 推导，其余同 s10。
+export function assembleSystemPrompt(context: Context): string {
+  const sections = [
+    "You are a coding agent. Act, don't explain.",
+    `Available tools: ${context.enabled_tools.join(", ")}.`,
+    `Working directory: ${context.workspace}`,
+  ];
+  if (context.memories) {
+    sections.push(`Relevant memories:\n${context.memories}`);
+  }
+  return sections.join("\n\n");
+}
+
+export function getSystemPrompt(context: Context): string {
+  const key = contextKey(context);
+  if (key === lastContextKey && lastPrompt) return lastPrompt;
+  lastContextKey = key;
+  lastPrompt = assembleSystemPrompt(context);
+  return lastPrompt;
+}
+
+// 测试用：重置进程内缓存，隔离用例。
+export function resetPromptCache(): void {
+  lastContextKey = null;
+  lastPrompt = null;
+}
+
+// ═══════════════════════════════════════════════════════════
 //  agentLoop —— 精简版，聚焦任务系统（省略 s11 的错误恢复）
 // ═══════════════════════════════════════════════════════════
 
@@ -381,7 +428,6 @@ export async function agentLoop(
 }
 
 // ── 入口 ──────────────────────────────────────────
-// import.meta.main 只在文件被直接运行时为 true。
 if (import.meta.main) {
   const client = createClient();
   const logger = createLogger(import.meta.dirname);

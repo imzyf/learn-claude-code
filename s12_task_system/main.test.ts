@@ -4,8 +4,8 @@
  * s12 的新增点是任务图：createTask/save/load 往返、canStart 的依赖判定、
  * claimTask(pending -> in_progress)、completeTask 完成并汇报下游解除阻塞。
  * 每个用例用临时 .tasks 目录隔离（目录作为参数显式传入）。agentLoop 只验证
- * 任务工具已并入 dispatch 并能端到端跑通——prompt 组装 / context 推导已在
- * s10 覆盖，这里不再重复。
+ * 任务工具已并入 dispatch 并能端到端跑通。s12 接管了 prompt 组装（「Available
+ * tools」要含任务工具），单列一个用例覆盖；context 推导的其余部分沿用 s10。
  */
 import * as fs from "node:fs";
 import type Anthropic from "@anthropic-ai/sdk";
@@ -25,11 +25,14 @@ import {
   claimTask,
   completeTask,
   createTask,
+  getSystemPrompt,
   listTasks,
   loadTask,
+  resetPromptCache,
   runCreateTask,
   runGetTask,
   runListTasks,
+  updateContext,
 } from "./main";
 
 const ctx = (): Context => ({
@@ -143,7 +146,13 @@ describe("completeTask", () => {
 // ── runCreateTask ─────────────────────────────────────────
 describe("runCreateTask", () => {
   it("creates a task and reports its id and subject", () => {
-    const msg = runCreateTask(dir, "write docs", "add README", undefined, noopLogger);
+    const msg = runCreateTask(
+      dir,
+      "write docs",
+      "add README",
+      undefined,
+      noopLogger,
+    );
     expect(msg).toContain("Created");
     expect(msg).toContain("write docs");
     expect(listTasks(dir)).toHaveLength(1);
@@ -185,6 +194,20 @@ describe("runListTasks", () => {
     expect(out).toContain("alpha");
     expect(out).toContain("[pending]");
     expect(out).toContain("○");
+  });
+});
+
+// ── system prompt 反映合并后的工具集 ──────────────────────
+describe("getSystemPrompt / updateContext", () => {
+  it("lists the merged task tools in Available tools, not just the base five", () => {
+    resetPromptCache();
+    const context = updateContext("nonexistent/MEMORY.md");
+    const prompt = getSystemPrompt(context);
+    expect(prompt).toContain("Available tools:");
+    expect(prompt).toContain("create_task");
+    expect(prompt).toContain("complete_task");
+    // 基础工具仍在。
+    expect(prompt).toContain("bash");
   });
 });
 
