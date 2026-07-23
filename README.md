@@ -11,7 +11,12 @@ make setup      # install deps, create .env from .env.example.upstream
 # then put your ANTHROPIC_API_KEY in .env (MODEL_ID / ANTHROPIC_BASE_URL are optional)
 make smoke      # one API call to check the setup
 make s01        # run session 1 (interactive); make help lists s01–s20
+make s01 debug  # debug any session from s01 through s20 on port 9229
 ```
+
+For a debug run, attach VS Code with the
+`Attach session (make sXX debug)` launch configuration. The same commands also
+work from inside each `sXX_*` directory.
 
 ## Highlights
 
