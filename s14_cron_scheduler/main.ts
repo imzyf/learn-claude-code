@@ -51,7 +51,7 @@ import { Cron } from "croner";
 import { z } from "zod";
 import { createLogger, type SessionLogger } from "../lib/logger";
 import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
-import { colorize, print } from "../lib/terminal";
+import { colorize, print, printError } from "../lib/terminal";
 import { printProse, textOf, zodTool } from "../lib/tools";
 // 来自 s03：不含权限检查的基础 dispatch 表（前台 bash 走这里的同步 runBash）。
 import { TOOL_HANDLERS as BASE_TOOL_HANDLERS } from "../s03_permission/main";
@@ -118,7 +118,6 @@ export class CronState {
   cronQueue: CronJob[] = [];
   // job.id -> "YYYY-MM-DD HH:MM"，防止同一分钟内重复触发。
   lastFiredAt = new Map<string, string>();
-
   constructor(public durablePath: string = DURABLE_PATH) {}
 }
 
@@ -134,10 +133,7 @@ export function loadDurableJobs(state: CronState, logger: SessionLogger): void {
       try {
         cronFor(job.cron); // 构造抛错即非法，跳过
       } catch (e) {
-        logger.console(
-          `  [cron] skipping invalid job ${job.id}: ${errMsg(e)}`,
-          "red",
-        );
+        printError(e, "  [cron] skipping invalid job");
         continue;
       }
       state.scheduledJobs.set(job.id, job);
@@ -145,17 +141,69 @@ export function loadDurableJobs(state: CronState, logger: SessionLogger): void {
     }
     if (loaded)
       logger.console(`  [cron] loaded ${loaded} durable job(s)`, "magenta");
-  } catch {
-    // 持久化文件损坏：从空开始。
-    logger.console(
-      `  [cron] failed to load durable jobs, starting empty`,
-      "red",
-    );
+  } catch (e) {
+    printError(e, "  [cron] failed to load durable jobs");
+  }
+}
+
+// 拉起 1s 定时器（守护线程的 TS 版），unref 让 REPL 关闭时进程可退出。
+// onFire 在有任务触发时回调（入口层用它擦提示符 + 打印触发日志）。
+export function startCronScheduler(
+  state: CronState,
+  logger: SessionLogger,
+): NodeJS.Timeout {
+  const timer = setInterval(() => runCronTick(state, new Date(), logger), 1000);
+  // unref：定时器不算“活跃句柄”，REPL 关闭时进程能正常退出，不被它拖住。
+  timer.unref();
+
+  print("  [cron scheduler] timer started", "magenta");
+  return timer;
+}
+// 单次扫描：把匹配当前时间的任务推进 cronQueue，一次性任务触发后即移除。
+// 返回本次新触发的任务，交给调用方决定如何展示（触发日志由入口层打印，
+// 让本层与终端/readline 解耦）。单个任务出错就地捕获，避免一个坏任务拖垮调度器。
+export function runCronTick(
+  state: CronState,
+  now: Date,
+  logger: SessionLogger,
+): void {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  // 含日期的标记，避免每日任务在第 2 天起被跳过。
+  const minuteMarker =
+    `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ` +
+    `${pad(now.getHours())}:${pad(now.getMinutes())}`;
+  // 秒清零：5 段 cron 是分钟粒度，抹掉秒让整分钟内任意时刻都能命中。
+  // 匹配交给 croner（DOM/DOW 的 OR、步长/区间/列表都由库负责）；构造抛错即非法，
+  // 由下方每个 job 的 try/catch 兜底（已注册任务都过了校验，实际到不了）。
+  const atMinute = new Date(now);
+  atMinute.setSeconds(0, 0);
+  for (const job of [...state.scheduledJobs.values()]) {
+    try {
+      if (cronFor(job.cron).match(atMinute)) {
+        if (state.lastFiredAt.get(job.id) !== minuteMarker) {
+          state.cronQueue.push(job);
+          state.lastFiredAt.set(job.id, minuteMarker);
+          print();
+          logger.console(
+            `  [cron push queue] ${job.id} → ${job.prompt.slice(0, 40)}`,
+            "magenta",
+          );
+        }
+        if (!job.recurring) {
+          // 一次性任务触发后即注销；durable 的顺手落盘。
+          state.scheduledJobs.delete(job.id);
+          if (job.durable) saveDurableJobs(state);
+        }
+      }
+    } catch (e) {
+      printError(e, `  [cron error] ${job.id}`);
+    }
   }
 }
 
 // croner 每个模式解析一次即可复用；match 是纯计算、不启定时器，可安全缓存。
 const patternCache = new Map<string, Cron>();
+// cronFor：构造 + 匹配 + 校验的单一入口，解析结果按表达式缓存复用。
 function cronFor(expr: string): Cron {
   let cron = patternCache.get(expr);
   if (!cron) {
@@ -171,6 +219,56 @@ export function saveDurableJobs(state: CronState): void {
   fs.writeFileSync(state.durablePath, JSON.stringify(durable, null, 2));
 }
 
+// 取出已触发的任务（agentLoop 调用），清空队列。
+export function consumeCronQueue(state: CronState): CronJob[] {
+  const fired = [...state.cronQueue];
+  state.cronQueue.length = 0;
+  return fired;
+}
+
+// 是否有已触发、等待投递的任务。
+export function hasCronQueue(state: CronState): boolean {
+  return state.cronQueue.length > 0;
+}
+
+// 多行展示 CronState（Map 无法直接 JSON.stringify，手写摘要）：列出每个已注册
+// 任务的 id / 表达式 / 周期性 / 持久化 / prompt / 上次触发，再附带待投递队列。
+export function cronStateSummary(state: CronState): string {
+  const lines: string[] = [
+    `  ${state.scheduledJobs.size} job(s), queue=${state.cronQueue.length}`,
+  ];
+  for (const job of state.scheduledJobs.values()) {
+    const flags = [job.recurring ? "recurring" : "once"];
+    if (job.durable) flags.push("durable");
+    const last = state.lastFiredAt.get(job.id) ?? "never";
+    lines.push(
+      `    ${job.id} '${job.cron}' [${flags.join(",")}] last=${last} → ${job.prompt.slice(0, 40)}`,
+    );
+  }
+  if (state.cronQueue.length) {
+    lines.push("  queued:");
+    for (const job of state.cronQueue) {
+      lines.push(`    ${job.id} → ${job.prompt.slice(0, 40)}`);
+    }
+  }
+  return lines.join("\n");
+}
+
+// ── cron 工具 handler ─────────────────────────────────────
+
+// schedule_cron 工具入口：包 scheduleJob，把结果或错误格式化成模型可读字符串。
+export function runScheduleCron(
+  state: CronState,
+  cron: string,
+  prompt: string,
+  recurring: boolean,
+  durable: boolean,
+  logger: SessionLogger,
+): string {
+  const result = scheduleJob(state, cron, prompt, recurring, durable, logger);
+  if (typeof result === "string") return `Error: ${result}`;
+  return `Scheduled ${result.id}: '${cron}' → ${prompt}`;
+}
 // 注册一个 cron 任务，返回 CronJob 或错误字符串。
 export function scheduleJob(
   state: CronState,
@@ -201,96 +299,7 @@ export function scheduleJob(
   return job;
 }
 
-// 移除一个 cron 任务。
-export function cancelJob(
-  state: CronState,
-  jobId: string,
-  logger: SessionLogger,
-): string {
-  const job = state.scheduledJobs.get(jobId);
-  if (!job) return `Job ${jobId} not found`;
-  state.scheduledJobs.delete(jobId);
-  if (job.durable) saveDurableJobs(state);
-  logger.console(`  [cron cancel] ${jobId}`, "red");
-  return `Cancelled ${jobId}`;
-}
-
-// 单次扫描：把匹配当前时间的任务推进 cronQueue，一次性任务触发后即移除。
-// 单个任务出错就地捕获，避免一个坏任务拖垮整个调度器。
-export function runCronTick(
-  state: CronState,
-  now: Date,
-  logger: SessionLogger,
-): void {
-  const pad = (n: number) => String(n).padStart(2, "0");
-  // 含日期的标记，避免每日任务在第 2 天起被跳过。
-  const minuteMarker =
-    `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ` +
-    `${pad(now.getHours())}:${pad(now.getMinutes())}`;
-  // 秒清零：5 段 cron 是分钟粒度，抹掉秒让整分钟内任意时刻都能命中。
-  // 匹配交给 croner（DOM/DOW 的 OR、步长/区间/列表都由库负责）；构造抛错即非法，
-  // 由下方每个 job 的 try/catch 兜底（已注册任务都过了校验，实际到不了）。
-  const atMinute = new Date(now);
-  atMinute.setSeconds(0, 0);
-  for (const job of [...state.scheduledJobs.values()]) {
-    try {
-      if (cronFor(job.cron).match(atMinute)) {
-        if (state.lastFiredAt.get(job.id) !== minuteMarker) {
-          state.cronQueue.push(job);
-          state.lastFiredAt.set(job.id, minuteMarker);
-          logger.console(
-            `  [cron fire] ${job.id} → ${job.prompt.slice(0, 40)}`,
-            "magenta",
-          );
-        }
-        if (!job.recurring) {
-          state.scheduledJobs.delete(job.id);
-          if (job.durable) saveDurableJobs(state);
-        }
-      }
-    } catch (e) {
-      logger.console(`  [cron error] ${job.id}: ${errMsg(e)}`, "red");
-    }
-  }
-}
-
-// 拉起 1s 定时器（守护线程的 TS 版），unref 让 REPL 关闭时进程可退出。
-export function startCronScheduler(
-  state: CronState,
-  logger: SessionLogger,
-): NodeJS.Timeout {
-  const timer = setInterval(() => runCronTick(state, new Date(), logger), 1000);
-  timer.unref();
-  return timer;
-}
-
-// 取出已触发的任务（agentLoop 调用），清空队列。
-export function consumeCronQueue(state: CronState): CronJob[] {
-  const fired = [...state.cronQueue];
-  state.cronQueue.length = 0;
-  return fired;
-}
-
-// 是否有已触发、等待投递的任务。
-export function hasCronQueue(state: CronState): boolean {
-  return state.cronQueue.length > 0;
-}
-
-// ── cron 工具 handler ─────────────────────────────────────
-
-export function runScheduleCron(
-  state: CronState,
-  cron: string,
-  prompt: string,
-  recurring: boolean,
-  durable: boolean,
-  logger: SessionLogger,
-): string {
-  const result = scheduleJob(state, cron, prompt, recurring, durable, logger);
-  if (typeof result === "string") return `Error: ${result}`;
-  return `Scheduled ${result.id}: '${cron}' → ${prompt}`;
-}
-
+// list_crons 工具入口：把已注册任务渲染成多行列表。
 export function runListCrons(state: CronState): string {
   const jobs = [...state.scheduledJobs.values()];
   if (!jobs.length) return "No cron jobs. Use schedule_cron to add one.";
@@ -303,12 +312,26 @@ export function runListCrons(state: CronState): string {
     .join("\n");
 }
 
+// cancel_cron 工具入口：转发到 cancelJob。
 export function runCancelCron(
   state: CronState,
   jobId: string,
   logger: SessionLogger,
 ): string {
   return cancelJob(state, jobId, logger);
+}
+// 移除一个 cron 任务。
+export function cancelJob(
+  state: CronState,
+  jobId: string,
+  logger: SessionLogger,
+): string {
+  const job = state.scheduledJobs.get(jobId);
+  if (!job) return `Job ${jobId} not found`;
+  state.scheduledJobs.delete(jobId);
+  if (job.durable) saveDurableJobs(state);
+  logger.console(`  [cron cancel] ${jobId}`, "red");
+  return `Cancelled ${jobId}`;
 }
 
 // cron handler 需要 cron 状态 + logger，用工厂闭包捕获，再与基础/任务 handler 合并。
@@ -377,9 +400,8 @@ export function updateContext(memoryIndex: string): Context {
 // ═══════════════════════════════════════════════════════════
 //  agentLoop —— 精简版，聚焦 cron 调度（省略 s11 的错误恢复）
 // ═══════════════════════════════════════════════════════════
-// startCronScheduler 产出工作；startQueueProcessor 在有排队任务且无其他 agent
-// 轮次运行时唤醒本循环；agentLoop 在循环开头消费 cron 队列并注入 messages。
-
+// startCronScheduler 产出工作；入口的队列处理器（queueProcessor 定时器）在有排队
+// 任务且 agent 空闲时唤醒本循环；agentLoop 在循环开头消费 cron 队列并注入 messages。
 export async function agentLoop(
   messages: Anthropic.MessageParam[],
   context: Context,
@@ -395,6 +417,14 @@ export async function agentLoop(
   };
 
   while (true) {
+    logger.section(
+      "SYSTEM PROMPT",
+      `enabled_tools: ${JSON.stringify(Object.keys(handlers))}` +
+        `\nworkspace: ${context.workspace}` +
+        `\n\nBackgroundState:\n${JSON.stringify(background)}` +
+        `\n\nCronState:\n${cronStateSummary(cron)}`,
+    );
+
     // Layer 4：消费已触发的 cron 任务，作为 user 消息注入。
     const fired = consumeCronQueue(cron);
     for (const job of fired) {
@@ -402,13 +432,6 @@ export async function agentLoop(
       logger.console(`  [inject cron] ${job.prompt.slice(0, 50)}`, "magenta");
     }
 
-    logger.section(
-      "SYSTEM PROMPT",
-      `enabled_tools: ${JSON.stringify(Object.keys(handlers))}` +
-        `\nworkspace: ${context.workspace}` +
-        `\n\nBackgroundState:\n${JSON.stringify(background)}` +
-        `\n\nCronState: ${cron.scheduledJobs.size} job(s), queue=${cron.cronQueue.length}`,
-    );
     logger.request(messages, true);
     let response: Anthropic.Message;
     try {
@@ -523,10 +546,10 @@ if (import.meta.main) {
   const cron = new CronState();
   let context = updateContext(MEMORY_INDEX);
 
-  // 启动时加载持久化任务，再拉起 1s 定时器。
+  // 启动时加载持久化任务。
   loadDurableJobs(cron, logger);
+  // 拉起 1s 定时器。
   startCronScheduler(cron, logger);
-  logger.console("  [cron] scheduler timer started", "magenta");
 
   // agentBusy：单线程事件循环里 Python agent_lock 的等价物。
   let agentBusy = false;
@@ -534,6 +557,7 @@ if (import.meta.main) {
     if (userQuery !== undefined) {
       history.push({ role: "user", content: userQuery });
     }
+
     const finalText = await agentLoop(history, context, {
       client,
       logger,
@@ -551,18 +575,20 @@ if (import.meta.main) {
     if (!hasCronQueue(cron) || agentBusy) return;
     agentBusy = true;
     try {
-      if (!hasCronQueue(cron)) return;
-      logger.console(
-        "\n  [queue processor] delivering scheduled work",
-        "magenta",
-      );
+      print("  [queue processor] delivering scheduled work", "magenta");
       await runAgentTurnLocked();
+    } catch (e) {
+      printError(e);
     } finally {
       agentBusy = false;
+      // 后台输出会顶掉 rl.question 已打印的提示符，跑完让 readline 重画一次
+      // （true = 保留已输入内容，重画的是 readline 记着的真正提示符）。
+      rl.prompt(true);
     }
   }, 200);
+  // unref：这个定时器不算“活跃句柄”，进程该退出时就退出，别被它拖住。
   queueProcessor.unref();
-  logger.console("  [queue processor] started", "magenta");
+  print("  [queue processor] started", "magenta");
 
   while (true) {
     let query: string;
@@ -580,6 +606,8 @@ if (import.meta.main) {
     try {
       logger.userInput(query);
       await runAgentTurnLocked(query);
+    } catch (e) {
+      printError(e);
     } finally {
       agentBusy = false;
     }

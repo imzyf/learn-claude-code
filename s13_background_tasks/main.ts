@@ -9,7 +9,7 @@
  *     复用 s12，getSystemPrompt / updateContext / Context 复用 s10，
  *     MEMORY_INDEX 复用 s09。s11 的错误恢复在此照旧省略。
  *   本文件只新增后台任务这一层：
- *   + BackgroundState：counter / tasks / results，跟踪一次 loop 内的后台生命周期
+ *   + BackgroundState：counter / tasks / results，跟踪跨轮的后台任务生命周期
  *   + isSlowOperation：模型未指定时的兜底启发式判断
  *   + shouldRunBackground：模型通过 run_in_background 参数显式请求，否则回退启发式
  *   + startBackgroundTask：分发给一个游离的异步 worker，返回后台任务 id
@@ -127,7 +127,7 @@ export function shouldRunBackground(toolName: string, toolInput: any): boolean {
   if (toolInput.run_in_background) return true;
   return isSlowOperation(toolName, toolInput);
 }
-// 兜底启发式：可能耗时超过 30s 的命令。
+// 兜底启发式：靠关键词猜测哪些命令可能耗时较长（install/build/test…）。
 export function isSlowOperation(toolName: string, toolInput: any): boolean {
   if (toolName !== "bash") return false;
   const cmd = String(toolInput.command ?? "").toLowerCase();
@@ -186,7 +186,7 @@ export function startBackgroundTask(
   return backgroundId;
 }
 // 后台执行用的异步 bash —— 独立子进程，不阻塞事件循环。
-// logger 可选：后台调用时传入，把完整输出记进 transcript（测试直接调用时省略）。
+// logger 把完整输出记进 transcript；测试传 noopLogger。
 export async function runBashAsync(
   command: string,
   logger: SessionLogger,

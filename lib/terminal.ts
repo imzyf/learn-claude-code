@@ -41,3 +41,9 @@ export function colorize(text: string, color: Color): string {
 export function print(message = "", color?: Color): void {
   console.log(color ? colorize(message, color) : message);
 }
+
+// Print an error (or any thrown value) in red, with an optional context prefix.
+export function printError(error: unknown, context?: string): void {
+  const message = error instanceof Error ? error.message : String(error);
+  print(context ? `${context}: ${message}` : message, "red");
+}
