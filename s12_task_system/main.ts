@@ -37,30 +37,32 @@ import * as readline from "node:readline/promises";
 import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
 import { createLogger, type SessionLogger } from "../lib/logger";
-import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
+import { createClient, MODEL_ID } from "../lib/model";
 import { colorize, print } from "../lib/terminal";
 import { printProse, textOf, zodTool } from "../lib/tools";
 // 来自 s02：基础工具定义 + schema 表。
 import {
   TOOL_SCHEMAS as BASE_TOOL_SCHEMAS,
   tools as baseTools,
+  type Handlers,
 } from "../s02_tool_use/main";
 // 来自 s03：不含权限检查的基础 dispatch 表。
 import { TOOL_HANDLERS as BASE_TOOL_HANDLERS } from "../s03_permission/main";
 // 来自 s09：记忆索引路径，s10 也复用同一份。
 import { MEMORY_INDEX } from "../s09_memory/main";
 // 来自 s10：复用 Context 类型、缓存 key，以及 memory/workspace 的推导逻辑
-// （deriveBaseContext）。「Available tools」这行 s10 写死了，s12 在下面自己接管。
+// （deriveBaseContext）+ Deps（client + logger + memoryIndex）。
+// 「Available tools」这行 s10 写死了，s12 在下面自己接管。
 import {
   type Context,
   contextKey,
   updateContext as deriveBaseContext,
+  type Deps as S10Deps,
 } from "../s10_system_prompt/main";
 
-// deps 与 s10/s11 一致：client + logger，另加 memoryIndex（每轮工具后重新推导 context）。
-// tasksDir 可选，默认 TASKS_DIR；测试注入临时目录做隔离。
-export type Deps = { client: ModelClient; logger: SessionLogger };
-export type LoopDeps = Deps & { memoryIndex: string; tasksDir?: string };
+// deps 与 s10/s11 一致：client + logger + memoryIndex，另加 tasksDir
+//（每轮工具后重新推导 context；tasksDir 可选，默认 TASKS_DIR，测试注入临时目录做隔离）。
+export type Deps = S10Deps & { tasksDir?: string };
 
 // ═══════════════════════════════════════════════════════════
 //  s12 新增：任务系统
@@ -297,7 +299,7 @@ export const TOOL_SCHEMAS: Partial<Record<string, z.ZodObject>> = {
 export function makeTaskHandlers(
   logger: SessionLogger,
   dir: string = TASKS_DIR,
-): Partial<Record<string, (input: any) => string>> {
+): Handlers {
   return {
     create_task: ({ subject, description, blockedBy }) =>
       runCreateTask(dir, subject, description ?? "", blockedBy, logger),
@@ -358,7 +360,7 @@ export function resetPromptCache(): void {
 export async function agentLoop(
   messages: Anthropic.MessageParam[],
   context: Context,
-  deps: LoopDeps,
+  deps: Deps,
 ): Promise<string> {
   const { client, logger, memoryIndex, tasksDir } = deps;
   let system = getSystemPrompt(context);

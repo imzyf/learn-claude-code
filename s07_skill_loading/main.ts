@@ -48,6 +48,7 @@ import { createLogger, type SessionLogger } from "../lib/logger";
 import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
 import { colorize, print } from "../lib/terminal";
 import { printProse, textOf, zodTool } from "../lib/tools";
+import type { Deps as S04Deps } from "../s04_hooks/main";
 // 来自 s05：hook 装配（loadHooks = createHooks + registerDefaultHooks）+ nag 机制。
 import {
   bumpNagCounter,
@@ -55,16 +56,15 @@ import {
   nagIfStale,
   resetNagCounter,
 } from "../s05_todo_write/main";
-// 来自 s06：subagent（全新 messages[]、只回摘要）、共享的 Deps 类型，
-// 以及装配好的工具三张表（base + todo + task）——s07 只在其上追加 load_skill。
+// 来自 s06：subagent（全新 messages[]、只回摘要）+ 装配好的工具三张表
+// （base + todo + task）——s07 只在其上追加 load_skill。
 import {
-  type Deps,
   TOOL_HANDLERS as S06_HANDLERS,
   TOOL_SCHEMAS as S06_SCHEMAS,
   tools as s06Tools,
 } from "../s06_subagent/main";
 
-// s07 导出自己拥有的东西：技能层 + agentLoop + LoopDeps，
+// s07 导出自己拥有的东西：技能层 + agentLoop + Deps，
 // 外加装配好的三张工具表（base + todo + task + load_skill），供 s08 继续叠加。
 // 复用来的符号（spawnSubagent / 各 hook / nag）由测试各自从源头 import。
 
@@ -156,7 +156,7 @@ export function loadSkill(registry: SkillRegistry, name: string): string {
 }
 
 // agentLoop 需要的完整依赖：基础 Deps + 技能表 + 本轮 system prompt。
-export type LoopDeps = Deps & { skills: SkillRegistry; system: string };
+export type Deps = S04Deps & { skills: SkillRegistry; system: string };
 
 // 记录一次技能加载：往 transcript 记一条摘要（加载了哪个技能、命中与否、多大）。
 // 走独立的 SKILL 一节（而非普通 toolResult），便于区分和 grep；完整内容另由 toolResult 落一份。
@@ -175,7 +175,7 @@ export function logSkill(
 // s07：技能加载走独立的 skill 日志通道（logSkill）—— 单独记一条「加载了哪个技能、
 // 命中与否、多大」。（child 是给子 agent 做 main/sub 隔离的，技能不是 agent，不借它。）
 // loadSkill 保持纯查表，日志这个副作用留在这层 wrapper。
-export function runLoadSkill(name: string, deps: LoopDeps): string {
+export function runLoadSkill(name: string, deps: Deps): string {
   const content = loadSkill(deps.skills, name);
   const found = deps.skills[name] !== undefined;
   logSkill(deps.logger, name, found, content.length);
@@ -205,10 +205,10 @@ export const TOOL_SCHEMAS: Partial<Record<string, z.ZodObject>> = {
   load_skill: loadSkillSchema,
 };
 
-// s06 的 handler 收 Deps，放进 LoopDeps 表没问题——参数逆变：收窄依赖的函数
+// s06 的 handler 收 S04Deps，放进 Deps 表没问题——参数逆变：收窄依赖的函数
 // 能接受更宽的实参。第二参 deps 让 load_skill 拿到 skills/logger。
 export const TOOL_HANDLERS: Partial<
-  Record<string, (input: any, deps: LoopDeps) => string | Promise<string>>
+  Record<string, (input: any, deps: Deps) => string | Promise<string>>
 > = {
   ...S06_HANDLERS,
   // load_skill 走 runLoadSkill：查表 + 专属 [skill] logger。
@@ -222,7 +222,7 @@ export const TOOL_HANDLERS: Partial<
 
 export async function agentLoop(
   messages: Anthropic.MessageParam[],
-  deps: LoopDeps,
+  deps: Deps,
 ): Promise<string> {
   const { client, logger, system, hooks } = deps;
   while (true) {

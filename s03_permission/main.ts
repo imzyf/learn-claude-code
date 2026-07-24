@@ -34,12 +34,14 @@ import * as path from "node:path";
 import * as readline from "node:readline/promises";
 import type Anthropic from "@anthropic-ai/sdk";
 import { createLogger, type SessionLogger } from "../lib/logger";
-import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
+import { createClient, MODEL_ID } from "../lib/model";
 import { colorize, print } from "../lib/terminal";
 import { printProse, textOf } from "../lib/tools";
+import type { Deps as S01Deps } from "../s01_agent_loop/main";
 // 四个文件工具、tool 定义、schema 表在 s03 都没变，直接从 s02 复用，
 // 不再包一层同名 wrapper。只有 runBash 是 s03 自己的版本（见下）。
 import {
+  type Handlers,
   runEdit,
   runGlob,
   runRead,
@@ -80,7 +82,7 @@ export function runBash(command: string): string {
 
 // `input: any` 对应 Python 的 `handler(**block.input)` —— 每个 handler
 // 解构出各自 schema 在 `.parse()` 之后保证的结构。
-export const TOOL_HANDLERS: Partial<Record<string, (input: any) => string>> = {
+export const TOOL_HANDLERS: Handlers = {
   bash: ({ command }) => runBash(command),
   read_file: ({ path, limit }) => runRead(path, limit),
   write_file: ({ path, content }) => runWrite(path, content),
@@ -237,9 +239,11 @@ export async function checkPermission(
 //  agentLoop —— 和 s02 一样，只是插入了 checkPermission()
 // ═══════════════════════════════════════════════════════════
 
+export type Deps = S01Deps & { confirm: Confirm };
+
 export async function agentLoop(
   messages: Anthropic.MessageParam[],
-  deps: { client: ModelClient; logger: SessionLogger; confirm: Confirm },
+  deps: Deps,
 ): Promise<string> {
   const { client, logger, confirm } = deps;
   while (true) {

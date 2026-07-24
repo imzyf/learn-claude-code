@@ -50,15 +50,17 @@ import type Anthropic from "@anthropic-ai/sdk";
 import { Cron } from "croner";
 import { z } from "zod";
 import { createLogger, type SessionLogger } from "../lib/logger";
-import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
+import { createClient, MODEL_ID } from "../lib/model";
 import { colorize, print, printError } from "../lib/terminal";
 import { printProse, textOf, zodTool } from "../lib/tools";
+import { errMsg, type Handlers } from "../s02_tool_use/main";
 // 来自 s03：不含权限检查的基础 dispatch 表（前台 bash 走这里的同步 runBash）。
 import { TOOL_HANDLERS as BASE_TOOL_HANDLERS } from "../s03_permission/main";
 // 来自 s09：记忆索引路径。
 import { MEMORY_INDEX } from "../s09_memory/main";
 // 来自 s10：只借 Context 类型。
 import type { Context } from "../s10_system_prompt/main";
+import { sleep } from "../s11_error_recovery/main";
 // 来自 s12：任务工具工厂、prompt 组装，以及 memory/workspace 的 context 推导。
 import {
   getSystemPrompt,
@@ -66,29 +68,21 @@ import {
   updateContext as taskUpdateContext,
 } from "../s12_task_system/main";
 // 来自 s13：后台任务层 + 带 run_in_background 的 bash（tools / TOOL_SCHEMAS 已是
-// 「基础 + 任务 + bash 覆盖」的合并）。s14 在其上再叠加 cron 工具。
+// 「基础 + 任务 + bash 覆盖」的合并）。s14 在其上再叠加 cron 工具；
+// Deps（client + logger + memoryIndex + background + tasksDir?）同样以 s13 为底。
 import {
   BackgroundState,
   collectBackgroundResults,
   TOOL_SCHEMAS as S13_TOOL_SCHEMAS,
+  type Deps as S13Deps,
   tools as s13Tools,
   shouldRunBackground,
   startBackgroundTask,
 } from "../s13_background_tasks/main";
 
-const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
-const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
-
-type Handlers = Partial<Record<string, (input: any) => string>>;
-
-// deps 与 s13 一致：client + logger + memoryIndex + 跨轮的 background 状态；
-// 另加跨轮的 cron 状态。tasksDir 可选，透传给 makeTaskHandlers 做测试隔离。
-export type Deps = { client: ModelClient; logger: SessionLogger };
-export type LoopDeps = Deps & {
-  memoryIndex: string;
-  background: BackgroundState;
+// deps 与 s13 一致，另加跨轮的 cron 状态。
+export type Deps = S13Deps & {
   cron: CronState;
-  tasksDir?: string;
 };
 
 // ═══════════════════════════════════════════════════════════
@@ -405,7 +399,7 @@ export function updateContext(memoryIndex: string): Context {
 export async function agentLoop(
   messages: Anthropic.MessageParam[],
   context: Context,
-  deps: LoopDeps,
+  deps: Deps,
 ): Promise<string> {
   const { client, logger, memoryIndex, tasksDir, background, cron } = deps;
   let system = getSystemPrompt(context);

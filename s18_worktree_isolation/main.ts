@@ -37,15 +37,14 @@ import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
 import { createClient, MODEL_ID } from "../lib/model";
 import { textOf, zodTool } from "../lib/tools";
+import { errMsg, type Handlers } from "../s02_tool_use/main";
+import { sleep } from "../s11_error_recovery/main";
 
 const client = createClient();
 
 const WORKDIR = process.cwd();
 const MEMORY_DIR = path.join(WORKDIR, ".memory");
 const MEMORY_INDEX = path.join(MEMORY_DIR, "MEMORY.md");
-
-const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
-const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 // ═══════════════════════════════════════════════════════════
 //  FROM s12 (+ s18 worktree field): Task System
@@ -749,7 +748,7 @@ function spawnTeammateThread(
       complete_task: subCompleteTaskSchema,
     };
 
-    const subHandlers: Partial<Record<string, (input: any) => string>> = {
+    const subHandlers: Handlers = {
       bash: ({ command }) => runBash(command, wtCtx.path),
       read_file: ({ path }) => runRead(path, undefined, wtCtx.path),
       write_file: ({ path, content }) => runWrite(path, content, wtCtx.path),
@@ -1090,7 +1089,7 @@ const TOOL_SCHEMAS: Partial<Record<string, z.ZodObject>> = {
   keep_worktree: keepWorktreeSchema,
 };
 
-const TOOL_HANDLERS: Partial<Record<string, (input: any) => string>> = {
+const TOOL_HANDLERS: Handlers = {
   bash: ({ command }) => runBash(command),
   read_file: ({ path, limit }) => runRead(path, limit),
   write_file: ({ path, content }) => runWrite(path, content),

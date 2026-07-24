@@ -37,9 +37,10 @@ import { promisify } from "node:util";
 import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
 import { createLogger, type SessionLogger } from "../lib/logger";
-import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
+import { createClient, MODEL_ID } from "../lib/model";
 import { colorize, print } from "../lib/terminal";
 import { printProse, textOf, zodTool } from "../lib/tools";
+import { errMsg, type Handlers } from "../s02_tool_use/main";
 // 来自 s03：不含权限检查的基础 dispatch 表（前台 bash 走这里的同步 runBash）。
 import { TOOL_HANDLERS as BASE_TOOL_HANDLERS } from "../s03_permission/main";
 // 来自 s09：记忆索引路径，s10 也复用同一份。
@@ -49,30 +50,23 @@ import type { Context } from "../s10_system_prompt/main";
 // 来自 s12：任务系统 —— tools/TOOL_SCHEMAS 已是「基础 + 任务」的合并，
 // makeTaskHandlers 工厂闭包捕获 logger + 存储目录；getSystemPrompt / updateContext
 // 是 s12 接管后的版本，「Available tools」已含任务工具。s13 同名覆盖 bash 不改工具名，
-// 直接复用。
+// 直接复用；Deps（client + logger + memoryIndex + tasksDir?）同样以 s12 为底。
 import {
   getSystemPrompt,
   makeTaskHandlers,
   TOOL_SCHEMAS as S12_TOOL_SCHEMAS,
+  type Deps as S12Deps,
   tools as s12Tools,
   updateContext,
 } from "../s12_task_system/main";
 
 const WORKDIR = process.cwd();
-const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const execAsync = promisify(exec);
 
-// deps 与 s12 一致：client + logger + memoryIndex（每轮工具后重新推导 context）；
-// tasksDir 可选，透传给 makeTaskHandlers，测试注入临时目录做隔离。
-// background：后台状态由 session 持有并跨轮传入。
-export type Deps = { client: ModelClient; logger: SessionLogger };
-export type LoopDeps = Deps & {
-  memoryIndex: string;
+// deps 与 s12 一致，另加 background：后台状态由 session 持有并跨轮传入。
+export type Deps = S12Deps & {
   background: BackgroundState;
-  tasksDir?: string;
 };
-
-type Handlers = Partial<Record<string, (input: any) => string>>;
 
 // ═══════════════════════════════════════════════════════════
 //  s13 覆盖：bash 工具新增 run_in_background 参数
@@ -258,7 +252,7 @@ export function collectBackgroundResults(
 export async function agentLoop(
   messages: Anthropic.MessageParam[],
   context: Context,
-  deps: LoopDeps,
+  deps: Deps,
 ): Promise<string> {
   const { client, logger, memoryIndex, tasksDir, background } = deps;
   let system = getSystemPrompt(context);

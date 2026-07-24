@@ -55,9 +55,10 @@ import * as path from "node:path";
 import * as readline from "node:readline/promises";
 import type Anthropic from "@anthropic-ai/sdk";
 import { createLogger, type SessionLogger } from "../lib/logger";
-import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
+import { createClient, MODEL_ID } from "../lib/model";
 import { colorize, print } from "../lib/terminal";
 import { printProse, textOf } from "../lib/tools";
+import type { Deps as S01Deps } from "../s01_agent_loop/main";
 // 来自 s02：tool 定义（tools）与 schema 表（TOOL_SCHEMAS）——纯数据，原样复用。
 import { TOOL_SCHEMAS, tools } from "../s02_tool_use/main";
 // 来自 s03：dispatch 表（TOOL_HANDLERS）+ 权限确认抽象（Confirm / makeConfirm）。
@@ -300,9 +301,11 @@ export function loadHooks(logger: SessionLogger, confirm: Confirm): HookSystem {
 //  s04: if (await hooks.trigger("PreToolUse", call)) ...
 // ═══════════════════════════════════════════════════════════
 
+export type Deps = S01Deps & { hooks: HookSystem };
+
 export async function agentLoop(
   messages: Anthropic.MessageParam[],
-  deps: { client: ModelClient; logger: SessionLogger; hooks: HookSystem },
+  deps: Deps,
 ): Promise<string> {
   const { client, logger, hooks } = deps;
   while (true) {

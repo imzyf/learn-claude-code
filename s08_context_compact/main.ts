@@ -55,6 +55,8 @@ import {
 import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
 import { colorize, print } from "../lib/terminal";
 import { printProse, textOf, zodTool } from "../lib/tools";
+import { errMsg } from "../s02_tool_use/main";
+import type { Deps as S04Deps } from "../s04_hooks/main";
 // 来自 s05：hook 装配（loadHooks = createHooks + registerDefaultHooks）+ nag 机制。
 import {
   bumpNagCounter,
@@ -62,13 +64,13 @@ import {
   nagIfStale,
   resetNagCounter,
 } from "../s05_todo_write/main";
-// 来自 s06：共享的 Deps 类型（client + logger）。
-import type { Deps } from "../s06_subagent/main";
-// 来自 s07：技能层 + LoopDeps + 装配好的三张工具表（base + todo + task + load_skill）。
-// s08 只在 tools 列表上追加 compact，schema/handler 表原样复用。
+// 来自 s07：技能层 + Deps + 装配好的三张工具表（base + todo + task + load_skill）。
+// s08 只在 tools 列表上追加 compact，schema/handler 表原样复用；
+// agentLoop 的完整依赖形状与 s07 一致，直接复用 s07 的 Deps，不再扩展。
+// 压缩流水线只用得到 client/logger/hooks，参数类型收窄成 S04Deps。
 import {
   buildSystem,
-  type LoopDeps,
+  type Deps,
   loadSkills,
   SKILLS_DIR,
   tools as s07Tools,
@@ -84,8 +86,6 @@ import {
 const MODULE_DIR = import.meta.dirname;
 const TRANSCRIPT_DIR = path.join(MODULE_DIR, ".transcripts");
 const TOOL_RESULTS_DIR = path.join(MODULE_DIR, ".task_outputs", "tool-results");
-
-const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 // ═══════════════════════════════════════════════════════════
 //  s08 新增：四层压缩流水线
@@ -359,7 +359,7 @@ export function persistLargeOutput(toolUseId: string, output: string): string {
 // L4: autoCompact —— LLM 完整摘要
 export async function compactHistory(
   messages: Anthropic.MessageParam[],
-  deps: Deps,
+  deps: S04Deps,
 ): Promise<Anthropic.MessageParam[]> {
   const transcriptPath = writeTranscript(messages);
   const totalChars = estimateSize(messages);
@@ -391,7 +391,7 @@ function writeTranscript(messages: Anthropic.MessageParam[]): string {
 // 用一次独立的 API 调用把整段历史浓缩成结构化摘要。
 export async function summarizeHistory(
   messages: Anthropic.MessageParam[],
-  deps: Deps,
+  deps: S04Deps,
 ): Promise<string> {
   const { client } = deps;
   // 摘要是独立的子请求：用 child scope 打标记（同 s06 子 agent 的做法），
@@ -419,7 +419,7 @@ export async function summarizeHistory(
 // 应急：reactiveCompact —— API 仍报 prompt_too_long 时触发
 export async function reactiveCompact(
   messages: Anthropic.MessageParam[],
-  deps: Deps,
+  deps: S04Deps,
 ): Promise<Anthropic.MessageParam[]> {
   // 与 L4 一样，先把完整历史落盘存档。
   writeTranscript(messages);
@@ -476,7 +476,7 @@ const REACTIVE_KEEP_TAIL = 5; // reactive compact 保留的尾部消息数
 
 export async function agentLoop(
   messages: Anthropic.MessageParam[],
-  deps: LoopDeps,
+  deps: Deps,
 ): Promise<string> {
   const { client, logger, system, hooks } = deps;
   // 应急压缩（reactive）的连续使用次数，一次 API 调用成功即复位。

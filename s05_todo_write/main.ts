@@ -42,7 +42,7 @@ import * as readline from "node:readline/promises";
 import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
 import { createLogger, type SessionLogger } from "../lib/logger";
-import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
+import { createClient, MODEL_ID } from "../lib/model";
 import { colorize, print } from "../lib/terminal";
 import { printProse, textOf, zodTool } from "../lib/tools";
 // 来自 s02：tool 定义（tools）与 schema 表（TOOL_SCHEMAS）——纯数据，原样复用。
@@ -58,6 +58,7 @@ import {
 // 来自 s04：hook 系统（createHooks 实例）与三个通用 hook，原样复用。
 import {
   createHooks,
+  type Deps,
   type HookSystem,
   logHook,
   summaryHook,
@@ -248,7 +249,7 @@ export function nagIfStale(
 
 export async function agentLoop(
   messages: Anthropic.MessageParam[],
-  deps: { client: ModelClient; logger: SessionLogger; hooks: HookSystem },
+  deps: Deps,
 ): Promise<string> {
   const { client, logger, hooks } = deps;
   while (true) {

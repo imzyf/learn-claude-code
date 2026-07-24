@@ -39,15 +39,14 @@ import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
 import { createClient, MODEL_ID } from "../lib/model";
 import { textOf, zodTool } from "../lib/tools";
+import { errMsg, type Handlers } from "../s02_tool_use/main";
+import { sleep } from "../s11_error_recovery/main";
 
 const client = createClient();
 
 const WORKDIR = process.cwd();
 const MEMORY_DIR = path.join(WORKDIR, ".memory");
 const MEMORY_INDEX = path.join(MEMORY_DIR, "MEMORY.md");
-
-const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
-const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 // ═══════════════════════════════════════════════════════════
 //  FROM s12/s18: Task System
@@ -684,7 +683,7 @@ function spawnTeammateThread(
       complete_task: subCompleteTaskSchema,
     };
 
-    const subHandlers: Partial<Record<string, (input: any) => string>> = {
+    const subHandlers: Handlers = {
       bash: ({ command }) => runBash(command, wtCtx.path),
       read_file: ({ path }) => runRead(path, undefined, wtCtx.path),
       write_file: ({ path, content }) => runWrite(path, content, wtCtx.path),
@@ -1003,11 +1002,11 @@ function jsonSchemaToZod(schema: Record<string, any>): z.ZodObject {
 function assembleToolPool(): {
   tools: Anthropic.Tool[];
   schemas: Partial<Record<string, z.ZodObject>>;
-  handlers: Partial<Record<string, (input: any) => string>>;
+  handlers: Handlers;
 } {
   const tools: Anthropic.Tool[] = [...BUILTIN_TOOLS];
   const schemas: Partial<Record<string, z.ZodObject>> = { ...BUILTIN_SCHEMAS };
-  const handlers: Partial<Record<string, (input: any) => string>> = {
+  const handlers: Handlers = {
     ...BUILTIN_HANDLERS,
   };
   for (const [serverName, mcpClient] of Object.entries(mcpClients)) {
@@ -1217,7 +1216,7 @@ const BUILTIN_SCHEMAS: Partial<Record<string, z.ZodObject>> = {
   connect_mcp: connectMcpSchema,
 };
 
-const BUILTIN_HANDLERS: Partial<Record<string, (input: any) => string>> = {
+const BUILTIN_HANDLERS: Handlers = {
   bash: ({ command }) => runBash(command),
   read_file: ({ path, limit }) => runRead(path, limit),
   write_file: ({ path, content }) => runWrite(path, content),

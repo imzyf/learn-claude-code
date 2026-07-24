@@ -43,6 +43,8 @@ import { createLogger, type SessionLogger } from "../lib/logger";
 import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
 import { colorize, print } from "../lib/terminal";
 import { printProse, textOf } from "../lib/tools";
+import { errMsg } from "../s02_tool_use/main";
+import type { Deps as S04Deps } from "../s04_hooks/main";
 // 来自 s05：hook 装配（loadHooks = createHooks + registerDefaultHooks）+ nag 机制。
 import {
   bumpNagCounter,
@@ -50,15 +52,13 @@ import {
   nagIfStale,
   resetNagCounter,
 } from "../s05_todo_write/main";
-// 来自 s06：共享的 Deps 类型（client + logger + hooks）。
-import type { Deps } from "../s06_subagent/main";
-// 来自 s07：技能层（SYSTEM 清单 + registry）+ frontmatter 解析 + LoopDeps +
+// 来自 s07：技能层（SYSTEM 清单 + registry）+ frontmatter 解析 + Deps +
 // 装配好的 schema/handler 表（base + todo + task + load_skill）——与 s08 的用法一致。
 import {
   buildSystem as buildSkillSystem,
   loadSkills,
   parseFrontmatter,
-  type LoopDeps as S07LoopDeps,
+  type Deps as S07Deps,
   SKILLS_DIR,
   type SkillRegistry,
   TOOL_HANDLERS,
@@ -81,7 +81,7 @@ import {
   tools,
 } from "../s08_context_compact/main";
 
-// s09 导出自己拥有的东西：记忆层（存储/加载/提取/整理）+ agentLoop + LoopDeps。
+// s09 导出自己拥有的东西：记忆层（存储/加载/提取/整理）+ agentLoop + Deps。
 // 复用来的符号（工具表 / hook / 压缩）由测试各自从源头 import。
 
 // 记忆落在项目根的 .memory/（同 s07 的 SKILLS_DIR，以 process.cwd() 为项目根）。
@@ -90,11 +90,10 @@ export const MEMORY_DIR = path.join(process.cwd(), ".memory");
 const memoryIndexPath = (dir: string): string => path.join(dir, "MEMORY.md");
 // 默认记忆索引：s10 / s11 直接复用这个路径，不再各自拼接。
 export const MEMORY_INDEX = memoryIndexPath(MEMORY_DIR);
-const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
-// agentLoop 的完整依赖：Deps（client + logger + hooks）+ 技能表 + 记忆目录。
+// agentLoop 的完整依赖：S04Deps（client + logger + hooks）+ 技能表 + 记忆目录。
 // system 不进 deps —— 记忆索引每轮都会变，由 agentLoop 自行重建（s07/s08 的 system 是静态的）。
-export type LoopDeps = Deps & { skills: SkillRegistry; memoryDir: string };
+export type Deps = S04Deps & { skills: SkillRegistry; memoryDir: string };
 
 // ═══════════════════════════════════════════════════════════
 //  s09 新增：记忆系统
@@ -134,7 +133,7 @@ export function buildSystem(
 export async function loadMemories(
   dir: string,
   messages: Anthropic.MessageParam[],
-  deps: Deps,
+  deps: S04Deps,
 ): Promise<string> {
   // 先挑出相关记忆文件，无命中直接返回空串。
   const selectedFiles = await selectRelevantMemories(dir, messages, deps);
@@ -157,7 +156,7 @@ export async function loadMemories(
 export async function selectRelevantMemories(
   dir: string,
   messages: Anthropic.MessageParam[],
-  deps: Deps,
+  deps: S04Deps,
   maxItems = 5,
 ): Promise<string[]> {
   const { client, logger: sessionLogger } = deps;
@@ -309,7 +308,7 @@ type ExtractedMemory = {
 export async function extractMemories(
   dir: string,
   messages: Anthropic.MessageParam[],
-  deps: Deps,
+  deps: S04Deps,
 ): Promise<void> {
   const { client, logger: sessionLogger } = deps;
   const logger = sessionLogger.child("extract_memories");
@@ -418,7 +417,7 @@ export function rebuildIndex(dir: string): void {
 const CONSOLIDATE_THRESHOLD = 10;
 export async function consolidateMemories(
   dir: string,
-  deps: Deps,
+  deps: S04Deps,
 ): Promise<void> {
   const { client, logger: sessionLogger } = deps;
   const logger = sessionLogger.child("consolidate_memories");
@@ -494,7 +493,7 @@ export async function consolidateMemories(
 
 export async function agentLoop(
   messages: Anthropic.MessageParam[],
-  deps: LoopDeps,
+  deps: Deps,
 ): Promise<string> {
   const { client, logger, hooks, skills, memoryDir } = deps;
   let reactiveRetries = 0;
@@ -508,7 +507,7 @@ export async function agentLoop(
 
   // s09（STEP 1）：本轮开始把 MEMORY.md 索引拼进 SYSTEM（技能清单 + 记忆索引）。
   const system = buildSystem(skills, memoryDir, logger);
-  const dispatchDeps: S07LoopDeps = { ...deps, system };
+  const dispatchDeps: S07Deps = { ...deps, system };
 
   while (true) {
     nagIfStale(messages, logger);

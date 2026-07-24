@@ -36,8 +36,8 @@
 import * as readline from "node:readline/promises";
 import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
-import { createLogger, type SessionLogger } from "../lib/logger";
-import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
+import { createLogger } from "../lib/logger";
+import { createClient, MODEL_ID } from "../lib/model";
 import { colorize, print } from "../lib/terminal";
 import { printProse, textOf, zodTool } from "../lib/tools";
 // 来自 s02：基础工具层（bash + 四个文件工具）——subagent 只用这一层。
@@ -47,8 +47,8 @@ import {
 } from "../s02_tool_use/main";
 // 来自 s03：基础 dispatch 表（bash/文件工具的 handler）——subagent 复用。
 import { TOOL_HANDLERS as BASE_HANDLERS } from "../s03_permission/main";
-// 来自 s04：hook 实例的类型（实例本身由入口经 loadHooks 创建、随 deps 传递）。
-import type { HookSystem } from "../s04_hooks/main";
+// 来自 s04：共享的 Deps 类型（client + logger + hooks）。
+import type { Deps } from "../s04_hooks/main";
 // 来自 s05：hook 装配（loadHooks = createHooks + registerDefaultHooks）+ 装配好的
 // 工具三张表 + nag 机制（nagIfStale / bumpNagCounter / resetNagCounter）——单一出处在 s05。
 import {
@@ -61,9 +61,9 @@ import {
   tools as s05Tools,
 } from "../s05_todo_write/main";
 
-// s06 导出自己拥有的东西：agentLoop / spawnSubagent / Deps，
+// s06 导出自己拥有的东西：agentLoop / spawnSubagent，
 // 以及装配好的三张工具表（base + todo + task），供 s07 继续叠加。
-// 复用来的符号由测试各自从源头（s04/s05）import，本模块不做 re-export 中转。
+// 复用来的符号由测试各自从源头（s01/s04/s05）import。
 
 const WORKDIR = process.cwd();
 
@@ -76,13 +76,6 @@ const SUB_SYSTEM =
   `You are a coding agent at ${WORKDIR}. ` +
   "Complete the task you were given, then return a concise summary. " +
   "Do not delegate further.";
-
-// client / logger / hooks 通过参数注入到 agentLoop / spawnSubagent。
-export type Deps = {
-  client: ModelClient;
-  logger: SessionLogger;
-  hooks: HookSystem;
-};
 
 // ═══════════════════════════════════════════════════════════
 //  工具装配：parent = s05（base + todo）+ task；subagent = s02 base

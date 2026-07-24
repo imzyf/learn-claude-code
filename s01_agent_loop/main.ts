@@ -78,10 +78,11 @@ export function isDangerous(command: string): boolean {
   return dangerous.some((d) => command.includes(d));
 }
 
+export type Deps = { client: ModelClient; logger: SessionLogger };
 // ── 核心模式：一个 while loop，不断调用 tool 直到 model 停止 ──
 export async function agentLoop(
   messages: Anthropic.MessageParam[],
-  deps: { client: ModelClient; logger: SessionLogger },
+  deps: Deps,
 ): Promise<string> {
   const { client, logger } = deps;
   while (true) {

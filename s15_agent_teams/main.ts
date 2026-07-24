@@ -35,6 +35,7 @@ import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
 import { createClient, MODEL_ID } from "../lib/model";
 import { textOf, zodTool } from "../lib/tools";
+import { errMsg, type Handlers } from "../s02_tool_use/main";
 
 const client = createClient();
 
@@ -42,7 +43,6 @@ const WORKDIR = process.cwd();
 const MEMORY_DIR = path.join(WORKDIR, ".memory");
 const MEMORY_INDEX = path.join(MEMORY_DIR, "MEMORY.md");
 
-const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const execAsync = promisify(exec);
 
 // ═══════════════════════════════════════════════════════════
@@ -820,7 +820,7 @@ function spawnTeammateThread(
     write_file: subWriteSchema,
     send_message: subSendMessageSchema,
   };
-  const subHandlers: Partial<Record<string, (input: any) => string>> = {
+  const subHandlers: Handlers = {
     bash: ({ command }) => runBash(command),
     read_file: ({ path }) => runRead(path),
     write_file: ({ path, content }) => runWrite(path, content),
@@ -1014,7 +1014,7 @@ const TOOL_SCHEMAS: Partial<Record<string, z.ZodObject>> = {
   check_inbox: checkInboxSchema,
 };
 
-const TOOL_HANDLERS: Partial<Record<string, (input: any) => string>> = {
+const TOOL_HANDLERS: Handlers = {
   bash: ({ command }) => runBash(command),
   read_file: ({ path, limit }) => runRead(path, limit),
   write_file: ({ path, content }) => runWrite(path, content),

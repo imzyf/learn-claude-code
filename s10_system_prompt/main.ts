@@ -21,10 +21,11 @@
 import * as fs from "node:fs";
 import * as readline from "node:readline/promises";
 import type Anthropic from "@anthropic-ai/sdk";
-import { createLogger, type SessionLogger } from "../lib/logger";
-import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
+import { createLogger } from "../lib/logger";
+import { createClient, MODEL_ID } from "../lib/model";
 import { colorize, print } from "../lib/terminal";
 import { printProse, textOf } from "../lib/tools";
+import type { Deps as S01Deps } from "../s01_agent_loop/main";
 // 来自 s02：tool 定义 + schema 表；来自 s03：不含权限检查的基础 dispatch 表。
 import { TOOL_SCHEMAS, tools } from "../s02_tool_use/main";
 import { TOOL_HANDLERS } from "../s03_permission/main";
@@ -34,8 +35,7 @@ import { MEMORY_INDEX } from "../s09_memory/main";
 const WORKDIR = process.cwd();
 
 // 以便每轮工具后重新推导 context。
-export type Deps = { client: ModelClient; logger: SessionLogger };
-export type LoopDeps = Deps & { memoryIndex: string };
+export type Deps = S01Deps & { memoryIndex: string };
 
 // ═══════════════════════════════════════════════════════════
 //  s10 新增：Prompt 片段
@@ -140,7 +140,7 @@ export function updateContext(memoryIndex: string): Context {
 export async function agentLoop(
   messages: Anthropic.MessageParam[],
   context: Context,
-  deps: LoopDeps,
+  deps: Deps,
 ): Promise<string> {
   const { client, logger, memoryIndex } = deps;
   // 先组装 system prompt，避免每轮工具都重复拼接。
