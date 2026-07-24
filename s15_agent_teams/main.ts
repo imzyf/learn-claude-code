@@ -1,15 +1,24 @@
 /**
  * s15_agent_teams/main.ts - Agent 团队
  *
- * MessageBus + spawnTeammateThread + 收件箱注入。
+ * MessageBus（基于文件的邮箱）+ 游离的队友异步循环 + 收件箱注入。
  *
  * 相比 s14 的变化：
- *   + MessageBus 类：基于文件的邮箱（.mailboxes/*.jsonl）
- *   + spawnTeammateThread：把队友创建为一个游离的异步循环
- *   + 队友运行自己的简化版 agent 循环（bash、read、write、send_message）
- *   + Lead 的工具：spawn_teammate、send_message、check_inbox（3 个新增）
- *   + Lead 的收件箱：队友的消息被注入历史记录（不只是打印出来）
- *   + 教学版本：队友最多运行 10 轮（真实 CC 用的是空闲循环）
+ *   工具层、任务系统、后台任务、cron 调度、prompt 组装继续直接复用，不再内联：
+ *     基础工具 handler 复用 s03，任务系统（makeTaskHandlers）复用 s12，
+ *     后台任务（BackgroundState / shouldRunBackground / startBackgroundTask /
+ *     collectBackgroundResults）复用 s13，cron 调度层（CronState /
+ *     startCronScheduler / consumeCronQueue / makeCronHandlers / tools /
+ *     TOOL_SCHEMAS）复用 s14，getSystemPrompt / Context 复用 s12 / s10，
+ *     MEMORY_INDEX 复用 s09。s11 的错误恢复在此照旧省略。
+ *   本文件只新增 agent 团队这一层：
+ *   + MessageBus：基于文件的邮箱（.mailboxes/*.jsonl），读取即消费（read + unlink）
+ *   + TeamState：bus + activeTeammates，由 session 持有、跨轮复用（对齐 s14 的 CronState）
+ *   + spawnTeammateThread：把队友创建为一个游离的异步循环（守护线程的 TS 版）
+ *     队友跑自己的简化 agent 循环（bash / read / write / send_message，最多 10 轮）
+ *   + makeTeamHandlers + 3 个新工具：spawn_teammate / send_message / check_inbox
+ *   + updateContext override：enabled_tools 再补上 3 个团队工具
+ *   + 入口改用事件队列：readline 循环 + 1s 轮询（收件箱 / 后台 / cron）共用一个队列
  *
  * ASCII 流程：
  *   Lead: cronQueue → messages → prompt → LLM → TOOLS ────→ loop
@@ -18,700 +27,75 @@
  *   Teammate: inbox → LLM → bash/read/write/send → loop（最多 10 轮）
  *
  * TS 特有说明：
- *   - Python 用 input() 线程 + 收件箱轮询线程共同喂给一个事件队列；
- *     这里用一个异步 readline 循环 + 1 秒间隔的推送共用同一个队列
- *   - 游离的 Promise 代替守护线程（单线程事件循环）
+ *   - Python 用 input() 线程 + 收件箱轮询线程共同喂给一个事件队列；这里用一个
+ *     异步 readline 循环 + 1s 轮询推送共用同一个队列（单线程事件循环，无需锁）。
+ *   - 游离的 Promise 代替守护线程；队友的日志走 logger.child(name) 子 scope，
+ *     与 Lead 的日志区分开。
+ *   - MessageBus 教学版不加文件锁（真实 CC 用 proper-lockfile 保证并发写安全）。
+ *   - MessageBus 的 mailboxDir、TeamState 的 bus 可注入，测试传临时目录做隔离
+ *     （对齐 s14 的 durablePath / s12 的 tasksDir）。
  *
  * Usage:
  *     pnpm dev s15_agent_teams/main.ts
  */
 
-import { exec, spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as readline from "node:readline/promises";
-import { promisify } from "node:util";
 import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
-import { createClient, MODEL_ID } from "../lib/model";
-import { textOf, zodTool } from "../lib/tools";
+import { createLogger, type SessionLogger } from "../lib/logger";
+import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
+import { colorize, print } from "../lib/terminal";
+import { printProse, textOf, zodTool } from "../lib/tools";
 import { errMsg, type Handlers } from "../s02_tool_use/main";
+// 来自 s03：基础 dispatch 表（队友的 bash/read/write 直接借这里的 handler）。
+import { TOOL_HANDLERS as BASE_TOOL_HANDLERS } from "../s03_permission/main";
+// 来自 s09：记忆索引路径。
+import { MEMORY_INDEX } from "../s09_memory/main";
+// 来自 s10：只借 Context 类型。
+import type { Context } from "../s10_system_prompt/main";
+// 来自 s12：prompt 组装、任务工具工厂、memory/workspace 的 context 推导。
+import {
+  getSystemPrompt,
+  makeTaskHandlers,
+  updateContext as taskUpdateContext,
+} from "../s12_task_system/main";
+// 来自 s13：后台任务层。
+import {
+  BackgroundState,
+  collectBackgroundResults,
+  shouldRunBackground,
+  startBackgroundTask,
+} from "../s13_background_tasks/main";
+// 来自 s14：cron 调度层（tools / TOOL_SCHEMAS 已是「基础 + 任务 + 后台 bash + cron」
+// 的合并）。s15 在其上再叠加团队工具；Deps（client + logger + memoryIndex +
+// background + cron + tasksDir?）同样以 s14 为底。
+import {
+  CronState,
+  consumeCronQueue,
+  cronStateSummary,
+  loadDurableJobs,
+  makeCronHandlers,
+  TOOL_SCHEMAS as S14_TOOL_SCHEMAS,
+  type Deps as S14Deps,
+  tools as s14Tools,
+  startCronScheduler,
+} from "../s14_cron_scheduler/main";
 
-const client = createClient();
-
-const WORKDIR = process.cwd();
-const MEMORY_DIR = path.join(WORKDIR, ".memory");
-const MEMORY_INDEX = path.join(MEMORY_DIR, "MEMORY.md");
-
-const execAsync = promisify(exec);
-
-// ═══════════════════════════════════════════════════════════
-//  FROM s12 (synced): Task System
-// ═══════════════════════════════════════════════════════════
-
-const TASKS_DIR = path.join(WORKDIR, ".tasks");
-fs.mkdirSync(TASKS_DIR, { recursive: true });
-
-type TaskStatus = "pending" | "in_progress" | "completed";
-
-type Task = {
-  id: string;
-  subject: string;
-  description: string;
-  status: TaskStatus;
-  owner: string | null;
-  blockedBy: string[];
+// deps 与 s14 一致，另加跨轮的团队状态。
+export type Deps = S14Deps & {
+  team: TeamState;
 };
 
-const taskPath = (taskId: string) => path.join(TASKS_DIR, `${taskId}.json`);
-
-function createTask(
-  subject: string,
-  description = "",
-  blockedBy: string[] = [],
-): Task {
-  const task: Task = {
-    id: `task_${Math.floor(Date.now() / 1000)}_${String(Math.floor(Math.random() * 10_000)).padStart(4, "0")}`,
-    subject,
-    description,
-    status: "pending",
-    owner: null,
-    blockedBy,
-  };
-  saveTask(task);
-  return task;
-}
-
-function saveTask(task: Task): void {
-  fs.writeFileSync(taskPath(task.id), JSON.stringify(task, null, 2));
-}
-
-function loadTask(taskId: string): Task {
-  return JSON.parse(fs.readFileSync(taskPath(taskId), "utf8")) as Task;
-}
-
-function listTasks(): Task[] {
-  return fs
-    .readdirSync(TASKS_DIR)
-    .filter((f) => f.startsWith("task_") && f.endsWith(".json"))
-    .sort()
-    .map(
-      (f) =>
-        JSON.parse(fs.readFileSync(path.join(TASKS_DIR, f), "utf8")) as Task,
-    );
-}
-
-// Return full task details as JSON.
-function getTask(taskId: string): string {
-  return JSON.stringify(loadTask(taskId), null, 2);
-}
-
-/**
- * Check if all blockedBy dependencies are completed.
- * Missing dependencies are treated as blocked.
- */
-function canStart(taskId: string): boolean {
-  const task = loadTask(taskId);
-  for (const depId of task.blockedBy) {
-    if (!fs.existsSync(taskPath(depId))) return false;
-    if (loadTask(depId).status !== "completed") return false;
-  }
-  return true;
-}
-
-function claimTask(taskId: string, owner = "agent"): string {
-  const task = loadTask(taskId);
-  if (task.status !== "pending") {
-    return `Task ${taskId} is ${task.status}, cannot claim`;
-  }
-  if (!canStart(taskId)) {
-    const deps = task.blockedBy.filter(
-      (d) => !fs.existsSync(taskPath(d)) || loadTask(d).status !== "completed",
-    );
-    return `Blocked by: [${deps.join(", ")}]`;
-  }
-  task.owner = owner;
-  task.status = "in_progress";
-  saveTask(task);
-  console.log(
-    `  \x1b[36m[claim] ${task.subject} → in_progress (owner: ${owner})\x1b[0m`,
-  );
-  return `Claimed ${task.id} (${task.subject})`;
-}
-
-function completeTask(taskId: string): string {
-  const task = loadTask(taskId);
-  if (task.status !== "in_progress") {
-    return `Task ${taskId} is ${task.status}, cannot complete`;
-  }
-  task.status = "completed";
-  saveTask(task);
-  const unblocked = listTasks()
-    .filter(
-      (t) => t.status === "pending" && t.blockedBy.length > 0 && canStart(t.id),
-    )
-    .map((t) => t.subject);
-  console.log(`  \x1b[32m[complete] ${task.subject} ✓\x1b[0m`);
-  let msg = `Completed ${task.id} (${task.subject})`;
-  if (unblocked.length) {
-    msg += `\nUnblocked: ${unblocked.join(", ")}`;
-    console.log(`  \x1b[33m[unblocked] ${unblocked.join(", ")}\x1b[0m`);
-  }
-  return msg;
-}
-
 // ═══════════════════════════════════════════════════════════
-//  FROM s10 (synced): Prompt Assembly
+//  s15 新增：MessageBus —— 基于文件的邮箱
 // ═══════════════════════════════════════════════════════════
 
-const PROMPT_SECTIONS = {
-  identity: "You are a coding agent. Act, don't explain.",
-  tools:
-    "Available tools: bash, read_file, write_file, " +
-    "get_task, create_task, list_tasks, claim_task, complete_task, " +
-    "schedule_cron, list_crons, cancel_cron, " +
-    "spawn_teammate, send_message, check_inbox.",
-  workspace: `Working directory: ${WORKDIR}`,
-  memory: "Relevant memories are injected below when available.",
-};
+// 默认邮箱目录，落在 s15 自己的目录下（对齐 s14 的 .scheduled_tasks.json）。
+export const MAILBOX_DIR = path.join(import.meta.dirname, ".mailboxes");
 
-type Context = {
-  enabled_tools: string[];
-  workspace: string;
-  memories: string;
-};
-
-function assembleSystemPrompt(context: Context): string {
-  const sections = [
-    PROMPT_SECTIONS.identity,
-    PROMPT_SECTIONS.tools,
-    PROMPT_SECTIONS.workspace,
-  ];
-  if (context.memories) {
-    sections.push(`Relevant memories:\n${context.memories}`);
-  }
-  return sections.join("\n\n");
-}
-
-let lastContextKey: string | null = null;
-let lastPrompt: string | null = null;
-
-const contextKey = (context: Context): string =>
-  JSON.stringify(context, Object.keys(context).sort());
-
-function getSystemPrompt(context: Context): string {
-  const key = contextKey(context);
-  if (key === lastContextKey && lastPrompt) {
-    return lastPrompt;
-  }
-  lastContextKey = key;
-  lastPrompt = assembleSystemPrompt(context);
-  return lastPrompt;
-}
-
-// ═══════════════════════════════════════════════════════════
-//  FROM s02 (unchanged): Basic tools
-// ═══════════════════════════════════════════════════════════
-
-function safePath(p: string): string {
-  const resolved = path.resolve(WORKDIR, p);
-  if (resolved !== WORKDIR && !resolved.startsWith(WORKDIR + path.sep)) {
-    throw new Error(`Path escapes workspace: ${p}`);
-  }
-  return resolved;
-}
-
-// run_in_background is handled by agentLoop dispatch, not here
-function runBash(command: string): string {
-  const r = spawnSync(command, {
-    shell: true,
-    cwd: WORKDIR,
-    encoding: "utf8",
-    timeout: 120_000,
-  });
-  if (r.error) {
-    const code = (r.error as NodeJS.ErrnoException).code;
-    if (code === "ETIMEDOUT") return "Error: Timeout (120s)";
-    return `Error: ${r.error.message}`;
-  }
-  const out = ((r.stdout ?? "") + (r.stderr ?? "")).trim();
-  return out ? out.slice(0, 50_000) : "(no output)";
-}
-
-// Async variant for background execution — keeps the event loop free.
-async function runBashAsync(command: string): Promise<string> {
-  try {
-    const { stdout, stderr } = await execAsync(command, {
-      cwd: WORKDIR,
-      timeout: 120_000,
-      maxBuffer: 10 * 1024 * 1024,
-    });
-    const out = (stdout + stderr).trim();
-    return out ? out.slice(0, 50_000) : "(no output)";
-  } catch (e) {
-    const err = e as { stdout?: string; stderr?: string; killed?: boolean };
-    if (err.killed) return "Error: Timeout (120s)";
-    const out = ((err.stdout ?? "") + (err.stderr ?? "")).trim();
-    return out ? out.slice(0, 50_000) : `Error: ${errMsg(e)}`;
-  }
-}
-
-function runRead(p: string, limit?: number): string {
-  try {
-    let lines = fs.readFileSync(safePath(p), "utf8").split("\n");
-    if (limit && limit < lines.length) {
-      lines = [
-        ...lines.slice(0, limit),
-        `... (${lines.length - limit} more lines)`,
-      ];
-    }
-    return lines.join("\n");
-  } catch (e) {
-    return `Error: ${errMsg(e)}`;
-  }
-}
-
-function runWrite(p: string, content: string): string {
-  try {
-    const filePath = safePath(p);
-    fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    fs.writeFileSync(filePath, content);
-    return `Wrote ${Buffer.byteLength(content)} bytes to ${p}`;
-  } catch (e) {
-    return `Error: ${errMsg(e)}`;
-  }
-}
-
-// ── Task tools ──
-
-function runCreateTask(
-  subject: string,
-  description = "",
-  blockedBy?: string[],
-): string {
-  const task = createTask(subject, description, blockedBy ?? []);
-  const deps = blockedBy?.length ? ` (blockedBy: ${blockedBy.join(", ")})` : "";
-  console.log(`  \x1b[34m[create] ${task.subject}${deps}\x1b[0m`);
-  return `Created ${task.id}: ${task.subject}${deps}`;
-}
-
-function runListTasks(): string {
-  const tasks = listTasks();
-  if (!tasks.length) return "No tasks. Use create_task to add some.";
-  const icons: Record<TaskStatus, string> = {
-    pending: "○",
-    in_progress: "●",
-    completed: "✓",
-  };
-  return tasks
-    .map((t) => {
-      const icon = icons[t.status] ?? "?";
-      const deps = t.blockedBy.length
-        ? ` (blockedBy: ${t.blockedBy.join(", ")})`
-        : "";
-      const owner = t.owner ? ` [${t.owner}]` : "";
-      return `  ${icon} ${t.id}: ${t.subject} [${t.status}]${owner}${deps}`;
-    })
-    .join("\n");
-}
-
-function runGetTask(taskId: string): string {
-  try {
-    return getTask(taskId);
-  } catch {
-    return `Error: Task ${taskId} not found`;
-  }
-}
-
-function runClaimTask(taskId: string): string {
-  return claimTask(taskId, "agent");
-}
-
-function runCompleteTask(taskId: string): string {
-  return completeTask(taskId);
-}
-
-// ═══════════════════════════════════════════════════════════
-//  FROM s13 (synced): Background Tasks
-// ═══════════════════════════════════════════════════════════
-
-let bgCounter = 0;
-type BgTask = {
-  toolCallId: string;
-  command: string;
-  status: "running" | "completed";
-};
-const backgroundTasks: Record<string, BgTask> = {};
-const backgroundResults: Record<string, string> = {};
-
-// Fallback heuristic: commands likely to take > 30s.
-function isSlowOperation(toolName: string, toolInput: any): boolean {
-  if (toolName !== "bash") return false;
-  const cmd = String(toolInput.command ?? "").toLowerCase();
-  const slowKeywords = [
-    "install",
-    "build",
-    "test",
-    "deploy",
-    "compile",
-    "docker build",
-    "pip install",
-    "npm install",
-    "cargo build",
-    "pytest",
-    "make",
-  ];
-  return slowKeywords.some((kw) => cmd.includes(kw));
-}
-
-// Model explicit request takes priority; fallback to heuristic.
-function shouldRunBackground(toolName: string, toolInput: any): boolean {
-  if (toolInput.run_in_background) return true;
-  return isSlowOperation(toolName, toolInput);
-}
-
-// Execute a tool call, return output.
-function executeTool(toolName: string, input: any): string {
-  const handler = TOOL_HANDLERS[toolName];
-  if (handler) return handler(input);
-  return `Unknown tool: ${toolName}`;
-}
-
-// Run tool in a detached async worker. Returns background task ID.
-function startBackgroundTask(
-  toolName: string,
-  toolCallId: string,
-  input: any,
-): string {
-  bgCounter += 1;
-  const bgId = `bg_${String(bgCounter).padStart(4, "0")}`;
-  const cmd = String(input.command ?? toolName);
-
-  backgroundTasks[bgId] = { toolCallId, command: cmd, status: "running" };
-  void (async () => {
-    const result =
-      toolName === "bash"
-        ? await runBashAsync(String(input.command ?? ""))
-        : executeTool(toolName, input);
-    backgroundTasks[bgId].status = "completed";
-    backgroundResults[bgId] = result;
-  })();
-
-  console.log(
-    `  \x1b[33m[background] dispatched ${bgId}: ${cmd.slice(0, 40)}\x1b[0m`,
-  );
-  return bgId;
-}
-
-// Collect completed background results as task_notification messages.
-function collectBackgroundResults(): string[] {
-  const readyIds = Object.entries(backgroundTasks)
-    .filter(([, task]) => task.status === "completed")
-    .map(([id]) => id);
-  const notifications: string[] = [];
-  for (const bgId of readyIds) {
-    const task = backgroundTasks[bgId];
-    delete backgroundTasks[bgId];
-    const output = backgroundResults[bgId] ?? "";
-    delete backgroundResults[bgId];
-    const summary = output.slice(0, 200);
-    notifications.push(
-      `<task_notification>\n` +
-        `  <task_id>${bgId}</task_id>\n` +
-        `  <status>completed</status>\n` +
-        `  <command>${task.command}</command>\n` +
-        `  <summary>${summary}</summary>\n` +
-        `</task_notification>`,
-    );
-    console.log(
-      `  \x1b[32m[background done] ${bgId}: ${task.command.slice(0, 40)} (${output.length} chars)\x1b[0m`,
-    );
-  }
-  return notifications;
-}
-
-// Non-destructive: true if any background task has completed and is waiting
-// to be collected. The inbox poller uses this in its wake condition.
-function hasPendingBackground(): boolean {
-  return Object.values(backgroundTasks).some((t) => t.status === "completed");
-}
-
-// ═══════════════════════════════════════════════════════════
-//  FROM s14 (synced): Cron Scheduler
-// ═══════════════════════════════════════════════════════════
-
-const DURABLE_PATH = path.join(WORKDIR, ".scheduled_tasks.json");
-
-type CronJob = {
-  id: string;
-  cron: string; // "0 9 * * *"
-  prompt: string; // message to inject when fired
-  recurring: boolean; // true = recurring, false = one-shot
-  durable: boolean; // true = persist to disk
-};
-
-const scheduledJobs = new Map<string, CronJob>();
-const cronQueue: CronJob[] = [];
-const lastFiredAt = new Map<string, string>(); // job_id → "YYYY-MM-DD HH:MM"
-
-const isDigits = (s: string) => /^\d+$/.test(s);
-
-// Match a single cron field against a value.
-function cronFieldMatches(field: string, value: number): boolean {
-  if (field === "*") return true;
-  if (field.startsWith("*/")) {
-    const step = Number(field.slice(2));
-    return step > 0 && value % step === 0;
-  }
-  if (field.includes(",")) {
-    return field.split(",").some((f) => cronFieldMatches(f.trim(), value));
-  }
-  if (field.includes("-")) {
-    const i = field.indexOf("-");
-    return (
-      Number(field.slice(0, i)) <= value && value <= Number(field.slice(i + 1))
-    );
-  }
-  return value === Number(field);
-}
-
-/**
- * Check if a 5-field cron expression matches the given Date.
- * Standard cron semantics: DOM and DOW use OR when both are constrained.
- */
-function cronMatches(cronExpr: string, dt: Date): boolean {
-  const fields = cronExpr.trim().split(/\s+/);
-  if (fields.length !== 5) return false;
-  const [minute, hour, dom, month, dow] = fields;
-  const dowVal = dt.getDay(); // JS: Sunday=0, same as cron
-
-  const m = cronFieldMatches(minute, dt.getMinutes());
-  const h = cronFieldMatches(hour, dt.getHours());
-  const domOk = cronFieldMatches(dom, dt.getDate());
-  const monthOk = cronFieldMatches(month, dt.getMonth() + 1);
-  const dowOk = cronFieldMatches(dow, dowVal);
-
-  // Minute, hour, month must all match
-  if (!(m && h && monthOk)) return false;
-  // DOM and DOW: if both constrained, either matching is enough (OR)
-  const domUnconstrained = dom === "*";
-  const dowUnconstrained = dow === "*";
-  if (domUnconstrained && dowUnconstrained) return true;
-  if (domUnconstrained) return dowOk;
-  if (dowUnconstrained) return domOk;
-  return domOk || dowOk;
-}
-
-// Validate a single cron field value is within [lo, hi].
-function validateCronField(
-  field: string,
-  lo: number,
-  hi: number,
-): string | null {
-  if (field === "*") return null;
-  if (field.startsWith("*/")) {
-    const stepStr = field.slice(2);
-    if (!isDigits(stepStr)) return `Invalid step: ${field}`;
-    if (Number(stepStr) <= 0) return `Step must be > 0: ${field}`;
-    return null;
-  }
-  if (field.includes(",")) {
-    for (const part of field.split(",")) {
-      const err = validateCronField(part.trim(), lo, hi);
-      if (err) return err;
-    }
-    return null;
-  }
-  if (field.includes("-")) {
-    const i = field.indexOf("-");
-    const loStr = field.slice(0, i);
-    const hiStr = field.slice(i + 1);
-    if (!isDigits(loStr) || !isDigits(hiStr)) return `Invalid range: ${field}`;
-    const a = Number(loStr);
-    const b = Number(hiStr);
-    if (a < lo || a > hi || b < lo || b > hi)
-      return `Range ${field} out of bounds [${lo}-${hi}]`;
-    if (a > b) return `Range start > end: ${field}`;
-    return null;
-  }
-  if (!isDigits(field)) return `Invalid field: ${field}`;
-  const val = Number(field);
-  if (val < lo || val > hi) return `Value ${val} out of bounds [${lo}-${hi}]`;
-  return null;
-}
-
-// Validate a cron expression. Returns error message or null.
-function validateCron(cronExpr: string): string | null {
-  const fields = cronExpr.trim().split(/\s+/);
-  if (fields.length !== 5) return `Expected 5 fields, got ${fields.length}`;
-  const bounds: [number, number][] = [
-    [0, 59],
-    [0, 23],
-    [1, 31],
-    [1, 12],
-    [0, 6],
-  ];
-  const names = ["minute", "hour", "day-of-month", "month", "day-of-week"];
-  for (let i = 0; i < 5; i++) {
-    const err = validateCronField(fields[i], bounds[i][0], bounds[i][1]);
-    if (err) return `${names[i]}: ${err}`;
-  }
-  return null;
-}
-
-// Persist durable jobs to .scheduled_tasks.json.
-function saveDurableJobs(): void {
-  const durable = [...scheduledJobs.values()].filter((j) => j.durable);
-  fs.writeFileSync(DURABLE_PATH, JSON.stringify(durable, null, 2));
-}
-
-// Load durable jobs from disk on startup.
-function loadDurableJobs(): void {
-  if (!fs.existsSync(DURABLE_PATH)) return;
-  try {
-    const jobs = JSON.parse(fs.readFileSync(DURABLE_PATH, "utf8")) as CronJob[];
-    let loaded = 0;
-    for (const job of jobs) {
-      const err = validateCron(job.cron);
-      if (err) {
-        console.log(
-          `  \x1b[31m[cron] skipping invalid job ${job.id}: ${err}\x1b[0m`,
-        );
-        continue;
-      }
-      scheduledJobs.set(job.id, job);
-      loaded += 1;
-    }
-    if (loaded) {
-      console.log(`  \x1b[35m[cron] loaded ${loaded} durable job(s)\x1b[0m`);
-    }
-  } catch {
-    // corrupted durable file: start empty
-  }
-}
-
-// Register a new cron job. Returns CronJob or error string.
-function scheduleJob(
-  cron: string,
-  prompt: string,
-  recurring = true,
-  durable = true,
-): CronJob | string {
-  const err = validateCron(cron);
-  if (err) return err;
-  const job: CronJob = {
-    id: `cron_${String(Math.floor(Math.random() * 1_000_000)).padStart(6, "0")}`,
-    cron,
-    prompt,
-    recurring,
-    durable,
-  };
-  scheduledJobs.set(job.id, job);
-  if (durable) saveDurableJobs();
-  console.log(
-    `  \x1b[35m[cron register] ${job.id} '${cron}' → ${prompt.slice(0, 40)}\x1b[0m`,
-  );
-  return job;
-}
-
-// Cancel a cron job.
-function cancelJob(jobId: string): string {
-  const job = scheduledJobs.get(jobId);
-  if (!job) return `Job ${jobId} not found`;
-  scheduledJobs.delete(jobId);
-  if (job.durable) saveDurableJobs();
-  console.log(`  \x1b[31m[cron cancel] ${jobId}\x1b[0m`);
-  return `Cancelled ${jobId}`;
-}
-
-/**
- * Independent 1s interval timer (Python: daemon thread), fires matching jobs.
- * Individual job errors are caught to prevent one bad job from killing the
- * scheduler. unref() lets the process exit when the REPL closes.
- */
-function startCronScheduler(): void {
-  setInterval(() => {
-    const now = new Date();
-    const pad = (n: number) => String(n).padStart(2, "0");
-    // Date-aware marker prevents daily jobs from skipping on day 2+
-    const minuteMarker =
-      `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ` +
-      `${pad(now.getHours())}:${pad(now.getMinutes())}`;
-    for (const job of [...scheduledJobs.values()]) {
-      try {
-        if (cronMatches(job.cron, now)) {
-          if (lastFiredAt.get(job.id) !== minuteMarker) {
-            cronQueue.push(job);
-            lastFiredAt.set(job.id, minuteMarker);
-            console.log(
-              `  \x1b[35m[cron fire] ${job.id} → ${job.prompt.slice(0, 40)}\x1b[0m`,
-            );
-          }
-          if (!job.recurring) {
-            scheduledJobs.delete(job.id);
-            if (job.durable) saveDurableJobs();
-          }
-        }
-      } catch (e) {
-        console.log(`  \x1b[31m[cron error] ${job.id}: ${errMsg(e)}\x1b[0m`);
-      }
-    }
-  }, 1000).unref();
-}
-
-// Consume fired jobs from cronQueue (called by agentLoop).
-function consumeCronQueue(): CronJob[] {
-  const fired = [...cronQueue];
-  cronQueue.length = 0;
-  return fired;
-}
-
-// Load durable jobs on startup, then start the scheduler timer
-loadDurableJobs();
-startCronScheduler();
-console.log("  \x1b[35m[cron] scheduler timer started\x1b[0m");
-
-// ── Cron tools ──
-
-function runScheduleCron(
-  cron: string,
-  prompt: string,
-  recurring = true,
-  durable = true,
-): string {
-  const result = scheduleJob(cron, prompt, recurring, durable);
-  if (typeof result === "string") {
-    return `Error: ${result}`;
-  }
-  return `Scheduled ${result.id}: '${cron}' → ${prompt}`;
-}
-
-function runListCrons(): string {
-  const jobs = [...scheduledJobs.values()];
-  if (!jobs.length) return "No cron jobs. Use schedule_cron to add one.";
-  return jobs
-    .map((j) => {
-      const tag = j.recurring ? "recurring" : "one-shot";
-      const dur = j.durable ? "durable" : "session";
-      return `  ${j.id}: '${j.cron}' → ${j.prompt.slice(0, 40)} [${tag}, ${dur}]`;
-    })
-    .join("\n");
-}
-
-function runCancelCron(jobId: string): string {
-  return cancelJob(jobId);
-}
-
-// ═══════════════════════════════════════════════════════════
-//  NEW in s15: MessageBus
-// ═══════════════════════════════════════════════════════════
-// Teaching version uses simple file append + unlink.
-// Real CC uses proper-lockfile for concurrent write safety.
-
-const MAILBOX_DIR = path.join(WORKDIR, ".mailboxes");
-fs.mkdirSync(MAILBOX_DIR, { recursive: true });
-
-type BusMessage = {
+export type BusMessage = {
   from: string;
   to: string;
   content: string;
@@ -719,36 +103,29 @@ type BusMessage = {
   ts: number;
 };
 
-/**
- * File-based message bus. Each agent has a .jsonl inbox.
- * Read is destructive: readFile + unlink (consumes messages).
- * Teaching version: no file locking; real CC uses proper-lockfile.
- */
-class MessageBus {
-  send(
-    fromAgent: string,
-    toAgent: string,
-    content: string,
-    msgType = "message",
-  ): void {
-    const msg: BusMessage = {
-      from: fromAgent,
-      to: toAgent,
-      content,
-      type: msgType,
-      ts: Date.now() / 1000,
-    };
-    fs.appendFileSync(
-      path.join(MAILBOX_DIR, `${toAgent}.jsonl`),
-      `${JSON.stringify(msg)}\n`,
-    );
-    console.log(
-      `  \x1b[33m[bus] ${fromAgent} → ${toAgent}: ${content.slice(0, 50)}\x1b[0m`,
-    );
+// 基于文件的消息总线：每个 agent 一个 .jsonl 收件箱。
+// 读取是破坏性的（readFile + unlink，即读即消费）。
+// 教学版不加文件锁；真实 CC 用 proper-lockfile 保证并发写安全。
+// mailboxDir 可注入，测试传临时目录做隔离。
+export class MessageBus {
+  constructor(public mailboxDir: string = MAILBOX_DIR) {
+    fs.mkdirSync(mailboxDir, { recursive: true });
   }
 
+  private inboxPath(agent: string): string {
+    return path.join(this.mailboxDir, `${agent}.jsonl`);
+  }
+
+  // 追加一条消息到收件人的 .jsonl。
+  send(from: string, to: string, content: string, type = "message"): void {
+    const msg: BusMessage = { from, to, content, type, ts: Date.now() / 1000 };
+    fs.appendFileSync(this.inboxPath(to), `${JSON.stringify(msg)}\n`);
+    print(`  [bus] ${from} → ${to}: ${content.slice(0, 50)}`, "yellow");
+  }
+
+  // 读取并清空收件箱（read + unlink，即读即消费）。
   readInbox(agent: string): BusMessage[] {
-    const inbox = path.join(MAILBOX_DIR, `${agent}.jsonl`);
+    const inbox = this.inboxPath(agent);
     if (!fs.existsSync(inbox)) return [];
     const msgs = fs
       .readFileSync(inbox, "utf8")
@@ -759,73 +136,79 @@ class MessageBus {
     return msgs;
   }
 
-  // Non-destructive: true if the agent has unread inbox messages.
-  // The Lead's inbox poller uses this to decide whether to wake a turn
-  // without consuming the mailbox.
+  // 非破坏性探测：收件箱是否有未读消息（轮询器用它判断是否唤醒，不消费邮箱）。
   peek(agent: string): boolean {
-    const inbox = path.join(MAILBOX_DIR, `${agent}.jsonl`);
+    const inbox = this.inboxPath(agent);
     return fs.existsSync(inbox) && fs.statSync(inbox).size > 0;
   }
 }
 
-const BUS = new MessageBus();
+// 团队生命周期状态：由 session 持有、跨轮复用（对齐 s14 的 CronState）。
+// bus 可注入，测试传带临时 mailbox 目录的 bus 做隔离。
+export class TeamState {
+  // 仍在运行的队友名字集合。
+  activeTeammates = new Set<string>();
+  constructor(public bus: MessageBus = new MessageBus()) {}
+}
 
-// Track spawned teammates
-const activeTeammates = new Set<string>();
+// 非破坏性探测：是否有已完成、等待收集的后台任务（轮询器的唤醒条件之一）。
+// s13 的 BackgroundState.tasks 是公开字段，这里只读它的状态、不做消费。
+export function hasPendingBackground(background: BackgroundState): boolean {
+  return Object.values(background.tasks).some((t) => t.status === "completed");
+}
 
 // ═══════════════════════════════════════════════════════════
-//  NEW in s15: Teammate (detached async loop)
+//  s15 新增：队友（游离的异步循环）
 // ═══════════════════════════════════════════════════════════
 
-/**
- * Spawn a teammate agent as a detached async loop (the TS analog of a
- * daemon thread). Teaching version: max 10 rounds per teammate.
- * Real CC: teammates use idle loop (wait for inbox, work, repeat)
- * until shutdown_request.
- */
-function spawnTeammateThread(
+// 教学版每个队友最多跑的轮数；真实 CC 用空闲循环（等收件箱 -> 干活 -> 重复）直到关闭。
+const MAX_TEAMMATE_ROUNDS = 10;
+
+// 把队友创建为一个游离的异步循环（守护线程的 TS 版）。
+// 队友跑自己的简化 agent 循环：bash / read / write / send_message，最多 10 轮。
+// 日志走 logger.child(name) 子 scope，与 Lead 的日志区分开。
+export function spawnTeammateThread(
+  team: TeamState,
+  client: ModelClient,
+  logger: SessionLogger,
   name: string,
   role: string,
   prompt: string,
 ): string {
-  if (activeTeammates.has(name)) {
+  if (team.activeTeammates.has(name)) {
     return `Teammate '${name}' already exists`;
   }
+  const bus = team.bus;
+  const subLogger = logger.child(name);
 
   const system =
     `You are '${name}', a ${role}. Use tools to complete tasks. ` +
     `Send results via send_message to 'lead'.`;
 
-  const subBashSchema = z.object({ command: z.string() });
-  const subReadSchema = z.object({ path: z.string() });
-  const subWriteSchema = z.object({ path: z.string(), content: z.string() });
-  const subSendMessageSchema = z.object({
-    to: z.string(),
-    content: z.string(),
-  });
+  const bashSchema = z.object({ command: z.string() });
+  const readSchema = z.object({ path: z.string() });
+  const writeSchema = z.object({ path: z.string(), content: z.string() });
+  const sendSchema = z.object({ to: z.string(), content: z.string() });
 
   const subTools: Anthropic.Tool[] = [
-    zodTool("bash", "Run a shell command.", subBashSchema),
-    zodTool("read_file", "Read file contents.", subReadSchema),
-    zodTool("write_file", "Write content to a file.", subWriteSchema),
-    zodTool(
-      "send_message",
-      "Send a message to another agent.",
-      subSendMessageSchema,
-    ),
+    zodTool("bash", "Run a shell command.", bashSchema),
+    zodTool("read_file", "Read file contents.", readSchema),
+    zodTool("write_file", "Write content to a file.", writeSchema),
+    zodTool("send_message", "Send a message to another agent.", sendSchema),
   ];
   const subSchemas: Partial<Record<string, z.ZodObject>> = {
-    bash: subBashSchema,
-    read_file: subReadSchema,
-    write_file: subWriteSchema,
-    send_message: subSendMessageSchema,
+    bash: bashSchema,
+    read_file: readSchema,
+    write_file: writeSchema,
+    send_message: sendSchema,
   };
+  // 基础 bash/read/write 直接借 s03 的 handler，只自加 send_message。
   const subHandlers: Handlers = {
-    bash: ({ command }) => runBash(command),
-    read_file: ({ path }) => runRead(path),
-    write_file: ({ path, content }) => runWrite(path, content),
+    bash: BASE_TOOL_HANDLERS.bash,
+    read_file: BASE_TOOL_HANDLERS.read_file,
+    write_file: BASE_TOOL_HANDLERS.write_file,
     send_message: ({ to, content }) => {
-      BUS.send(name, to, content);
+      bus.send(name, to, content);
       return "Sent";
     },
   };
@@ -836,28 +219,32 @@ function spawnTeammateThread(
     ];
     let lastText = "";
 
-    for (let round = 0; round < 10; round++) {
-      const inbox = BUS.readInbox(name);
+    for (let round = 0; round < MAX_TEAMMATE_ROUNDS; round++) {
+      // 每轮开头先收自己的收件箱。
+      const inbox = bus.readInbox(name);
       if (inbox.length) {
         messages.push({
           role: "user",
           content: `<inbox>${JSON.stringify(inbox)}</inbox>`,
         });
       }
+      subLogger.request(messages, true);
       let response: Anthropic.Message;
       try {
         response = await client.messages.create({
           model: MODEL_ID,
           system,
-          // Tail window mirrors Python's messages[-20:] (teaching shortcut;
-          // it can split a tool-call/result pair on very long runs)
+          // 尾窗对齐 Python 的 messages[-20:]（教学捷径；超长会话可能切断
+          // 某个 tool_use / tool_result 配对）。
           messages: messages.slice(-20),
           tools: subTools,
           max_tokens: 8000,
         });
-      } catch {
+      } catch (e) {
+        subLogger.responseError(e);
         break;
       }
+      subLogger.response(response);
       messages.push({ role: "assistant", content: response.content });
       const text = textOf(response);
       if (text) lastText = text;
@@ -870,6 +257,7 @@ function spawnTeammateThread(
         const handler = subHandlers[block.name];
         const output =
           handler && schema ? handler(schema.parse(block.input)) : "Unknown";
+        subLogger.toolResult(block.name, output);
         results.push({
           type: "tool_result",
           tool_use_id: block.id,
@@ -879,63 +267,46 @@ function spawnTeammateThread(
       messages.push({ role: "user", content: results });
     }
 
-    // Send final summary to Lead
-    BUS.send(name, "lead", lastText || "Done.", "result");
-    activeTeammates.delete(name);
-    console.log(`  \x1b[32m[teammate] ${name} finished\x1b[0m`);
+    // 把最终小结发回 Lead。
+    bus.send(name, "lead", lastText || "Done.", "result");
+    team.activeTeammates.delete(name);
+    subLogger.console(`  [teammate] ${name} finished`, "magenta");
   };
 
-  activeTeammates.add(name);
-  void run(); // detached — runs concurrently with the Lead's loop
-  console.log(`  \x1b[36m[teammate] ${name} spawned as ${role}\x1b[0m`);
+  team.activeTeammates.add(name);
+  void run(); // 游离执行 —— 与 Lead 的循环并发
+  logger.console(`  [teammate] ${name} spawned as ${role}`, "magenta");
   return `Teammate '${name}' spawned as ${role}`;
 }
 
-// ── Team tool handlers (s15 new) ──
-
-function runSpawnTeammate(name: string, role: string, prompt: string): string {
-  return spawnTeammateThread(name, role, prompt);
+// 团队 handler 需要 team 状态 + client（派生队友）+ logger，用工厂闭包捕获，
+// 再与基础/任务/cron handler 合并。
+export function makeTeamHandlers(
+  team: TeamState,
+  client: ModelClient,
+  logger: SessionLogger,
+): Handlers {
+  return {
+    spawn_teammate: ({ name, role, prompt }) =>
+      spawnTeammateThread(team, client, logger, name, role, prompt),
+    send_message: ({ to, content }) => {
+      team.bus.send("lead", to, content);
+      return `Sent to ${to}`;
+    },
+    check_inbox: () => {
+      const msgs = team.bus.readInbox("lead");
+      if (!msgs.length) return "(inbox empty)";
+      return msgs
+        .map((m) => `  [${m.from}] ${m.content.slice(0, 200)}`)
+        .join("\n");
+    },
+  };
 }
 
-function runSendMessage(to: string, content: string): string {
-  BUS.send("lead", to, content);
-  return `Sent to ${to}`;
-}
+// ═══════════════════════════════════════════════════════════
+//  s15 新增：团队工具定义，叠加到 s14 的工具集之上
+// ═══════════════════════════════════════════════════════════
 
-function runCheckInbox(): string {
-  const msgs = BUS.readInbox("lead");
-  if (!msgs.length) return "(inbox empty)";
-  return msgs.map((m) => `  [${m.from}] ${m.content.slice(0, 200)}`).join("\n");
-}
-
-// ── Tool definitions ──
-
-const bashSchema = z.object({
-  command: z.string(),
-  run_in_background: z.boolean().optional(),
-});
-const readSchema = z.object({
-  path: z.string(),
-  limit: z.number().int().optional(),
-});
-const writeSchema = z.object({ path: z.string(), content: z.string() });
-const createTaskSchema = z.object({
-  subject: z.string(),
-  description: z.string().optional(),
-  blockedBy: z.array(z.string()).optional(),
-});
-const listTasksSchema = z.object({});
-const getTaskSchema = z.object({ task_id: z.string() });
-const claimTaskSchema = z.object({ task_id: z.string() });
-const completeTaskSchema = z.object({ task_id: z.string() });
-const scheduleCronSchema = z.object({
-  cron: z.string().describe("5-field cron expression"),
-  prompt: z.string().describe("Message to inject when fired"),
-  recurring: z.boolean().describe("True=recurring, False=one-shot").optional(),
-  durable: z.boolean().describe("True=persist to disk").optional(),
-});
-const listCronsSchema = z.object({});
-const cancelCronSchema = z.object({ job_id: z.string() });
 const spawnTeammateSchema = z.object({
   name: z.string(),
   role: z.string(),
@@ -944,42 +315,7 @@ const spawnTeammateSchema = z.object({
 const sendMessageSchema = z.object({ to: z.string(), content: z.string() });
 const checkInboxSchema = z.object({});
 
-const tools: Anthropic.Tool[] = [
-  zodTool("bash", "Run a shell command.", bashSchema),
-  zodTool("read_file", "Read file contents.", readSchema),
-  zodTool("write_file", "Write content to a file.", writeSchema),
-  zodTool(
-    "create_task",
-    "Create a new task with optional blockedBy dependencies.",
-    createTaskSchema,
-  ),
-  zodTool(
-    "list_tasks",
-    "List all tasks with status, owner, and dependencies.",
-    listTasksSchema,
-  ),
-  zodTool(
-    "get_task",
-    "Get full details of a specific task by ID.",
-    getTaskSchema,
-  ),
-  zodTool(
-    "claim_task",
-    "Claim a pending task. Sets owner, changes status to in_progress.",
-    claimTaskSchema,
-  ),
-  zodTool(
-    "complete_task",
-    "Complete an in-progress task. Reports unblocked downstream tasks.",
-    completeTaskSchema,
-  ),
-  zodTool(
-    "schedule_cron",
-    "Schedule a cron job. cron is 5-field: min hour dom month dow.",
-    scheduleCronSchema,
-  ),
-  zodTool("list_crons", "List all registered cron jobs.", listCronsSchema),
-  zodTool("cancel_cron", "Cancel a cron job by ID.", cancelCronSchema),
+const teamTools: Anthropic.Tool[] = [
   zodTool(
     "spawn_teammate",
     "Spawn a teammate agent in the background.",
@@ -997,78 +333,66 @@ const tools: Anthropic.Tool[] = [
   ),
 ];
 
-const TOOL_SCHEMAS: Partial<Record<string, z.ZodObject>> = {
-  bash: bashSchema,
-  read_file: readSchema,
-  write_file: writeSchema,
-  create_task: createTaskSchema,
-  list_tasks: listTasksSchema,
-  get_task: getTaskSchema,
-  claim_task: claimTaskSchema,
-  complete_task: completeTaskSchema,
-  schedule_cron: scheduleCronSchema,
-  list_crons: listCronsSchema,
-  cancel_cron: cancelCronSchema,
+// tools 以 s14（基础 + 任务 + 后台 bash + cron）为底，追加 3 个团队工具。
+export const tools: Anthropic.Tool[] = [...s14Tools, ...teamTools];
+
+// schema 表同理：以 s14 为底，追加团队 schema。
+export const TOOL_SCHEMAS: Partial<Record<string, z.ZodObject>> = {
+  ...S14_TOOL_SCHEMAS,
   spawn_teammate: spawnTeammateSchema,
   send_message: sendMessageSchema,
   check_inbox: checkInboxSchema,
 };
 
-const TOOL_HANDLERS: Handlers = {
-  bash: ({ command }) => runBash(command),
-  read_file: ({ path, limit }) => runRead(path, limit),
-  write_file: ({ path, content }) => runWrite(path, content),
-  create_task: ({ subject, description, blockedBy }) =>
-    runCreateTask(subject, description ?? "", blockedBy),
-  list_tasks: () => runListTasks(),
-  get_task: ({ task_id }) => runGetTask(task_id),
-  claim_task: ({ task_id }) => runClaimTask(task_id),
-  complete_task: ({ task_id }) => runCompleteTask(task_id),
-  schedule_cron: ({ cron, prompt, recurring, durable }) =>
-    runScheduleCron(cron, prompt, recurring ?? true, durable ?? true),
-  list_crons: () => runListCrons(),
-  cancel_cron: ({ job_id }) => runCancelCron(job_id),
-  spawn_teammate: ({ name, role, prompt }) =>
-    runSpawnTeammate(name, role, prompt),
-  send_message: ({ to, content }) => runSendMessage(to, content),
-  check_inbox: () => runCheckInbox(),
-};
+// 合并后的工具名（基础 + 任务 + 后台 bash + cron + 团队），用于填 enabled_tools。
+export const TOOL_NAMES: string[] = tools.map((t) => t.name);
 
-// ── Context ──
-
-// Derive context from real state.
-function updateContext(): Context {
-  let memories = "";
-  if (fs.existsSync(MEMORY_INDEX)) {
-    memories = fs.readFileSync(MEMORY_INDEX, "utf8").trim();
-  }
-  return {
-    enabled_tools: Object.keys(TOOL_HANDLERS),
-    workspace: WORKDIR,
-    memories,
-  };
+// 复用 s12 的 memory/workspace 推导，只把 enabled_tools 换成含团队工具的完整列表，
+// 这样 getSystemPrompt 组装出的「Available tools」也会带上团队工具。
+export function updateContext(memoryIndex: string): Context {
+  return { ...taskUpdateContext(memoryIndex), enabled_tools: TOOL_NAMES };
 }
 
 // ═══════════════════════════════════════════════════════════
-//  agentLoop
+//  agentLoop —— 精简版，聚焦团队协作（省略 s11 的错误恢复）
 // ═══════════════════════════════════════════════════════════
-// Teaching code keeps a basic agent loop. S11's full error recovery is omitted.
-// Cron queue is consumed when agentLoop is called; real CC auto-wakes via
-// queue processor (useQueueProcessor.ts) when items arrive.
-
-async function agentLoop(
+// 与 s14 的循环体一致，只多接三样：团队 handler、系统日志里的 activeTeammates。
+// 收件箱 / 后台结果的排空在入口的事件循环里做（详见 wake 分支），本函数只在
+// 循环开头消费 cron 队列。
+export async function agentLoop(
   messages: Anthropic.MessageParam[],
   context: Context,
+  deps: Deps,
 ): Promise<string> {
+  const { client, logger, memoryIndex, tasksDir, background, cron, team } =
+    deps;
   let system = getSystemPrompt(context);
+  // 基础工具（前台 bash / 文件工具）+ 任务工具 + cron 工具 + 团队工具。
+  const handlers: Handlers = {
+    ...BASE_TOOL_HANDLERS,
+    ...makeTaskHandlers(logger, tasksDir),
+    ...makeCronHandlers(cron, logger),
+    ...makeTeamHandlers(team, client, logger),
+  };
+
   while (true) {
-    // Consume fired cron jobs → inject as messages
-    const fired = consumeCronQueue();
+    logger.section(
+      "SYSTEM PROMPT",
+      `enabled_tools: ${JSON.stringify(Object.keys(handlers))}` +
+        `\nworkspace: ${context.workspace}` +
+        `\n\nBackgroundState:\n${JSON.stringify(background)}` +
+        `\n\nCronState:\n${cronStateSummary(cron)}` +
+        `\n\nactiveTeammates: ${JSON.stringify([...team.activeTeammates])}`,
+    );
+
+    // Layer 4：消费已触发的 cron 任务，作为 user 消息注入。
+    const fired = consumeCronQueue(cron);
     for (const job of fired) {
       messages.push({ role: "user", content: `[Scheduled] ${job.prompt}` });
-      console.log(`  \x1b[35m[inject cron] ${job.prompt.slice(0, 50)}\x1b[0m`);
+      logger.console(`  [inject cron] ${job.prompt.slice(0, 50)}`, "magenta");
     }
 
+    logger.request(messages, true);
     let response: Anthropic.Message;
     try {
       response = await client.messages.create({
@@ -1079,10 +403,13 @@ async function agentLoop(
         max_tokens: 8000,
       });
     } catch (e) {
-      const errText = `[Error] ${e instanceof Error ? e.name : "Error"}: ${errMsg(e)}`;
+      logger.responseError(e);
+      const name = e instanceof Error ? e.name : "Error";
+      const errText = `[Error] ${name}: ${errMsg(e)}`;
       messages.push({ role: "assistant", content: errText });
       return errText;
     }
+    logger.response(response);
 
     messages.push({ role: "assistant", content: response.content });
     if (response.stop_reason !== "tool_use") {
@@ -1091,21 +418,37 @@ async function agentLoop(
 
     const results: Anthropic.ToolResultBlockParam[] = [];
     for (const block of response.content) {
-      if (block.type !== "tool_use") continue;
-      console.log(`\x1b[36m> ${block.name}\x1b[0m`);
+      printProse(block);
+      if (block.type !== "tool_use") {
+        continue;
+      }
       const schema = TOOL_SCHEMAS[block.name];
       const input = schema ? schema.parse(block.input) : (block.input as any);
 
+      // 后台执行：模型显式请求 run_in_background 或启发式判断为慢操作。
       if (shouldRunBackground(block.name, input)) {
-        const bgId = startBackgroundTask(block.name, block.id, input);
+        const backgroundId = startBackgroundTask(
+          background,
+          handlers,
+          block.name,
+          block.id,
+          input,
+          logger,
+        );
         results.push({
           type: "tool_result",
           tool_use_id: block.id,
-          content: `[Background task ${bgId} started] Result will be available when complete.`,
+          content:
+            `[Background task ${backgroundId} started] ` +
+            `Command: ${input.command ?? ""}. ` +
+            `Result will be available when complete.`,
         });
       } else {
-        const output = executeTool(block.name, input);
-        console.log(output.slice(0, 300));
+        // 前台执行：同步调用 handler，返回结果。
+        const handler = handlers[block.name];
+        const output =
+          handler && schema ? handler(input) : `Unknown: ${block.name}`;
+        logger.toolResult(block.name, output);
         results.push({
           type: "tool_result",
           tool_use_id: block.id,
@@ -1114,126 +457,164 @@ async function agentLoop(
       }
     }
 
-    // tool_result blocks and background notifications share one user message
-    const bgNotifications = collectBackgroundResults();
+    // tool_result 块和后台通知一起放进同一条 user 消息。
+    const backgroundNotifications = collectBackgroundResults(
+      background,
+      logger,
+    );
     const content: Anthropic.ContentBlockParam[] = [
       ...results,
-      ...bgNotifications.map((n) => ({ type: "text" as const, text: n })),
+      ...backgroundNotifications.map((n) => ({
+        type: "text" as const,
+        text: n,
+      })),
     ];
     messages.push({ role: "user", content });
+    if (backgroundNotifications.length) {
+      logger.section(
+        "INJECTED BACKGROUND NOTIFICATIONS",
+        backgroundNotifications.join("\n\n"),
+      );
+    }
 
-    context = updateContext();
+    context = updateContext(memoryIndex);
     system = getSystemPrompt(context);
   }
 }
 
-// ── Entry point ──────────────────────────────────────────
-console.log("s15: agent teams");
-console.log("输入问题，回车发送。输入 q 退出。\n");
+// ── 入口 ──────────────────────────────────────────
+if (import.meta.main) {
+  const client = createClient();
+  const logger = createLogger(import.meta.dirname);
+  logger.config({ model: MODEL_ID, tools });
 
-const rl = readline.createInterface({
-  input: process.stdin,
-  output: process.stdout,
-});
-rl.on("SIGINT", () => {
-  rl.close();
-  process.exit(0);
-});
+  print("s15: Agent Teams — MessageBus + 游离队友循环 + 收件箱注入", "cyan");
+  print("输入问题，回车发送。输入 q 退出。\n", "green");
 
-const history: Anthropic.MessageParam[] = [];
-let context = updateContext();
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+  rl.on("SIGINT", () => {
+    rl.close();
+    process.exit(0);
+  });
 
-// The readline loop and a 1s poller (teammate inbox or background results)
-// feed one event queue — the TS analog of Python's input thread + poller
-// thread + queue.Queue (issues #291, #46).
-type AgentEvent = ["quit" | "user" | "wake", string | null];
+  const history: Anthropic.MessageParam[] = [];
+  const background = new BackgroundState();
+  const cron = new CronState();
+  //
+  const team = new TeamState();
+  let context = updateContext(MEMORY_INDEX);
 
-const events: AgentEvent[] = [];
-let eventWaiter: (() => void) | null = null;
+  loadDurableJobs(cron, logger);
+  startCronScheduler(cron, logger);
 
-function pushEvent(kind: AgentEvent[0], payload: string | null): void {
-  events.push([kind, payload]);
-  if (eventWaiter) {
-    eventWaiter();
-    eventWaiter = null;
-  }
-}
+  //
+  type AgentEvent = ["quit" | "user" | "wake", string | null];
+  const events: AgentEvent[] = [];
+  let eventWaiter: (() => void) | null = null;
 
-async function nextEvent(): Promise<AgentEvent> {
-  while (!events.length) {
-    await new Promise<void>((resolve) => {
-      eventWaiter = resolve;
-    });
-  }
-  const event = events.shift();
-  if (!event) throw new Error("unreachable: events non-empty after wait");
-  return event;
-}
-
-void (async function inputReader() {
-  while (true) {
-    let line: string;
-    try {
-      line = await rl.question("\x1b[36ms15 >> \x1b[0m");
-    } catch {
-      pushEvent("quit", null); // stdin closed (Ctrl+D)
-      return;
+  //
+  function pushEvent(kind: AgentEvent[0], payload: string | null): void {
+    events.push([kind, payload]);
+    if (eventWaiter) {
+      eventWaiter();
+      eventWaiter = null;
     }
-    pushEvent("user", line);
   }
-})();
 
-// Poll ~1s and wake the Lead when async results are ready: teammate inbox
-// messages or completed background tasks. Don't gate on activeTeammates:
-// a teammate sends its result and then removes itself, so the final message
-// can outlive its registry entry.
-setInterval(() => {
-  if (BUS.peek("lead") || hasPendingBackground()) {
-    pushEvent("wake", null);
+  //
+  async function nextEvent(): Promise<AgentEvent> {
+    while (!events.length) {
+      await new Promise<void>((resolve) => {
+        eventWaiter = resolve;
+      });
+    }
+    const event = events.shift();
+    if (!event) throw new Error("unreachable: events non-empty after wait");
+    return event;
   }
-}, 1000).unref();
 
-let hadTeammates = false;
-while (true) {
-  const [kind, payload] = await nextEvent();
-  if (kind === "quit") break;
-  if (kind === "user") {
-    const q = (payload ?? "").trim().toLowerCase();
-    if (q === "" || q === "q" || q === "exit") break;
-    history.push({ role: "user", content: payload ?? "" });
-  } else {
-    // "wake": teammate inbox or background results are ready
-    const parts: string[] = [];
-    const inbox = BUS.readInbox("lead");
-    if (inbox.length) {
-      parts.push(
-        "[Inbox]\n" +
-          inbox
-            .map((m) => `From ${m.from}: ${m.content.slice(0, 200)}`)
-            .join("\n"),
+  void (async function inputReader() {
+    while (true) {
+      let line: string;
+      try {
+        line = await rl.question(colorize("s15 >> ", "cyan"));
+      } catch {
+        pushEvent("quit", null); // stdin 关闭（Ctrl+D）
+        return;
+      }
+      pushEvent("user", line);
+    }
+  })();
+
+  // 每 ~1s 唤醒 Lead：收件箱有消息、或后台任务完成时投一个 wake 事件。
+  // 不按 activeTeammates 门控：队友发完结果才把自己移除，最后一条消息可能比注册项活得久。
+  // cron 不在唤醒条件里（对齐 code.py）：cron 队列只在别的来源触发一轮时由 agentLoop 顺带消费。
+  const poller = setInterval(() => {
+    if (team.bus.peek("lead") || hasPendingBackground(background)) {
+      pushEvent("wake", null);
+    }
+  }, 1000);
+  poller.unref();
+
+  let hadTeammates = false;
+  while (true) {
+    const [kind, payload] = await nextEvent();
+    if (kind === "quit") break;
+    if (kind === "user") {
+      const q = (payload ?? "").trim().toLowerCase();
+      if (q === "" || q === "q" || q === "exit") break;
+      logger.userInput(payload ?? "");
+      history.push({ role: "user", content: payload ?? "" });
+    } else {
+      // "wake"：收件箱或后台结果就绪，排空后注入历史。
+      const parts: string[] = [];
+      const inbox = team.bus.readInbox("lead");
+      if (inbox.length) {
+        parts.push(
+          "[Inbox]\n" +
+            inbox
+              .map((m) => `From ${m.from}: ${m.content.slice(0, 200)}`)
+              .join("\n"),
+        );
+      }
+      const bg = collectBackgroundResults(background, logger);
+      parts.push(...bg);
+      // 已被更早的 wake 排空 —— 本次空转（幂等）。
+      if (!parts.length) continue;
+      history.push({ role: "user", content: parts.join("\n") });
+      logger.console(
+        `\n[wake: ${inbox.length} inbox + ${bg.length} background -> new turn]`,
+        "yellow",
       );
     }
-    const bg = collectBackgroundResults();
-    parts.push(...bg);
-    if (!parts.length) continue; // already drained by an earlier wake (idempotent)
-    history.push({ role: "user", content: parts.join("\n") });
-    console.log(
-      `\n\x1b[33m[wake: ${inbox.length} inbox + ${bg.length} background -> new turn]\x1b[0m`,
-    );
-  }
 
-  // One turn for whichever source woke us.
-  const finalText = await agentLoop(history, context);
-  context = updateContext();
-  console.log(finalText);
+    // 为唤醒本轮的来源跑一轮 agent 循环。
+    const finalText = await agentLoop(history, context, {
+      client,
+      logger,
+      memoryIndex: MEMORY_INDEX,
+      background,
+      cron,
+      team,
+    });
+    context = updateContext(MEMORY_INDEX);
+    print(finalText, "green");
 
-  // Announce once when every teammate has finished and its output drained.
-  if (activeTeammates.size) {
-    hadTeammates = true;
-  } else if (hadTeammates && !BUS.peek("lead") && !hasPendingBackground()) {
-    console.log("\x1b[32m[all teammates done]\x1b[0m");
-    hadTeammates = false;
+    // 所有队友都跑完、且输出都排空后，播报一次。
+    if (team.activeTeammates.size) {
+      hadTeammates = true;
+    } else if (
+      hadTeammates &&
+      !team.bus.peek("lead") &&
+      !hasPendingBackground(background)
+    ) {
+      print("[all teammates done]", "magenta");
+      hadTeammates = false;
+    }
+    print();
   }
-  console.log();
+  rl.close();
 }
-rl.close();
