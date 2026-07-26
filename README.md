@@ -2,6 +2,8 @@
 
 > Harness Engineering for Real Agents.
 
+[English](./README.md) | [中文](./README.zh-CN.md)
+
 A **TypeScript port** of [shareAI-lab/learn-claude-code](https://github.com/shareAI-lab/learn-claude-code) (originally Python). It rebuilds Claude Code's internals, one step at a time.
 
 ## Quick Start
