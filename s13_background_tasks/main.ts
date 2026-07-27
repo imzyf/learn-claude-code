@@ -50,13 +50,14 @@ import type { Context } from "../s10_system_prompt/main";
 // 来自 s12：任务系统 —— tools/TOOL_SCHEMAS 已是「基础 + 任务」的合并，
 // makeTaskHandlers 工厂闭包捕获 logger + 存储目录；getSystemPrompt / updateContext
 // 是 s12 接管后的版本，「Available tools」已含任务工具。s13 同名覆盖 bash 不改工具名，
-// 直接复用；Deps（client + logger + memoryIndex + tasksDir?）同样以 s12 为底。
+// 直接复用；Deps（client + logger + memoryIndex + tasksDir）同样以 s12 为底。
 import {
   getSystemPrompt,
   makeTaskHandlers,
   TOOL_SCHEMAS as S12_TOOL_SCHEMAS,
   type Deps as S12Deps,
   tools as s12Tools,
+  tasksDirFor,
   updateContext,
 } from "../s12_task_system/main";
 
@@ -389,6 +390,7 @@ if (import.meta.main) {
   const history: Anthropic.MessageParam[] = [];
   // 后台状态一个 session 一份，跨轮复用。
   const background = new BackgroundState();
+  const tasksDir = tasksDirFor(import.meta.dirname);
   let context = updateContext(MEMORY_INDEX);
   while (true) {
     let query: string;
@@ -407,6 +409,7 @@ if (import.meta.main) {
       logger,
       memoryIndex: MEMORY_INDEX,
       background,
+      tasksDir,
     });
     context = updateContext(MEMORY_INDEX);
     print(finalText, "green");

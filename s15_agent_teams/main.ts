@@ -59,6 +59,7 @@ import type { Context } from "../s10_system_prompt/main";
 import {
   getSystemPrompt,
   makeTaskHandlers,
+  tasksDirFor,
   updateContext as taskUpdateContext,
 } from "../s12_task_system/main";
 // 来自 s13：后台任务层。
@@ -70,10 +71,10 @@ import {
 } from "../s13_background_tasks/main";
 // 来自 s14：cron 调度层（tools / TOOL_SCHEMAS 已是「基础 + 任务 + 后台 bash + cron」
 // 的合并）。s15 在其上再叠加团队工具；Deps（client + logger + memoryIndex +
-// background + cron + tasksDir?）同样以 s14 为底。
+// background + cron + tasksDir）同样以 s14 为底。
 import {
-  CronState,
   consumeCronQueue,
+  createCronState,
   cronStateSummary,
   loadDurableJobs,
   makeCronHandlers,
@@ -502,7 +503,8 @@ if (import.meta.main) {
 
   const history: Anthropic.MessageParam[] = [];
   const background = new BackgroundState();
-  const cron = new CronState();
+  const cron = createCronState(import.meta.dirname);
+  const tasksDir = tasksDirFor(import.meta.dirname);
   //
   const team = new TeamState();
   let context = updateContext(MEMORY_INDEX);
@@ -599,6 +601,7 @@ if (import.meta.main) {
       background,
       cron,
       team,
+      tasksDir,
     });
     context = updateContext(MEMORY_INDEX);
     print(finalText, "green");

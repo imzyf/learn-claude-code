@@ -91,9 +91,14 @@ const memoryIndexPath = (dir: string): string => path.join(dir, "MEMORY.md");
 // 默认记忆索引：s10 / s11 直接复用这个路径，不再各自拼接。
 export const MEMORY_INDEX = memoryIndexPath(MEMORY_DIR);
 
-// agentLoop 的完整依赖：S04Deps（client + logger + hooks）+ 技能表 + 记忆目录。
+// agentLoop 的完整依赖：S04Deps（client + logger + hooks）+ 技能表 + 记忆目录 +
+// sessionDir（s08 的压缩层用它决定存档落在哪个 session 目录）。
 // system 不进 deps —— 记忆索引每轮都会变，由 agentLoop 自行重建（s07/s08 的 system 是静态的）。
-export type Deps = S04Deps & { skills: SkillRegistry; memoryDir: string };
+export type Deps = S04Deps & {
+  skills: SkillRegistry;
+  memoryDir: string;
+  sessionDir: string;
+};
 
 // ═══════════════════════════════════════════════════════════
 //  s09 新增：记忆系统
@@ -495,7 +500,7 @@ export async function agentLoop(
   messages: Anthropic.MessageParam[],
   deps: Deps,
 ): Promise<string> {
-  const { client, logger, hooks, skills, memoryDir } = deps;
+  const { client, logger, hooks, skills, memoryDir, sessionDir } = deps;
   let reactiveRetries = 0;
   // s09（STEP 2）：本轮开始挑一次相关记忆，注入请求副本。
   const memoriesContent = await loadMemories(memoryDir, messages, deps);
@@ -517,7 +522,7 @@ export async function agentLoop(
     // s08：三个预处理器：budget → snip → micro
     replaceMessages(
       messages,
-      toolResultBudget(messages, TOOL_RESULT_BUDGET, logger),
+      toolResultBudget(messages, TOOL_RESULT_BUDGET, logger, sessionDir),
     );
     replaceMessages(messages, snipCompact(messages, SNIP_MAX_MESSAGES, logger));
     replaceMessages(messages, microCompact(messages, logger));
@@ -686,6 +691,7 @@ if (import.meta.main) {
       hooks,
       skills,
       memoryDir: MEMORY_DIR,
+      sessionDir: import.meta.dirname,
     });
     print(finalText, "green");
     print();

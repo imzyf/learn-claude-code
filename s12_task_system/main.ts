@@ -11,7 +11,7 @@
  *   任务系统与 withRetry 是两个可自然组合的独立层，这里只聚焦前者。
  *   本文件只新增任务系统这一层：
  *   + Task 类型（id、subject、description、status、owner、blockedBy）
- *   + TASKS_DIR = .tasks/，持久化为每任务一份 JSON
+ *   + tasksDirFor(sessionDir) = <session>/.tasks/，持久化为每任务一份 JSON
  *   + createTask / saveTask / loadTask / listTasks / getTask
  *   + canStart：检查 blockedBy 是否全部完成（依赖缺失即视为被阻塞）
  *   + claimTask：设置 owner，pending -> in_progress
@@ -61,16 +61,22 @@ import {
 } from "../s10_system_prompt/main";
 
 // deps 与 s10/s11 一致：client + logger + memoryIndex，另加 tasksDir
-//（每轮工具后重新推导 context；tasksDir 可选，默认 TASKS_DIR，测试注入临时目录做隔离）。
-export type Deps = S10Deps & { tasksDir?: string };
+//（每轮工具后重新推导 context；tasksDir 必填，入口用 tasksDirFor(import.meta.dirname)
+// 落到各自的 session 目录，测试注入临时目录做隔离）。
+export type Deps = S10Deps & { tasksDir: string };
 
 // ═══════════════════════════════════════════════════════════
 //  s12 新增：任务系统
 // ═══════════════════════════════════════════════════════════
 
-// 默认存储目录，落在 s12 自己的目录下（仿照 logger 的 .log/）；
-// 测试传入临时目录做隔离（目录作为参数显式传入，同 s09 的风格）。
-export const TASKS_DIR = path.join(import.meta.dirname, ".tasks");
+// 存储目录名（仿照 logger 的 .log/）；具体目录由 tasksDirFor 决定，
+// 目录作为参数显式传入（同 s09 的风格），测试传入临时目录做隔离。
+export const TASKS_DIR_NAME = ".tasks";
+
+// 按 session 目录定位 .tasks/，让每个 session 的任务落在自己目录下。
+export function tasksDirFor(sessionDir: string): string {
+  return path.join(sessionDir, TASKS_DIR_NAME);
+}
 // 任务状态机：pending -> in_progress -> completed
 export type TaskStatus = "pending" | "in_progress" | "completed";
 
@@ -296,10 +302,7 @@ export const TOOL_SCHEMAS: Partial<Record<string, z.ZodObject>> = {
 
 // 任务 handler 需要 logger 打印状态迁移、dir 定位存储，用工厂闭包捕获二者，
 // 再与 s03 的纯基础分发表合并。
-export function makeTaskHandlers(
-  logger: SessionLogger,
-  dir: string = TASKS_DIR,
-): Handlers {
+export function makeTaskHandlers(logger: SessionLogger, dir: string): Handlers {
   return {
     create_task: ({ subject, description, blockedBy }) =>
       runCreateTask(dir, subject, description ?? "", blockedBy, logger),
@@ -448,6 +451,7 @@ if (import.meta.main) {
   });
 
   const history: Anthropic.MessageParam[] = [];
+  const tasksDir = tasksDirFor(import.meta.dirname);
   let context = updateContext(MEMORY_INDEX);
   while (true) {
     let query: string;
@@ -465,6 +469,7 @@ if (import.meta.main) {
       client,
       logger,
       memoryIndex: MEMORY_INDEX,
+      tasksDir,
     });
     context = updateContext(MEMORY_INDEX);
     print(finalText, "green");

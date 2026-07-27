@@ -16,6 +16,7 @@ import {
   noopLogger,
   textBlock,
   toolUseBlock,
+  useTempDir,
 } from "../lib/testing";
 import { createHooks } from "../s04_hooks/main";
 // s05/s06/s07 的层沿用旧实现，各自的测试不在此重复；这里只借 resetNagCounter 做 setup。
@@ -32,6 +33,13 @@ import {
   summarizeHistory,
   toolResultBudget,
 } from "./main";
+
+// 压缩层的落盘产物以 sessionDir 为根，测试注入临时目录，避免写进 s08 自己的目录。
+let tmp = "";
+
+useTempDir(import.meta.dirname, (dir) => {
+  tmp = dir;
+});
 
 beforeEach(() => {
   resetNagCounter();
@@ -167,13 +175,13 @@ describe("microCompact", () => {
 describe("toolResultBudget", () => {
   it("is a no-op when the last turn is within budget", () => {
     const messages: Anthropic.MessageParam[] = toolRound("t1", "small output");
-    expect(toolResultBudget(messages, 200_000, noopLogger)).toBe(messages);
+    expect(toolResultBudget(messages, 200_000, noopLogger, tmp)).toBe(messages);
   });
 });
 
 describe("persistLargeOutput", () => {
   it("returns short output unchanged without touching disk", () => {
-    expect(persistLargeOutput("id1", "short")).toBe("short");
+    expect(persistLargeOutput("id1", "short", tmp)).toBe("short");
   });
 });
 
@@ -227,13 +235,15 @@ describe("summarizeHistory", () => {
 
 // ── agentLoop dispatch ────────────────────────────────────
 describe("agentLoop", () => {
-  const loopDeps = {
+  // 函数而非常量：tmp 在 beforeEach 才拿到值。
+  const loopDeps = () => ({
     client: undefined as never,
     logger: noopLogger,
     hooks: createHooks(noopLogger),
     skills: registry,
     system: "S",
-  };
+    sessionDir: tmp,
+  });
 
   it("dispatches load_skill and injects the full content", async () => {
     const client = fakeClient(
@@ -247,7 +257,7 @@ describe("agentLoop", () => {
       { role: "user", content: "review" },
     ];
 
-    const result = await agentLoop(messages, { ...loopDeps, client });
+    const result = await agentLoop(messages, { ...loopDeps(), client });
 
     expect(result).toBe("used it");
     expect(client.messages.create).toHaveBeenCalledTimes(2);
@@ -269,7 +279,7 @@ describe("agentLoop", () => {
     ];
 
     const result = await agentLoop(messages, {
-      ...loopDeps,
+      ...loopDeps(),
       client,
       skills: {},
     });
@@ -292,7 +302,7 @@ describe("agentLoop", () => {
     ];
 
     const result = await agentLoop(messages, {
-      ...loopDeps,
+      ...loopDeps(),
       client,
       skills: {},
     });

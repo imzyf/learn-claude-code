@@ -37,7 +37,8 @@
  *     调度器 tick 与 consumeCronQueue 天然互斥，也不需要 cron_lock。
  *   - cron 匹配/校验由 croner 库负责（new Cron(expr).match(date)）；无回调构造
  *     只解析、不启动定时器，模式实例按表达式缓存复用。轮询架构与 code.py 保持一致。
- *   - CronState 的 durablePath 可注入，测试传临时路径做隔离（对齐 s12 的 tasksDir）。
+ *   - CronState 的 durablePath 必填：入口用 createCronState(import.meta.dirname)
+ *     落到各自的 session 目录，测试传临时路径做隔离（对齐 s12 的 tasksDir）。
  *
  * Usage:
  *     pnpm dev s14_cron_scheduler/main.ts
@@ -65,11 +66,12 @@ import { sleep } from "../s11_error_recovery/main";
 import {
   getSystemPrompt,
   makeTaskHandlers,
+  tasksDirFor,
   updateContext as taskUpdateContext,
 } from "../s12_task_system/main";
 // 来自 s13：后台任务层 + 带 run_in_background 的 bash（tools / TOOL_SCHEMAS 已是
 // 「基础 + 任务 + bash 覆盖」的合并）。s14 在其上再叠加 cron 工具；
-// Deps（client + logger + memoryIndex + background + tasksDir?）同样以 s13 为底。
+// Deps（client + logger + memoryIndex + background + tasksDir）同样以 s13 为底。
 import {
   BackgroundState,
   collectBackgroundResults,
@@ -89,11 +91,8 @@ export type Deps = S13Deps & {
 //  s14 新增：Cron 调度器
 // ═══════════════════════════════════════════════════════════
 
-// 默认持久化路径，落在 s14 自己的目录下（对齐 s12 的 .tasks/）。
-export const DURABLE_PATH = path.join(
-  import.meta.dirname,
-  ".scheduled_tasks.json",
-);
+// 持久化文件名（对齐 s12 的 .tasks/）；具体目录由 createCronState 决定。
+export const DURABLE_FILE = ".scheduled_tasks.json";
 
 export type CronJob = {
   id: string;
@@ -104,7 +103,7 @@ export type CronJob = {
 };
 
 // cron 生命周期状态：由 session 持有、跨轮复用（对齐 code.py 的模块全局）。
-// durablePath 可注入，测试传临时路径做隔离。
+// durablePath 必填，避免不同 session 共用同一份磁盘状态。
 export class CronState {
   // 已注册的任务，按 job.id 索引。
   scheduledJobs = new Map<string, CronJob>();
@@ -112,7 +111,12 @@ export class CronState {
   cronQueue: CronJob[] = [];
   // job.id -> "YYYY-MM-DD HH:MM"，防止同一分钟内重复触发。
   lastFiredAt = new Map<string, string>();
-  constructor(public durablePath: string = DURABLE_PATH) {}
+  constructor(public durablePath: string) {}
+}
+
+// 按 session 目录建 CronState，让每个 session 的 durable 任务落在自己目录下。
+export function createCronState(sessionDir: string): CronState {
+  return new CronState(path.join(sessionDir, DURABLE_FILE));
 }
 
 // 启动时从磁盘加载 durable 任务；损坏或非法的任务跳过。
@@ -537,7 +541,8 @@ if (import.meta.main) {
   const history: Anthropic.MessageParam[] = [];
   // 后台状态与 cron 状态各一份，跨轮复用。
   const background = new BackgroundState();
-  const cron = new CronState();
+  const cron = createCronState(import.meta.dirname);
+  const tasksDir = tasksDirFor(import.meta.dirname);
   let context = updateContext(MEMORY_INDEX);
 
   // 启动时加载持久化任务。
@@ -558,6 +563,7 @@ if (import.meta.main) {
       memoryIndex: MEMORY_INDEX,
       background,
       cron,
+      tasksDir,
     });
     context = updateContext(MEMORY_INDEX);
     print(finalText, "green");
