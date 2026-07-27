@@ -23,9 +23,10 @@
  *     工厂闭包捕获 logger，再与 s03 的纯分发表合并（基础工具不依赖 logger）。
  *   - 工具集在 s12 变了（多了 5 个任务工具），system prompt 的「Available tools」
  *     也得跟上。s10 的 assembleSystemPrompt 把这行写死成基础五工具、忽略了
- *     context.enabled_tools，所以 s12 在这里接管 prompt 组装：updateContext 用
- *     合并后的工具名填 enabled_tools，getSystemPrompt 依据它组装（复用 s10 的
- *     contextKey 缓存）。s13 同名覆盖 bash、工具名不变，直接复用这里。
+ *     context.enabled_tools，所以 s12 在这里接管 prompt 组装：makeUpdateContext(tools)
+ *     绑出一个用该工具集名字填 enabled_tools 的 updateContext，getSystemPrompt 依据
+ *     它组装（复用 s10 的 contextKey 缓存）。s13 工具名不变，直接复用 s12 这一份；
+ *     s14 / s15 用自己的 tools 各绑一份。
  *
  * Usage:
  *     pnpm dev s12_task_system/main.ts
@@ -317,13 +318,22 @@ export function makeTaskHandlers(logger: SessionLogger, dir: string): Handlers {
 //  s12 override：让 system prompt 反映合并后的工具集
 // ═══════════════════════════════════════════════════════════
 
-// 合并后的工具名（基础 + 任务）。s13 只是同名覆盖 bash，工具名与此一致，故可复用。
-export const TOOL_NAMES: string[] = tools.map((t) => t.name);
-
-// 复用 s10 的 memory/workspace 推导，只把 enabled_tools 换成合并后的工具名。
-export function updateContext(memoryIndex: string): Context {
-  return { ...deriveBaseContext(memoryIndex), enabled_tools: TOOL_NAMES };
+// 复用 s10 的 memory/workspace 推导，只把 enabled_tools 换成给定工具集的名字。
+// 工具名在绑定时算一次，调用点就不必再传 tools；memoryIndex 默认 MEMORY_INDEX，
+// agentLoop 传 deps 里的那份（测试可指向临时 MEMORY.md）。
+export function makeUpdateContext(
+  toolset: Anthropic.Tool[],
+): (memoryIndex?: string) => Context {
+  const enabled_tools = toolset.map((t) => t.name);
+  return (memoryIndex = MEMORY_INDEX) => ({
+    ...deriveBaseContext(memoryIndex),
+    enabled_tools,
+  });
 }
+
+// s12 的 context 推导：enabled_tools = 基础 + 任务。
+// s13 只是同名覆盖 bash，工具名与此一致，故直接复用这一份。
+export const updateContext = makeUpdateContext(tools);
 
 // 进程内缓存（同 s10：context 没变就复用上次结果，只省本地拼接，不影响 API 计费）。
 let lastContextKey: string | null = null;
@@ -452,7 +462,7 @@ if (import.meta.main) {
 
   const history: Anthropic.MessageParam[] = [];
   const tasksDir = tasksDirFor(import.meta.dirname);
-  let context = updateContext(MEMORY_INDEX);
+  let context = updateContext();
   while (true) {
     let query: string;
     try {
@@ -471,7 +481,7 @@ if (import.meta.main) {
       memoryIndex: MEMORY_INDEX,
       tasksDir,
     });
-    context = updateContext(MEMORY_INDEX);
+    context = updateContext();
     print(finalText, "green");
     print();
   }

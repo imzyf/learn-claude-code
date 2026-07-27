@@ -391,7 +391,7 @@ if (import.meta.main) {
   // 后台状态一个 session 一份，跨轮复用。
   const background = new BackgroundState();
   const tasksDir = tasksDirFor(import.meta.dirname);
-  let context = updateContext(MEMORY_INDEX);
+  let context = updateContext();
   while (true) {
     let query: string;
     try {
@@ -411,7 +411,7 @@ if (import.meta.main) {
       background,
       tasksDir,
     });
-    context = updateContext(MEMORY_INDEX);
+    context = updateContext();
     print(finalText, "green");
     print();
   }

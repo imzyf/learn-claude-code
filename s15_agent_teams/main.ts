@@ -17,8 +17,8 @@
  *   + spawnTeammateThread：把队友创建为一个游离的异步循环（守护线程的 TS 版）
  *     队友跑自己的简化 agent 循环（bash / read / write / send_message，最多 10 轮）
  *   + makeTeamHandlers + 3 个新工具：spawn_teammate / send_message / check_inbox
- *   + updateContext override：enabled_tools 再补上 3 个团队工具
- *   + 入口改用事件队列：readline 循环 + 1s 轮询（收件箱 / 后台 / cron）共用一个队列
+ *   + updateContext = makeUpdateContext(tools)：enabled_tools 再补上 3 个团队工具
+ *   + 入口改用事件队列：readline 行事件 + 1s 轮询（收件箱 / 后台 / cron）共用一个队列
  *
  * ASCII 流程：
  *   Lead: cronQueue → messages → prompt → LLM → TOOLS ────→ loop
@@ -27,12 +27,16 @@
  *   Teammate: inbox → LLM → bash/read/write/send → loop（最多 10 轮）
  *
  * TS 特有说明：
- *   - Python 用 input() 线程 + 收件箱轮询线程共同喂给一个事件队列；这里用一个
- *     异步 readline 循环 + 1s 轮询推送共用同一个队列（单线程事件循环，无需锁）。
+ *   - Python 用 input() 线程 + 收件箱轮询线程共同喂给一个事件队列；这里用 readline
+ *     的 line 事件 + 1s 轮询推送共用同一个队列（单线程事件循环，无需锁）。
+ *   - 提示符由 lib/terminal 的 createPrompt 常驻屏幕底部，异步输出从它上方流过。
+ *   - 事件队列是单消费者：agentLoop 跑着时用户照样能输入，新的行只排进队列，
+ *     等本轮返回才被消费（与真实 CC 的排队消息一致，不会并发跑两轮）。
  *   - 游离的 Promise 代替守护线程；队友的日志走 logger.child(name) 子 scope，
  *     与 Lead 的日志区分开。
  *   - MessageBus 教学版不加文件锁（真实 CC 用 proper-lockfile 保证并发写安全）。
- *   - MessageBus 的 mailboxDir、TeamState 的 bus 可注入，测试传临时目录做隔离
+ *   - MessageBus 的 mailboxDir 必填：入口用 createTeamState(import.meta.dirname)
+ *     落到各自的 session 目录，测试传临时目录做隔离
  *     （对齐 s14 的 durablePath / s12 的 tasksDir）。
  *
  * Usage:
@@ -46,7 +50,7 @@ import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
 import { createLogger, type SessionLogger } from "../lib/logger";
 import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
-import { colorize, print } from "../lib/terminal";
+import { createPrompt, print, printFinal } from "../lib/terminal";
 import { printProse, textOf, zodTool } from "../lib/tools";
 import { errMsg, type Handlers } from "../s02_tool_use/main";
 // 来自 s03：基础 dispatch 表（队友的 bash/read/write 直接借这里的 handler）。
@@ -59,8 +63,8 @@ import type { Context } from "../s10_system_prompt/main";
 import {
   getSystemPrompt,
   makeTaskHandlers,
+  makeUpdateContext,
   tasksDirFor,
-  updateContext as taskUpdateContext,
 } from "../s12_task_system/main";
 // 来自 s13：后台任务层。
 import {
@@ -93,8 +97,14 @@ export type Deps = S14Deps & {
 //  s15 新增：MessageBus —— 基于文件的邮箱
 // ═══════════════════════════════════════════════════════════
 
-// 默认邮箱目录，落在 s15 自己的目录下（对齐 s14 的 .scheduled_tasks.json）。
-export const MAILBOX_DIR = path.join(import.meta.dirname, ".mailboxes");
+// 邮箱目录名（对齐 s12 的 .tasks/、s14 的 .scheduled_tasks.json）；
+// 具体目录由 mailboxDirFor 决定。
+export const MAILBOX_DIR_NAME = ".mailboxes";
+
+// <session>/.mailboxes/：入口传自己的 import.meta.dirname。
+export function mailboxDirFor(sessionDir: string): string {
+  return path.join(sessionDir, MAILBOX_DIR_NAME);
+}
 
 export type BusMessage = {
   from: string;
@@ -107,9 +117,9 @@ export type BusMessage = {
 // 基于文件的消息总线：每个 agent 一个 .jsonl 收件箱。
 // 读取是破坏性的（readFile + unlink，即读即消费）。
 // 教学版不加文件锁；真实 CC 用 proper-lockfile 保证并发写安全。
-// mailboxDir 可注入，测试传临时目录做隔离。
+// mailboxDir 必填，避免不同 session 共用同一份磁盘状态。
 export class MessageBus {
-  constructor(public mailboxDir: string = MAILBOX_DIR) {
+  constructor(public mailboxDir: string) {
     fs.mkdirSync(mailboxDir, { recursive: true });
   }
 
@@ -145,11 +155,16 @@ export class MessageBus {
 }
 
 // 团队生命周期状态：由 session 持有、跨轮复用（对齐 s14 的 CronState）。
-// bus 可注入，测试传带临时 mailbox 目录的 bus 做隔离。
+// bus 必填，测试传带临时 mailbox 目录的 bus 做隔离。
 export class TeamState {
   // 仍在运行的队友名字集合。
   activeTeammates = new Set<string>();
-  constructor(public bus: MessageBus = new MessageBus()) {}
+  constructor(public bus: MessageBus) {}
+}
+
+// <session>/.mailboxes/ 上的 TeamState：入口用 createTeamState(import.meta.dirname)。
+export function createTeamState(sessionDir: string): TeamState {
+  return new TeamState(new MessageBus(mailboxDirFor(sessionDir)));
 }
 
 // 非破坏性探测：是否有已完成、等待收集的后台任务（轮询器的唤醒条件之一）。
@@ -345,14 +360,9 @@ export const TOOL_SCHEMAS: Partial<Record<string, z.ZodObject>> = {
   check_inbox: checkInboxSchema,
 };
 
-// 合并后的工具名（基础 + 任务 + 后台 bash + cron + 团队），用于填 enabled_tools。
-export const TOOL_NAMES: string[] = tools.map((t) => t.name);
-
-// 复用 s12 的 memory/workspace 推导，只把 enabled_tools 换成含团队工具的完整列表，
+// 用 s15 的完整工具集绑定 s12 的 context 工厂，
 // 这样 getSystemPrompt 组装出的「Available tools」也会带上团队工具。
-export function updateContext(memoryIndex: string): Context {
-  return { ...taskUpdateContext(memoryIndex), enabled_tools: TOOL_NAMES };
-}
+export const updateContext = makeUpdateContext(tools);
 
 // ═══════════════════════════════════════════════════════════
 //  agentLoop —— 精简版，聚焦团队协作（省略 s11 的错误恢复）
@@ -380,13 +390,11 @@ export async function agentLoop(
     logger.section(
       "SYSTEM PROMPT",
       `enabled_tools: ${JSON.stringify(Object.keys(handlers))}` +
-        `\nworkspace: ${context.workspace}` +
         `\n\nBackgroundState:\n${JSON.stringify(background)}` +
         `\n\nCronState:\n${cronStateSummary(cron)}` +
         `\n\nactiveTeammates: ${JSON.stringify([...team.activeTeammates])}`,
     );
 
-    // Layer 4：消费已触发的 cron 任务，作为 user 消息注入。
     const fired = consumeCronQueue(cron);
     for (const job of fired) {
       messages.push({ role: "user", content: `[Scheduled] ${job.prompt}` });
@@ -426,7 +434,6 @@ export async function agentLoop(
       const schema = TOOL_SCHEMAS[block.name];
       const input = schema ? schema.parse(block.input) : (block.input as any);
 
-      // 后台执行：模型显式请求 run_in_background 或启发式判断为慢操作。
       if (shouldRunBackground(block.name, input)) {
         const backgroundId = startBackgroundTask(
           background,
@@ -445,7 +452,6 @@ export async function agentLoop(
             `Result will be available when complete.`,
         });
       } else {
-        // 前台执行：同步调用 handler，返回结果。
         const handler = handlers[block.name];
         const output =
           handler && schema ? handler(input) : `Unknown: ${block.name}`;
@@ -490,7 +496,7 @@ if (import.meta.main) {
   logger.config({ model: MODEL_ID, tools });
 
   print("s15: Agent Teams — MessageBus + 游离队友循环 + 收件箱注入", "cyan");
-  print("输入问题，回车发送。输入 q 退出。\n", "green");
+  print("🔮 输入问题，回车发送。输入 q 退出。\n", "green");
 
   const rl = readline.createInterface({
     input: process.stdin,
@@ -505,28 +511,31 @@ if (import.meta.main) {
   const background = new BackgroundState();
   const cron = createCronState(import.meta.dirname);
   const tasksDir = tasksDirFor(import.meta.dirname);
-  //
-  const team = new TeamState();
-  let context = updateContext(MEMORY_INDEX);
+  // 团队状态（bus + activeTeammates）跨轮复用，落在 s15 自己的 .mailboxes/。
+  const team = createTeamState(import.meta.dirname);
+  let context = updateContext();
 
   loadDurableJobs(cron, logger);
   startCronScheduler(cron, logger);
 
-  //
+  // 三种唤醒来源：stdin 关闭 / 用户输入一行 / 收件箱-后台结果就绪。
   type AgentEvent = ["quit" | "user" | "wake", string | null];
+  // 事件队列：多个生产者（line 事件、close、1s 轮询）写入，主循环单点消费。
   const events: AgentEvent[] = [];
+  // 队列空时主循环挂在这个 resolve 上，来事件就被叫醒（单消费者，一个槽位够用）。
   let eventWaiter: (() => void) | null = null;
 
-  //
+  // 投一个事件：入队，并在主循环正等待时叫醒它。
   function pushEvent(kind: AgentEvent[0], payload: string | null): void {
     events.push([kind, payload]);
+    // 主循环正跑 agentLoop（没在等）时 eventWaiter 为 null，事件只留在队列里排队。
     if (eventWaiter) {
       eventWaiter();
       eventWaiter = null;
     }
   }
 
-  //
+  // 取队首事件；队列空则挂起，等 pushEvent 叫醒后重试。
   async function nextEvent(): Promise<AgentEvent> {
     while (!events.length) {
       await new Promise<void>((resolve) => {
@@ -538,18 +547,16 @@ if (import.meta.main) {
     return event;
   }
 
-  void (async function inputReader() {
-    while (true) {
-      let line: string;
-      try {
-        line = await rl.question(colorize("s15 >> ", "cyan"));
-      } catch {
-        pushEvent("quit", null); // stdin 关闭（Ctrl+D）
-        return;
-      }
-      pushEvent("user", line);
-    }
-  })();
+  // 提示符常驻屏幕底部：输入按行入队，队友 / wake / 工具的输出都从它上方流过。
+  const prompt = createPrompt(rl, "s15 >> ");
+  rl.on("line", (line) => {
+    pushEvent("user", line);
+    // 回车后立刻把提示符重新挂到底部：上一轮还没跑完时也能继续输入，
+    // 新的行只是排进队列，等本轮 agentLoop 返回才轮到它。
+    prompt.show();
+  });
+  rl.on("close", () => pushEvent("quit", null)); // stdin 关闭（Ctrl+D）
+  prompt.show();
 
   // 每 ~1s 唤醒 Lead：收件箱有消息、或后台任务完成时投一个 wake 事件。
   // 不按 activeTeammates 门控：队友发完结果才把自己移除，最后一条消息可能比注册项活得久。
@@ -582,6 +589,7 @@ if (import.meta.main) {
               .join("\n"),
         );
       }
+      // 后台结果排空：collectBackgroundResults 会把 BackgroundState.results 清空。
       const bg = collectBackgroundResults(background, logger);
       parts.push(...bg);
       // 已被更早的 wake 排空 —— 本次空转（幂等）。
@@ -603,8 +611,8 @@ if (import.meta.main) {
       team,
       tasksDir,
     });
-    context = updateContext(MEMORY_INDEX);
-    print(finalText, "green");
+    printFinal(finalText);
+    context = updateContext();
 
     // 所有队友都跑完、且输出都排空后，播报一次。
     if (team.activeTeammates.size) {
@@ -619,5 +627,7 @@ if (import.meta.main) {
     }
     print();
   }
+  prompt.hide();
+  prompt.detach();
   rl.close();
 }

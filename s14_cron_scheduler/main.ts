@@ -20,7 +20,7 @@
  *   + runCronTick：单次扫描，把匹配的任务推进 cronQueue（定时器每秒调用）
  *   + consumeCronQueue / hasCronQueue：agentLoop 与队列处理器读取触发结果
  *   + makeCronHandlers + 3 个新工具：schedule_cron / list_crons / cancel_cron
- *   + updateContext override：enabled_tools 补上 3 个 cron 工具
+ *   + updateContext = makeUpdateContext(tools)：enabled_tools 补上 3 个 cron 工具
  *   + agentLoop 在 s13 的基础上，循环开头多一步「消费 cron 队列 -> 注入 messages」
  *
  * 四个层次：
@@ -37,6 +37,8 @@
  *     调度器 tick 与 consumeCronQueue 天然互斥，也不需要 cron_lock。
  *   - cron 匹配/校验由 croner 库负责（new Cron(expr).match(date)）；无回调构造
  *     只解析、不启动定时器，模式实例按表达式缓存复用。轮询架构与 code.py 保持一致。
+ *   - 提示符走 lib/terminal 的 createPrompt：等输入期间的异步输出先擦掉提示符行，
+ *     输出完再连同已输入的内容重画到底部。
  *   - CronState 的 durablePath 必填：入口用 createCronState(import.meta.dirname)
  *     落到各自的 session 目录，测试传临时路径做隔离（对齐 s12 的 tasksDir）。
  *
@@ -52,7 +54,7 @@ import { Cron } from "croner";
 import { z } from "zod";
 import { createLogger, type SessionLogger } from "../lib/logger";
 import { createClient, MODEL_ID } from "../lib/model";
-import { colorize, print, printError } from "../lib/terminal";
+import { createPrompt, print, printError } from "../lib/terminal";
 import { printProse, textOf, zodTool } from "../lib/tools";
 import { errMsg, type Handlers } from "../s02_tool_use/main";
 // 来自 s03：不含权限检查的基础 dispatch 表（前台 bash 走这里的同步 runBash）。
@@ -66,8 +68,8 @@ import { sleep } from "../s11_error_recovery/main";
 import {
   getSystemPrompt,
   makeTaskHandlers,
+  makeUpdateContext,
   tasksDirFor,
-  updateContext as taskUpdateContext,
 } from "../s12_task_system/main";
 // 来自 s13：后台任务层 + 带 run_in_background 的 bash（tools / TOOL_SCHEMAS 已是
 // 「基础 + 任务 + bash 覆盖」的合并）。s14 在其上再叠加 cron 工具；
@@ -181,7 +183,6 @@ export function runCronTick(
         if (state.lastFiredAt.get(job.id) !== minuteMarker) {
           state.cronQueue.push(job);
           state.lastFiredAt.set(job.id, minuteMarker);
-          print();
           logger.console(
             `  [cron push queue] ${job.id} → ${job.prompt.slice(0, 40)}`,
             "magenta",
@@ -386,14 +387,9 @@ export const TOOL_SCHEMAS: Partial<Record<string, z.ZodObject>> = {
   cancel_cron: cancelCronSchema,
 };
 
-// 合并后的工具名（基础 + 任务 + 后台 bash + cron），用于填 enabled_tools。
-export const TOOL_NAMES: string[] = tools.map((t) => t.name);
-
-// 复用 s12 的 memory/workspace 推导，只把 enabled_tools 换成含 cron 的完整列表，
+// 用 s14 的完整工具集绑定 s12 的 context 工厂，
 // 这样 getSystemPrompt 组装出的「Available tools」也会带上 cron 工具。
-export function updateContext(memoryIndex: string): Context {
-  return { ...taskUpdateContext(memoryIndex), enabled_tools: TOOL_NAMES };
-}
+export const updateContext = makeUpdateContext(tools);
 
 // ═══════════════════════════════════════════════════════════
 //  agentLoop —— 精简版，聚焦 cron 调度（省略 s11 的错误恢复）
@@ -463,7 +459,6 @@ export async function agentLoop(
       const schema = TOOL_SCHEMAS[block.name];
       const input = schema ? schema.parse(block.input) : (block.input as any);
 
-      // 后台执行：模型显式请求 run_in_background 或启发式判断为慢操作。
       if (shouldRunBackground(block.name, input)) {
         const backgroundId = startBackgroundTask(
           background,
@@ -482,7 +477,6 @@ export async function agentLoop(
             `Result will be available when complete.`,
         });
       } else {
-        // 前台执行：同步调用 handler，返回结果。
         const handler = handlers[block.name];
         const output =
           handler && schema ? handler(input) : `Unknown: ${block.name}`;
@@ -495,7 +489,6 @@ export async function agentLoop(
       }
     }
 
-    // tool_result 块和后台通知一起放进同一条 user 消息。
     const backgroundNotifications = collectBackgroundResults(
       background,
       logger,
@@ -537,13 +530,15 @@ if (import.meta.main) {
     rl.close();
     process.exit(0);
   });
+  // 等输入期间，队列处理器 / cron / 后台的输出都从提示符上方流过，不再顶掉它。
+  const prompt = createPrompt(rl, "s14 >> ");
 
   const history: Anthropic.MessageParam[] = [];
   // 后台状态与 cron 状态各一份，跨轮复用。
   const background = new BackgroundState();
   const cron = createCronState(import.meta.dirname);
   const tasksDir = tasksDirFor(import.meta.dirname);
-  let context = updateContext(MEMORY_INDEX);
+  let context = updateContext();
 
   // 启动时加载持久化任务。
   loadDurableJobs(cron, logger);
@@ -565,7 +560,7 @@ if (import.meta.main) {
       cron,
       tasksDir,
     });
-    context = updateContext(MEMORY_INDEX);
+    context = updateContext();
     print(finalText, "green");
     print();
   }
@@ -581,9 +576,6 @@ if (import.meta.main) {
       printError(e);
     } finally {
       agentBusy = false;
-      // 后台输出会顶掉 rl.question 已打印的提示符，跑完让 readline 重画一次
-      // （true = 保留已输入内容，重画的是 readline 记着的真正提示符）。
-      rl.prompt(true);
     }
   }, 200);
   // unref：这个定时器不算“活跃句柄”，进程该退出时就退出，别被它拖住。
@@ -593,7 +585,7 @@ if (import.meta.main) {
   while (true) {
     let query: string;
     try {
-      query = await rl.question(colorize("s14 >> ", "cyan"));
+      query = await prompt.ask();
     } catch {
       break; // stdin 关闭（Ctrl+D）
     }
@@ -612,5 +604,6 @@ if (import.meta.main) {
       agentBusy = false;
     }
   }
+  prompt.detach();
   rl.close();
 }
