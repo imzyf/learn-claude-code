@@ -136,7 +136,7 @@ def compact_history(messages):
 
 有时候 API 还是返回 `prompt_too_long`（413），上下文增长速度快于压缩触发速度时。
 
-这时触发 **reactive_compact**：比 compact_history 更激进，从尾部回退，但仍要避免留下孤立 `tool_result`。
+这时触发 **reactive_compact**：触发方式比 compact_history 更激进（API 报错后的应急手段），但压缩策略更温和，保留最近约 5 条原始消息，只总结较早历史。同样避免留下孤立 `tool_result`。
 
 ```python
 def reactive_compact(messages):

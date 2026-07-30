@@ -272,10 +272,10 @@ def agent_loop(messages: list, context: dict):
         # ── LLM call: with_retry handles 429/529, outer handles rest ──
         try:
             response = with_retry(
-                lambda mt=max_tokens, mdl=state.current_model:
-                    client.messages.create(
-                        model=mdl, system=system, messages=messages,
-                        tools=TOOLS, max_tokens=mt),
+                lambda: client.messages.create(
+                    model=state.current_model, system=system,
+                    messages=messages, tools=TOOLS,
+                    max_tokens=max_tokens),
                 state)
         except Exception as e:
             # Path 2: prompt_too_long -> reactive compact (once)

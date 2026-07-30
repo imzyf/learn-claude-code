@@ -44,6 +44,8 @@ import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
 import { createClient, MODEL_ID } from "../lib/model";
 import { textOf, zodTool } from "../lib/tools";
+import { errMsg, type Handlers } from "../s02_tool_use/main";
+import { sleep } from "../s11_error_recovery/main";
 
 const client = createClient();
 
@@ -71,8 +73,6 @@ const CONTINUATION_PROMPT =
 const PROMPT = "\x1b[36ms20 >> \x1b[0m";
 let CLI_ACTIVE = false;
 
-const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
-const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 const execAsync = promisify(exec);
 
 // Shared readline: hooks (Allow? prompt), terminalPrint redraw, and the REPL.
@@ -941,7 +941,7 @@ function spawnTeammateThread(
       complete_task: subCompleteTaskSchema,
     };
 
-    const subHandlers: Partial<Record<string, (input: any) => string>> = {
+    const subHandlers: Handlers = {
       bash: ({ command }) => runBash(command, wtCtx.path),
       read_file: ({ path, limit, offset }) =>
         runRead(path, limit, offset ?? 0, wtCtx.path),
@@ -1293,7 +1293,7 @@ const SUB_AGENT_SCHEMAS: Partial<Record<string, z.ZodObject>> = {
   glob: subAgentGlobSchema,
 };
 
-const SUB_HANDLERS: Partial<Record<string, (input: any) => string>> = {
+const SUB_HANDLERS: Handlers = {
   bash: ({ command }) => runBash(command),
   read_file: ({ path, limit, offset }) => runRead(path, limit, offset ?? 0),
   write_file: ({ path, content }) => runWrite(path, content),

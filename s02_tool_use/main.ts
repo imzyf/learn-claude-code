@@ -23,16 +23,21 @@ import * as path from "node:path";
 import * as readline from "node:readline/promises";
 import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
-import { createLogger, type SessionLogger } from "../lib/logger";
-import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
+import { createLogger } from "../lib/logger";
+import { createClient, MODEL_ID } from "../lib/model";
 import { colorize, print } from "../lib/terminal";
 import { printProse, textOf, zodTool } from "../lib/tools";
-import { bashSchema, runBash as s01RunBash } from "../s01_agent_loop/main";
+import {
+  bashSchema,
+  type Deps,
+  runBash as s01RunBash,
+} from "../s01_agent_loop/main";
 
 const WORKDIR = process.cwd();
 const SYSTEM = `You are a coding agent at ${WORKDIR}. Use tools to solve tasks. Act, don't explain.`;
 
-const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
+export const errMsg = (e: unknown) =>
+  e instanceof Error ? e.message : String(e);
 
 // ═══════════════════════════════════════════════════════════
 //  来自 s01（未改动）
@@ -146,7 +151,9 @@ export const TOOL_SCHEMAS: Partial<Record<string, z.ZodObject>> = {
 
 // `input: any` 对应 Python 的 `handler(**block.input)` —— 每个 handler
 // 解构出各自 schema 在 `.parse()` 之后保证的结构。
-const TOOL_HANDLERS: Partial<Record<string, (input: any) => string>> = {
+export type Handlers = Partial<Record<string, (input: any) => string>>;
+
+const TOOL_HANDLERS: Handlers = {
   bash: ({ command }) => runBash(command),
   read_file: ({ path, limit }) => runRead(path, limit),
   write_file: ({ path, content }) => runWrite(path, content),
@@ -161,7 +168,7 @@ const TOOL_HANDLERS: Partial<Record<string, (input: any) => string>> = {
 
 export async function agentLoop(
   messages: Anthropic.MessageParam[],
-  deps: { client: ModelClient; logger: SessionLogger },
+  deps: Deps,
 ): Promise<string> {
   const { client, logger } = deps;
   while (true) {

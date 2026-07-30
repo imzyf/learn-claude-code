@@ -68,9 +68,6 @@ s10 聚焦 prompt 组装机制。以 s08-s09 的能力为背景，但不重复�
 ```python
 PROMPT_SECTIONS = {
     "identity": "You are a coding agent. Act, don't explain.",
-    "tools": "Available tools: bash, read_file, write_file.",
-    "workspace": f"Working directory: {WORKDIR}",
-    "memory": "Relevant memories are injected below when available.",
 }
 ```
 
@@ -86,8 +83,12 @@ def assemble_system_prompt(context: dict) -> str:
 
     # 始终加载
     sections.append(PROMPT_SECTIONS["identity"])
-    sections.append(PROMPT_SECTIONS["tools"])
-    sections.append(PROMPT_SECTIONS["workspace"])
+
+    # 从 context 动态获取 tools 和 workspace
+    tools = ", ".join(context.get("enabled_tools", []))
+    if tools:
+        sections.append(f"Available tools: {tools}.")
+    sections.append(f"Working directory: {context.get("workspace", WORKDIR)}")
 
     # 按需加载 — 基于真实状态，不是关键词
     memories = context.get("memories", "")

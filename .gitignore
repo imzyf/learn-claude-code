@@ -10,3 +10,4 @@ node_modules/
 .tasks/
 .claude/memory.json
 .scheduled_tasks.json
+.mailboxes/

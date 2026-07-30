@@ -41,9 +41,6 @@ MODEL = os.environ["MODEL_ID"]
 
 PROMPT_SECTIONS = {
     "identity": "You are a coding agent. Act, don't explain.",
-    "tools": "Available tools: bash, read_file, write_file.",
-    "workspace": f"Working directory: {WORKDIR}",
-    "memory": "Relevant memories are injected below when available.",
 }
 
 
@@ -51,10 +48,14 @@ def assemble_system_prompt(context: dict) -> str:
     """Select and join prompt sections based on current context."""
     sections = []
 
-    # Always loaded — identity, tools, workspace
+    # Always loaded — identity
     sections.append(PROMPT_SECTIONS["identity"])
-    sections.append(PROMPT_SECTIONS["tools"])
-    sections.append(PROMPT_SECTIONS["workspace"])
+
+    # Dynamic — tools and workspace from context
+    tools = ", ".join(context.get("enabled_tools", []))
+    if tools:
+        sections.append(f"Available tools: {tools}.")
+    sections.append(f"Working directory: {context.get("workspace", WORKDIR)}")
 
     # Conditional — memory loaded when MEMORY.md exists and has content
     memories = context.get("memories", "")

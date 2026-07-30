@@ -21,6 +21,7 @@ import {
   toolUseBlock,
 } from "../lib/testing";
 import type { Context } from "../s10_system_prompt/main";
+import { sleep } from "../s11_error_recovery/main";
 import {
   agentLoop,
   BackgroundState,
@@ -39,7 +40,6 @@ const ctx = (): Context => ({
   memories: "",
 });
 
-const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 // 轮询等待后台 worker 完成（游离 Promise，无法直接 await）。
 async function waitFor(pred: () => boolean, timeoutMs = 3000): Promise<void> {
   const start = Date.now();

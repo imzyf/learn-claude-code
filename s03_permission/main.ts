@@ -19,8 +19,10 @@
  *
  *     if (!(await checkPermission(call))) continue;
  *
- * 相比 s02 还有两处改动：
+ * 相比 s02 还有三处改动：
  *   - runBash 内联的危险命令检查被移除——现在归关卡 1 管
+ *   - 文件工具的 safePath 硬拦截被移除——越界与否交给关卡 2/3 判断。
+ *     两层同时存在的话 safePath 会先抛错，用户在关卡 3 点「允许」也没用
  *   - 关卡 3（Confirm）做成可注入依赖：入口用 makeConfirm 接真实 readline，
  *     测试用 fake；s04 也复用同一个 Confirm / makeConfirm
  *
@@ -30,21 +32,22 @@
  */
 
 import { spawnSync } from "node:child_process";
+import * as fs from "node:fs";
 import * as path from "node:path";
 import * as readline from "node:readline/promises";
 import type Anthropic from "@anthropic-ai/sdk";
 import { createLogger, type SessionLogger } from "../lib/logger";
-import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
+import { createClient, MODEL_ID } from "../lib/model";
 import { colorize, print } from "../lib/terminal";
 import { printProse, textOf } from "../lib/tools";
-// 四个文件工具、tool 定义、schema 表在 s03 都没变，直接从 s02 复用，
-// 不再包一层同名 wrapper。只有 runBash 是 s03 自己的版本（见下）。
+import type { Deps as S01Deps } from "../s01_agent_loop/main";
+// tool 定义、schema 表在 s03 没变，直接从 s02 复用。runBash 和三个
+// 文件工具是 s03 自己的版本（见下）；runGlob 自带 WORKDIR 过滤，照常复用。
 import {
-  runEdit,
+  errMsg,
+  type Handlers,
   runGlob,
-  runRead,
-  runWrite,
-  TOOL_SCHEMAS,
+  TOOL_SCHEMAS as S02_TOOL_SCHEMAS,
   tools,
 } from "../s02_tool_use/main";
 
@@ -52,9 +55,9 @@ const WORKDIR = process.cwd();
 const SYSTEM = `You are a coding agent at ${WORKDIR}. All destructive operations require user approval.`;
 
 // ═══════════════════════════════════════════════════════════
-//  来自 s02：工具实现
-//  runBash 是 s03 本地版：内联的危险命令检查移除，改由关卡 1 负责。
-//  四个文件工具没变，已在顶部直接从 s02 import 复用。
+//  来自 s02：工具实现（s03 本地版）
+//  runBash 内联的危险命令检查、三个文件工具的 safePath 硬拦截全部移除，
+//  统一交给下面三道关卡负责。runGlob 自带 WORKDIR 过滤，仍复用 s02 的。
 // ═══════════════════════════════════════════════════════════
 
 export function runBash(command: string): string {
@@ -73,6 +76,50 @@ export function runBash(command: string): string {
   return out ? out.slice(0, 50_000) : "(no output)";
 }
 
+export function runRead(p: string, limit?: number): string {
+  try {
+    let lines = fs.readFileSync(path.resolve(WORKDIR, p), "utf8").split("\n");
+    if (limit && limit < lines.length) {
+      lines = [
+        ...lines.slice(0, limit),
+        `... (${lines.length - limit} more lines)`,
+      ];
+    }
+    return lines.join("\n");
+  } catch (e) {
+    return `Error: ${errMsg(e)}`;
+  }
+}
+
+export function runWrite(p: string, content: string): string {
+  try {
+    const filePath = path.resolve(WORKDIR, p);
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(filePath, content);
+    return `Wrote ${Buffer.byteLength(content)} bytes to ${p}`;
+  } catch (e) {
+    return `Error: ${errMsg(e)}`;
+  }
+}
+
+export function runEdit(p: string, oldText: string, newText: string): string {
+  try {
+    const filePath = path.resolve(WORKDIR, p);
+    const text = fs.readFileSync(filePath, "utf8");
+    // 用 indexOf + slice 而不是 String.replace：replace 会把 newText 里
+    // `$&` 这类 pattern 当成特殊的替换语法处理。
+    const i = text.indexOf(oldText);
+    if (i === -1) return `Error: text not found in ${p}`;
+    fs.writeFileSync(
+      filePath,
+      text.slice(0, i) + newText + text.slice(i + oldText.length),
+    );
+    return `Edited ${p}`;
+  } catch (e) {
+    return `Error: ${errMsg(e)}`;
+  }
+}
+
 // ═══════════════════════════════════════════════════════════
 //  来自 s02（未改动）：tool 定义与 dispatch
 //  tools 和 TOOL_SCHEMAS 都是纯数据，直接从 s02 复用
@@ -80,7 +127,7 @@ export function runBash(command: string): string {
 
 // `input: any` 对应 Python 的 `handler(**block.input)` —— 每个 handler
 // 解构出各自 schema 在 `.parse()` 之后保证的结构。
-export const TOOL_HANDLERS: Partial<Record<string, (input: any) => string>> = {
+export const TOOL_HANDLERS: Handlers = {
   bash: ({ command }) => runBash(command),
   read_file: ({ path, limit }) => runRead(path, limit),
   write_file: ({ path, content }) => runWrite(path, content),
@@ -121,13 +168,13 @@ const PERMISSION_RULES: {
   message: string;
 }[] = [
   {
-    // 规则 1：write_file / edit_file 的目标路径落在工作区之外
-    tools: ["write_file", "edit_file"],
+    // 规则 1：文件工具的目标路径落在工作区之外
+    tools: ["read_file", "write_file", "edit_file"],
     check: (args) => {
       const resolved = path.resolve(WORKDIR, args.path ?? "");
       return resolved !== WORKDIR && !resolved.startsWith(WORKDIR + path.sep);
     },
-    message: "Writing outside workspace",
+    message: "Access outside workspace",
   },
   {
     // 规则 2：bash 命令含破坏性关键字（rm、写入 /etc、chmod 777）
@@ -237,9 +284,11 @@ export async function checkPermission(
 //  agentLoop —— 和 s02 一样，只是插入了 checkPermission()
 // ═══════════════════════════════════════════════════════════
 
+export type Deps = S01Deps & { confirm: Confirm };
+
 export async function agentLoop(
   messages: Anthropic.MessageParam[],
-  deps: { client: ModelClient; logger: SessionLogger; confirm: Confirm },
+  deps: Deps,
 ): Promise<string> {
   const { client, logger, confirm } = deps;
   while (true) {
@@ -276,7 +325,7 @@ export async function agentLoop(
         continue;
       }
 
-      const schema = TOOL_SCHEMAS[block.name];
+      const schema = S02_TOOL_SCHEMAS[block.name];
       const handler = TOOL_HANDLERS[block.name];
       const output =
         handler && schema

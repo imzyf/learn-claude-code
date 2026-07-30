@@ -1,3 +1,5 @@
+English · [中文](./README.zh-CN.md)
+
 # Learn Claude Code (TypeScript)
 
 > Harness Engineering for Real Agents.

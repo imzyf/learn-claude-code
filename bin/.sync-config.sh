@@ -1,18 +1,12 @@
 #!/usr/bin/env bash
 #
-# bin/sync-upstream.sh 的共享配置。
-# 被 source（引入）而不是执行。
+# bin/sync-upstream.sh 的共享配置（被 source 引入，而非执行）。
 
-# 上游是 Python 参考项目；这个项目是它的 TypeScript 端口。
+# 按需修改以下变量以匹配你的上游仓库。
 UPSTREAM_REPO="https://github.com/shareAI-lab/learn-claude-code.git"
 UPSTREAM_BRANCH="main"
 
-# 从上游镜像的目录。
-#
-# 仅刷新每个目录内的上游拥有的条目
-# （code.py、README*.md、images/）。你为 TS 端口在旁边添加的文件
-# （code.ts、index.ts 等）不会被触碰或删除，因为它们在上游不存在。
-# 有关确切的逻辑，请参阅 sync-upstream.sh。
+# 从上游镜像的目录（仅刷新上游拥有的条目，本地新增文件保留）。
 SYNC_DIRS=(
   s01_agent_loop
   s02_tool_use
@@ -37,18 +31,13 @@ SYNC_DIRS=(
   skills
 )
 
-# 要从上游拉取的独立文件（也决定 sparse-checkout 范围）。每项是
-# "上游路径" 或 "上游路径:本地路径"；省略 ":本地路径" 时镜像到
-# 此处相同路径，写了则改名落地（例如避免与我们自己的 .env 冲突）。
+# 要从上游拉取的独立文件。格式 "上游路径" 或 "上游路径:本地路径"（改名落地）。
 SYNC_FILES=(
-  "requirements.txt"
-  "README-zh.md:README-zh.upstream.md"
   ".env.example:.env.example.upstream"
+  "README-zh.md:README-zh.upstream.md"
 )
 
-# 从同步中排除的本地化文件（传递给 rsync --exclude）。我们仅保留中文基础
-# 文件（README.md、*.svg）；英文（.en）和日文（.ja）变体被跳过。
-# 上游使用"ja"而不是"jp"。
+# 从同步中排除的本地化文件（rsync --exclude）。
 EXCLUDE_GLOBS=(
   '*.en.md'
   '*.ja.md'

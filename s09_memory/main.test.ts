@@ -366,6 +366,7 @@ describe("agentLoop", () => {
     ...baseDeps(),
     skills: {},
     memoryDir: tmp,
+    sessionDir: tmp,
   });
 
   it("executes a plain tool call, then extraction finds nothing new", async () => {

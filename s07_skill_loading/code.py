@@ -356,10 +356,8 @@ register_hook("Stop", summary_hook)
 #  agent_loop — same as s05-s06 + nag reminder
 # ═══════════════════════════════════════════════════════════
 
-rounds_since_todo = 0
-
 def agent_loop(messages: list):
-    global rounds_since_todo
+    rounds_since_todo = 0
     while True:
         if rounds_since_todo >= 3 and messages:
             messages.append({"role": "user",

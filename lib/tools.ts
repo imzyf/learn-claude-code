@@ -47,7 +47,7 @@ export function textOf(response: Anthropic.Message): string {
 export function printProse(block: Anthropic.ContentBlock): void {
   if (block.type === "text") {
     const text = block.text.trim();
-    if (text) print(`🤖 ${text}`, "green");
+    if (text) print(`🔮 ${text}`, "green");
   } else if (block.type === "thinking") {
     const text = block.thinking.trim();
     if (text) print(`💭 ${text}`, "blue");

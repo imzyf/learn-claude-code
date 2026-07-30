@@ -44,7 +44,7 @@ sync: ## Sync Python reference sources from upstream (cached)
 	bin/sync-upstream.sh
 
 sync-force: ## Sync from upstream, ignoring the clone cache
-	LCC_SYNC_CACHE_TTL=0 bin/sync-upstream.sh
+	LCC_SYNC_CACHE_TTL=0 make sync
 
 ##@ Sessions
 

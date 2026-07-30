@@ -1,22 +1,18 @@
 #!/usr/bin/env bash
 #
-# 从上游 shareAI-lab/learn-claude-code 同步 Python 参考源文件到这个项目
-# 该项目是上游项目的 TypeScript 版本
+# 从上游仓库（配置见 .sync-config.sh）同步文件到本项目。
 #
-# 对于 SYNC_DIRS 中的每个目录（见 .sync-config.sh），上游拥有的文件
-# （code.py、README*.md、images/）会被刷新到原位置。你在旁边写的 TS 文件
-# （code.ts 等）不会被触碰，这样你可以保持 Python 参考在你的端口旁边，
-# 并且每次同步后可以用 `git diff` 看到上游的更改，然后手动移植。
+# SYNC_DIRS 中每个目录只刷新上游拥有的文件，本地新增文件保留，
+# 同步后可用 `git diff` 查看上游更改并手动移植。
 #
-# 上游的克隆是稀疏的（仅限 SYNC_DIRS + SYNC_FILES），并在 CACHE_DIR 下
-# 被缓存 CACHE_TTL_SECONDS（默认 1 天），所以同一天重新运行会重用它。
-# 删除 CACHE_DIR 或设置 LCC_SYNC_CACHE_TTL=0 来强制重新克隆。
+# 上游是稀疏克隆（仅 SYNC_DIRS + SYNC_FILES），缓存于 CACHE_DIR，
+# 有效期 CACHE_TTL_SECONDS（默认 1 天）；删 CACHE_DIR 或设
+# LCC_SYNC_CACHE_TTL=0 强制重新克隆。
 #
-# 使用方法：bin/sync-upstream.sh
-#
-# 环境变量覆盖：
-#   LCC_SYNC_CACHE_DIR   缓存的上游克隆的位置
-#   LCC_SYNC_CACHE_TTL   缓存生命周期（秒）(0 = 始终重新克隆)
+# 用法：bin/sync-upstream.sh
+# 环境变量：
+#   LCC_SYNC_CACHE_DIR   缓存克隆的位置
+#   LCC_SYNC_CACHE_TTL   缓存有效期（秒，0 = 始终重新克隆）
 
 set -euo pipefail
 
@@ -24,7 +20,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 ROOT_DIR="$(dirname "${SCRIPT_DIR}")"
 source "${SCRIPT_DIR}/.sync-config.sh"
 
-CACHE_DIR="${LCC_SYNC_CACHE_DIR:-${SCRIPT_DIR}/.cache/learn-claude-code-upstream}"
+CACHE_DIR="${LCC_SYNC_CACHE_DIR:-${SCRIPT_DIR}/.cache/upstream}"
 CACHE_TTL_SECONDS="${LCC_SYNC_CACHE_TTL:-86400}"
 CACHE_MARKER="${CACHE_DIR}.last-clone"
 clone_dir="${CACHE_DIR}"
@@ -38,8 +34,8 @@ cache_is_fresh() {
 if cache_is_fresh; then
   echo "==> Reusing cached clone at ${clone_dir} (younger than ${CACHE_TTL_SECONDS}s)"
 else
-  # 每个我们想要检出的路径：同步目录和独立文件（取 SYNC_FILES 条目
-  # ":" 前的上游路径部分）。受保护，以便空数组在 -u 下是安全的。
+  # 要检出的路径：SYNC_DIRS + SYNC_FILES 的上游路径（取 ":" 前部分）。
+  # ":-" 防止空数组在 set -u 下报错。
   sparse_paths=()
   for p in "${SYNC_DIRS[@]:-}" "${SYNC_FILES[@]:-}"; do
     [[ -n "${p}" ]] && sparse_paths+=( "/${p%%:*}" )
@@ -55,9 +51,8 @@ fi
 
 shopt -s dotglob
 
-# rsync 排除我们不想复制的本地化变体。rsync 即使在匹配是字面源参数时
-# 也会跳过（不仅仅在递归期间），所以这个方法同时覆盖顶级文件
-# （README.en.md）和嵌套文件（images/*.en.svg）—— 不需要单独的 bash glob 匹配。
+# 构造 rsync --exclude 参数。rsync 对字面源参数也应用 --exclude，
+# 所以顶级和嵌套文件都能被排除，无需额外 glob 匹配。
 exclude_args=()
 for glob in "${EXCLUDE_GLOBS[@]:-}"; do
   [[ -n "${glob}" ]] && exclude_args+=( --exclude="${glob}" )
@@ -69,22 +64,19 @@ for dir in "${SYNC_DIRS[@]}"; do
     echo "!! Skipping ${dir} (not found upstream)"
     continue
   fi
-  echo "==> Refreshing upstream files in ${dir}/ (TS files preserved)"
+  echo "==> Refreshing upstream files in ${dir}/ (local-only files preserved)"
   mkdir -p "${ROOT_DIR}/${dir}"
-  # 刷新原位置上游拥有的每个条目。仅存在于本地的条目
-  # （你的 code.ts 等）永远不会被触碰。
+  # 逐个刷新上游拥有的条目；仅本地存在的条目不受影响。
   for entry in "${src}"/*; do
     name="$(basename "${entry}")"
     rm -rf "${ROOT_DIR:?}/${dir}/${name}"
-    # -q：排除的顶级条目（例如 README.en.md）是预期的且无声的；
-    # rsync 否则会为其警告"跳过排除的文件"。
+    # -q：抑制被排除顶级条目的 "skipping excluded file" 警告。
     rsync -aq "${exclude_args[@]}" "${entry}" "${ROOT_DIR}/${dir}/"
     echo "  - ${dir}/${name}"
   done
 done
 
-# 每项是 "上游路径" 或 "上游路径:本地路径"；没有 ":" 时源和目标
-# 路径相同（原样镜像），写了 ":" 则改名落地。
+# 格式见 .sync-config.sh；无 ":" 时原样镜像，有 ":" 则改名落地。
 for entry in "${SYNC_FILES[@]:-}"; do
   [[ -n "${entry}" ]] || continue
   src_rel="${entry%%:*}"

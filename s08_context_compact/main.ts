@@ -55,6 +55,8 @@ import {
 import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
 import { colorize, print } from "../lib/terminal";
 import { printProse, textOf, zodTool } from "../lib/tools";
+import { errMsg } from "../s02_tool_use/main";
+import type { Deps as S04Deps } from "../s04_hooks/main";
 // 来自 s05：hook 装配（loadHooks = createHooks + registerDefaultHooks）+ nag 机制。
 import {
   bumpNagCounter,
@@ -62,30 +64,35 @@ import {
   nagIfStale,
   resetNagCounter,
 } from "../s05_todo_write/main";
-// 来自 s06：共享的 Deps 类型（client + logger）。
-import type { Deps } from "../s06_subagent/main";
-// 来自 s07：技能层 + LoopDeps + 装配好的三张工具表（base + todo + task + load_skill）。
-// s08 只在 tools 列表上追加 compact，schema/handler 表原样复用。
+// 来自 s07：技能层 + Deps + 装配好的三张工具表（base + todo + task + load_skill）。
+// s08 只在 tools 列表上追加 compact，schema/handler 表原样复用；
+// agentLoop 的依赖在 s07 的基础上多一个 sessionDir（存档落盘用）。
 import {
   buildSystem,
-  type LoopDeps,
   loadSkills,
+  TOOL_HANDLERS as S07_TOOL_HANDLERS,
+  TOOL_SCHEMAS as S07_TOOL_SCHEMAS,
+  type Deps as S07Deps,
   SKILLS_DIR,
   tools as s07Tools,
-  TOOL_HANDLERS,
-  TOOL_SCHEMAS,
 } from "../s07_skill_loading/main";
 
 // s08 导出自己拥有的东西：压缩流水线（L1~L4 + reactive）+ agentLoop，
 // 外加装配好的完整工具列表（base + todo + task + load_skill + compact），供 s09 继续叠加。
 // 复用来的符号（技能层 / spawnSubagent / permissionHook / nag）由测试各自从源头 import。
 
-// 运行时产物落在 s08 文件夹下（同 logger 的 .log/）；SKILLS_DIR 复用 s07（仓库根目录的共享输入）。
-const MODULE_DIR = import.meta.dirname;
-const TRANSCRIPT_DIR = path.join(MODULE_DIR, ".transcripts");
-const TOOL_RESULTS_DIR = path.join(MODULE_DIR, ".task_outputs", "tool-results");
+// deps 与 s07 一致，另加 sessionDir：L3/L4 的存档落在调用方的 session 目录下。
+export type Deps = S07Deps & { sessionDir: string };
 
-const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
+// 压缩流水线只用得到 client/logger/hooks + sessionDir，参数类型收窄。
+type CompactDeps = S04Deps & { sessionDir: string };
+
+// 运行时产物落在调用方的 session 目录下（同 logger 的 .log/）：sessionDir 由入口传入，
+// s09 复用压缩层时存档跟着落到 s09；SKILLS_DIR 复用 s07（仓库根目录的共享输入）。
+const transcriptDir = (sessionDir: string) =>
+  path.join(sessionDir, ".transcripts");
+const toolResultsDir = (sessionDir: string) =>
+  path.join(sessionDir, ".task_outputs", "tool-results");
 
 // ═══════════════════════════════════════════════════════════
 //  s08 新增：四层压缩流水线
@@ -291,6 +298,7 @@ export function toolResultBudget(
   messages: Anthropic.MessageParam[],
   maxBytes: number,
   logger: SessionLogger,
+  sessionDir: string,
 ): Anthropic.MessageParam[] {
   const last = messages[messages.length - 1];
   // 只看最后一条消息 —— 预算只管最新一轮的工具结果，更早的交给 L2。
@@ -320,7 +328,7 @@ export function toolResultBudget(
     if (content.length <= PERSIST_THRESHOLD) continue;
 
     // 原文写进磁盘，消息里只留文件路径 + 预览。
-    block.content = persistLargeOutput(block.tool_use_id, content);
+    block.content = persistLargeOutput(block.tool_use_id, content, sessionDir);
     persisted.push(`- ${block.tool_use_id}: ${content.length} chars → disk`);
     // 重新累计总量，回到预算内就停。
     total = blocks.reduce((n, b) => n + outputText(b).length, 0);
@@ -341,14 +349,16 @@ export function toolResultBudget(
   return messages;
 }
 // 超长输出写到磁盘，返回「路径 + 预览」的占位文本；短输出原样返回。
-export function persistLargeOutput(toolUseId: string, output: string): string {
+export function persistLargeOutput(
+  toolUseId: string,
+  output: string,
+  sessionDir: string,
+): string {
   if (output.length <= PERSIST_THRESHOLD) return output;
 
-  fs.mkdirSync(TOOL_RESULTS_DIR, { recursive: true });
-  const filePath = path.join(
-    TOOL_RESULTS_DIR,
-    `${timestampPrefix()}_${toolUseId}.txt`,
-  );
+  const dir = toolResultsDir(sessionDir);
+  fs.mkdirSync(dir, { recursive: true });
+  const filePath = path.join(dir, `${timestampPrefix()}_${toolUseId}.txt`);
   if (!fs.existsSync(filePath)) fs.writeFileSync(filePath, output);
 
   // 模型看到路径和前 N 字预览（N = 阈值的十分之一），需要全文时可自行读文件。
@@ -359,9 +369,9 @@ export function persistLargeOutput(toolUseId: string, output: string): string {
 // L4: autoCompact —— LLM 完整摘要
 export async function compactHistory(
   messages: Anthropic.MessageParam[],
-  deps: Deps,
+  deps: CompactDeps,
 ): Promise<Anthropic.MessageParam[]> {
-  const transcriptPath = writeTranscript(messages);
+  const transcriptPath = writeTranscript(messages, deps.sessionDir);
   const totalChars = estimateSize(messages);
   const summary = await summarizeHistory(messages, deps);
 
@@ -376,12 +386,13 @@ export async function compactHistory(
   return [{ role: "user", content: `[Compacted]\n\n${summary}` }];
 }
 // 压缩前把完整历史落成 JSONL 存档 —— 信息只是移出上下文，并未真正丢失。
-function writeTranscript(messages: Anthropic.MessageParam[]): string {
-  fs.mkdirSync(TRANSCRIPT_DIR, { recursive: true });
-  const filePath = path.join(
-    TRANSCRIPT_DIR,
-    `${timestampPrefix()}_messages.jsonl`,
-  );
+function writeTranscript(
+  messages: Anthropic.MessageParam[],
+  sessionDir: string,
+): string {
+  const dir = transcriptDir(sessionDir);
+  fs.mkdirSync(dir, { recursive: true });
+  const filePath = path.join(dir, `${timestampPrefix()}_messages.jsonl`);
   fs.writeFileSync(
     filePath,
     `${messages.map((m) => JSON.stringify(m)).join("\n")}\n`,
@@ -391,7 +402,7 @@ function writeTranscript(messages: Anthropic.MessageParam[]): string {
 // 用一次独立的 API 调用把整段历史浓缩成结构化摘要。
 export async function summarizeHistory(
   messages: Anthropic.MessageParam[],
-  deps: Deps,
+  deps: S04Deps,
 ): Promise<string> {
   const { client } = deps;
   // 摘要是独立的子请求：用 child scope 打标记（同 s06 子 agent 的做法），
@@ -419,10 +430,10 @@ export async function summarizeHistory(
 // 应急：reactiveCompact —— API 仍报 prompt_too_long 时触发
 export async function reactiveCompact(
   messages: Anthropic.MessageParam[],
-  deps: Deps,
+  deps: CompactDeps,
 ): Promise<Anthropic.MessageParam[]> {
   // 与 L4 一样，先把完整历史落盘存档。
-  writeTranscript(messages);
+  writeTranscript(messages, deps.sessionDir);
   // 保留最后 REACTIVE_KEEP_TAIL 条消息原样，只摘要之前的部分。
   let tailStart = Math.max(0, messages.length - REACTIVE_KEEP_TAIL);
   if (
@@ -476,9 +487,9 @@ const REACTIVE_KEEP_TAIL = 5; // reactive compact 保留的尾部消息数
 
 export async function agentLoop(
   messages: Anthropic.MessageParam[],
-  deps: LoopDeps,
+  deps: Deps,
 ): Promise<string> {
-  const { client, logger, system, hooks } = deps;
+  const { client, logger, system, hooks, sessionDir } = deps;
   // 应急压缩（reactive）的连续使用次数，一次 API 调用成功即复位。
   let reactiveRetries = 0;
   while (true) {
@@ -488,7 +499,7 @@ export async function agentLoop(
     // L3: 先把大结果落盘
     replaceMessages(
       messages,
-      toolResultBudget(messages, TOOL_RESULT_BUDGET, logger),
+      toolResultBudget(messages, TOOL_RESULT_BUDGET, logger, sessionDir),
     );
     // L1: 裁剪中间
     replaceMessages(messages, snipCompact(messages, SNIP_MAX_MESSAGES, logger));
@@ -570,8 +581,8 @@ export async function agentLoop(
         break; // 结束本轮，用压缩后的上下文重新开始
       }
 
-      const schema = TOOL_SCHEMAS[block.name];
-      const handler = TOOL_HANDLERS[block.name];
+      const schema = S07_TOOL_SCHEMAS[block.name];
+      const handler = S07_TOOL_HANDLERS[block.name];
       // await —— task handler（spawnSubagent）是 async。
       const output =
         handler && schema
@@ -640,6 +651,7 @@ if (import.meta.main) {
       hooks,
       skills,
       system,
+      sessionDir: import.meta.dirname,
     });
     print(finalText, "green");
     print();

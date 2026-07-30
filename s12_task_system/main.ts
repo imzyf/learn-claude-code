@@ -11,7 +11,7 @@
  *   任务系统与 withRetry 是两个可自然组合的独立层，这里只聚焦前者。
  *   本文件只新增任务系统这一层：
  *   + Task 类型（id、subject、description、status、owner、blockedBy）
- *   + TASKS_DIR = .tasks/，持久化为每任务一份 JSON
+ *   + tasksDirFor(sessionDir) = <session>/.tasks/，持久化为每任务一份 JSON
  *   + createTask / saveTask / loadTask / listTasks / getTask
  *   + canStart：检查 blockedBy 是否全部完成（依赖缺失即视为被阻塞）
  *   + claimTask：设置 owner，pending -> in_progress
@@ -23,9 +23,10 @@
  *     工厂闭包捕获 logger，再与 s03 的纯分发表合并（基础工具不依赖 logger）。
  *   - 工具集在 s12 变了（多了 5 个任务工具），system prompt 的「Available tools」
  *     也得跟上。s10 的 assembleSystemPrompt 把这行写死成基础五工具、忽略了
- *     context.enabled_tools，所以 s12 在这里接管 prompt 组装：updateContext 用
- *     合并后的工具名填 enabled_tools，getSystemPrompt 依据它组装（复用 s10 的
- *     contextKey 缓存）。s13 同名覆盖 bash、工具名不变，直接复用这里。
+ *     context.enabled_tools，所以 s12 在这里接管 prompt 组装：makeUpdateContext(tools)
+ *     绑出一个用该工具集名字填 enabled_tools 的 updateContext，getSystemPrompt 依据
+ *     它组装（复用 s10 的 contextKey 缓存）。s13 工具名不变，直接复用 s12 这一份；
+ *     s14 / s15 用自己的 tools 各绑一份。
  *
  * Usage:
  *     pnpm dev s12_task_system/main.ts
@@ -37,38 +38,46 @@ import * as readline from "node:readline/promises";
 import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
 import { createLogger, type SessionLogger } from "../lib/logger";
-import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
+import { createClient, MODEL_ID } from "../lib/model";
 import { colorize, print } from "../lib/terminal";
 import { printProse, textOf, zodTool } from "../lib/tools";
 // 来自 s02：基础工具定义 + schema 表。
 import {
-  TOOL_SCHEMAS as BASE_TOOL_SCHEMAS,
   tools as baseTools,
+  type Handlers,
+  TOOL_SCHEMAS as S02_TOOL_SCHEMAS,
 } from "../s02_tool_use/main";
-// 来自 s03：不含权限检查的基础 dispatch 表。
-import { TOOL_HANDLERS as BASE_TOOL_HANDLERS } from "../s03_permission/main";
+// 来自 s05：重新组装过的基础 dispatch 表（文件工具带 safePath）。
+import { BASE_HANDLERS as S05_BASE_HANDLERS } from "../s05_todo_write/main";
 // 来自 s09：记忆索引路径，s10 也复用同一份。
 import { MEMORY_INDEX } from "../s09_memory/main";
 // 来自 s10：复用 Context 类型、缓存 key，以及 memory/workspace 的推导逻辑
-// （deriveBaseContext）。「Available tools」这行 s10 写死了，s12 在下面自己接管。
+// （deriveBaseContext）+ Deps（client + logger + memoryIndex）。
+// 「Available tools」这行 s10 写死了，s12 在下面自己接管。
 import {
   type Context,
   contextKey,
   updateContext as deriveBaseContext,
+  type Deps as S10Deps,
 } from "../s10_system_prompt/main";
 
-// deps 与 s10/s11 一致：client + logger，另加 memoryIndex（每轮工具后重新推导 context）。
-// tasksDir 可选，默认 TASKS_DIR；测试注入临时目录做隔离。
-export type Deps = { client: ModelClient; logger: SessionLogger };
-export type LoopDeps = Deps & { memoryIndex: string; tasksDir?: string };
+// deps 与 s10/s11 一致：client + logger + memoryIndex，另加 tasksDir
+//（每轮工具后重新推导 context；tasksDir 必填，入口用 tasksDirFor(import.meta.dirname)
+// 落到各自的 session 目录，测试注入临时目录做隔离）。
+export type Deps = S10Deps & { tasksDir: string };
 
 // ═══════════════════════════════════════════════════════════
 //  s12 新增：任务系统
 // ═══════════════════════════════════════════════════════════
 
-// 默认存储目录，落在 s12 自己的目录下（仿照 logger 的 .log/）；
-// 测试传入临时目录做隔离（目录作为参数显式传入，同 s09 的风格）。
-export const TASKS_DIR = path.join(import.meta.dirname, ".tasks");
+// 存储目录名（仿照 logger 的 .log/）；具体目录由 tasksDirFor 决定，
+// 目录作为参数显式传入（同 s09 的风格），测试传入临时目录做隔离。
+export const TASKS_DIR_NAME = ".tasks";
+
+// 按 session 目录定位 .tasks/，让每个 session 的任务落在自己目录下。
+export function tasksDirFor(sessionDir: string): string {
+  return path.join(sessionDir, TASKS_DIR_NAME);
+}
 // 任务状态机：pending -> in_progress -> completed
 export type TaskStatus = "pending" | "in_progress" | "completed";
 
@@ -284,7 +293,7 @@ const taskTools: Anthropic.Tool[] = [
 export const tools: Anthropic.Tool[] = [...baseTools, ...taskTools];
 // 任务工具的 schema，合并进基础工具的 TOOL_SCHEMAS。
 export const TOOL_SCHEMAS: Partial<Record<string, z.ZodObject>> = {
-  ...BASE_TOOL_SCHEMAS,
+  ...S02_TOOL_SCHEMAS,
   create_task: createTaskSchema,
   list_tasks: listTasksSchema,
   get_task: getTaskSchema,
@@ -294,10 +303,7 @@ export const TOOL_SCHEMAS: Partial<Record<string, z.ZodObject>> = {
 
 // 任务 handler 需要 logger 打印状态迁移、dir 定位存储，用工厂闭包捕获二者，
 // 再与 s03 的纯基础分发表合并。
-export function makeTaskHandlers(
-  logger: SessionLogger,
-  dir: string = TASKS_DIR,
-): Partial<Record<string, (input: any) => string>> {
+export function makeTaskHandlers(logger: SessionLogger, dir: string): Handlers {
   return {
     create_task: ({ subject, description, blockedBy }) =>
       runCreateTask(dir, subject, description ?? "", blockedBy, logger),
@@ -312,13 +318,22 @@ export function makeTaskHandlers(
 //  s12 override：让 system prompt 反映合并后的工具集
 // ═══════════════════════════════════════════════════════════
 
-// 合并后的工具名（基础 + 任务）。s13 只是同名覆盖 bash，工具名与此一致，故可复用。
-export const TOOL_NAMES: string[] = tools.map((t) => t.name);
-
-// 复用 s10 的 memory/workspace 推导，只把 enabled_tools 换成合并后的工具名。
-export function updateContext(memoryIndex: string): Context {
-  return { ...deriveBaseContext(memoryIndex), enabled_tools: TOOL_NAMES };
+// 复用 s10 的 memory/workspace 推导，只把 enabled_tools 换成给定工具集的名字。
+// 工具名在绑定时算一次，调用点就不必再传 tools；memoryIndex 默认 MEMORY_INDEX，
+// agentLoop 传 deps 里的那份（测试可指向临时 MEMORY.md）。
+export function makeUpdateContext(
+  toolset: Anthropic.Tool[],
+): (memoryIndex?: string) => Context {
+  const enabled_tools = toolset.map((t) => t.name);
+  return (memoryIndex = MEMORY_INDEX) => ({
+    ...deriveBaseContext(memoryIndex),
+    enabled_tools,
+  });
 }
+
+// s12 的 context 推导：enabled_tools = 基础 + 任务。
+// s13 只是同名覆盖 bash，工具名与此一致，故直接复用这一份。
+export const updateContext = makeUpdateContext(tools);
 
 // 进程内缓存（同 s10：context 没变就复用上次结果，只省本地拼接，不影响 API 计费）。
 let lastContextKey: string | null = null;
@@ -358,13 +373,13 @@ export function resetPromptCache(): void {
 export async function agentLoop(
   messages: Anthropic.MessageParam[],
   context: Context,
-  deps: LoopDeps,
+  deps: Deps,
 ): Promise<string> {
   const { client, logger, memoryIndex, tasksDir } = deps;
   let system = getSystemPrompt(context);
   // 基础工具（无需 logger）+ 任务工具（闭包捕获 logger + 存储目录）。
   const handlers = {
-    ...BASE_TOOL_HANDLERS,
+    ...S05_BASE_HANDLERS,
     ...makeTaskHandlers(logger, tasksDir),
   };
 
@@ -446,7 +461,8 @@ if (import.meta.main) {
   });
 
   const history: Anthropic.MessageParam[] = [];
-  let context = updateContext(MEMORY_INDEX);
+  const tasksDir = tasksDirFor(import.meta.dirname);
+  let context = updateContext();
   while (true) {
     let query: string;
     try {
@@ -463,8 +479,9 @@ if (import.meta.main) {
       client,
       logger,
       memoryIndex: MEMORY_INDEX,
+      tasksDir,
     });
-    context = updateContext(MEMORY_INDEX);
+    context = updateContext();
     print(finalText, "green");
     print();
   }
