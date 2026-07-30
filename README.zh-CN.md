@@ -1,8 +1,8 @@
+[English](./README.md) · 中文
+
 # Learn Claude Code (TypeScript)
 
 > Harness Engineering for Real Agents.
-
-[English](./README.md) | [中文](./README.zh-CN.md)
 
 [shareAI-lab/learn-claude-code](https://github.com/shareAI-lab/learn-claude-code)（原版为 Python）的 **TypeScript 移植版**。它一步一步重建 Claude Code 的内部实现。
 

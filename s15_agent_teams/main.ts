@@ -106,6 +106,7 @@ export function mailboxDirFor(sessionDir: string): string {
   return path.join(sessionDir, MAILBOX_DIR_NAME);
 }
 
+// 总线上的一条消息：ts 是秒级时间戳（对齐 Python 的 time.time()）。
 export type BusMessage = {
   from: string;
   to: string;

@@ -33,9 +33,8 @@ SYNC_DIRS=(
 
 # 要从上游拉取的独立文件。格式 "上游路径" 或 "上游路径:本地路径"（改名落地）。
 SYNC_FILES=(
-  "requirements.txt"
-  "README-zh.md:README-zh.upstream.md"
   ".env.example:.env.example.upstream"
+  "README-zh.md:README-zh.upstream.md"
 )
 
 # 从同步中排除的本地化文件（rsync --exclude）。
