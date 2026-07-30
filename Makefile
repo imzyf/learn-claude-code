@@ -1,4 +1,5 @@
 .PHONY: help setup sync sync-force smoke test typecheck lint lint-check open \
+	debug \
 	s01 s02 s03 s04 s05 s06 s07 s08 s09 s10 \
 	s11 s12 s13 s14 s15 s16 s17 s18 s19 s20
 
@@ -47,62 +48,93 @@ sync-force: ## Sync from upstream, ignoring the clone cache
 
 ##@ Sessions
 
+# `debug` is a command-line modifier, so `make s01 debug` through
+# `make s20 debug` start the selected session with Node's inspector.
+SESSIONS = s01 s02 s03 s04 s05 s06 s07 s08 s09 s10 \
+	s11 s12 s13 s14 s15 s16 s17 s18 s19 s20
+ACTIVE_SESSION = $(firstword $(filter $(SESSIONS),$(MAKECMDGOALS)))
+
+SESSION_RUNNER = pnpm dev
+SESSION_DEBUG_CHECK = @:
+SESSION_DEBUG_HINT = @:
+ifneq (,$(filter debug,$(MAKECMDGOALS)))
+SESSION_DEBUG_CHECK = @if lsof -nP -iTCP:9229 -sTCP:LISTEN >/dev/null; then \
+	echo "Error: debug port 9229 is already in use."; \
+	echo "Stop the old debugger, then run 'make $(ACTIVE_SESSION) debug' again."; \
+	exit 1; \
+fi
+SESSION_DEBUG_HINT = @echo "Waiting for VS Code: Run and Debug -> Attach session (make sXX debug)"
+SESSION_RUNNER = env -u ANTHROPIC_AUTH_TOKEN node --enable-source-maps --inspect-brk=9229 \
+	--env-file-if-exists=.env --import tsx
+endif
+
+define RUN_SESSION
+$(SESSION_DEBUG_CHECK)
+$(SESSION_DEBUG_HINT)
+$(SESSION_RUNNER) $(1)
+endef
+
+debug: ## Debug modifier; use with `make s01 debug` through `make s20 debug`
+	@if [ -z "$(ACTIVE_SESSION)" ]; then \
+		echo "Usage: make <s01..s20> debug"; \
+	fi
+
 s01: ## Run s01 agent loop
-	pnpm dev s01_agent_loop/main.ts
+	$(call RUN_SESSION,s01_agent_loop/main.ts)
 
 s02: ## Run s02 tool use
-	pnpm dev s02_tool_use/main.ts
+	$(call RUN_SESSION,s02_tool_use/main.ts)
 
 s03: ## Run s03 permission system
-	pnpm dev s03_permission/main.ts
+	$(call RUN_SESSION,s03_permission/main.ts)
 
 s04: ## Run s04 hooks
-	pnpm dev s04_hooks/main.ts
+	$(call RUN_SESSION,s04_hooks/main.ts)
 
 s05: ## Run s05 todo write
-	pnpm dev s05_todo_write/main.ts
+	$(call RUN_SESSION,s05_todo_write/main.ts)
 
 s06: ## Run s06 subagent
-	pnpm dev s06_subagent/main.ts
+	$(call RUN_SESSION,s06_subagent/main.ts)
 
 s07: ## Run s07 skill loading
-	pnpm dev s07_skill_loading/main.ts
+	$(call RUN_SESSION,s07_skill_loading/main.ts)
 
 s08: ## Run s08 context compaction
-	pnpm dev s08_context_compact/main.ts
+	$(call RUN_SESSION,s08_context_compact/main.ts)
 
 s09: ## Run s09 memory
-	pnpm dev s09_memory/main.ts
+	$(call RUN_SESSION,s09_memory/main.ts)
 
 s10: ## Run s10 system prompt
-	pnpm dev s10_system_prompt/main.ts
+	$(call RUN_SESSION,s10_system_prompt/main.ts)
 
 s11: ## Run s11 error recovery
-	pnpm dev s11_error_recovery/main.ts
+	$(call RUN_SESSION,s11_error_recovery/main.ts)
 
 s12: ## Run s12 task system
-	pnpm dev s12_task_system/main.ts
+	$(call RUN_SESSION,s12_task_system/main.ts)
 
 s13: ## Run s13 background tasks
-	pnpm dev s13_background_tasks/main.ts
+	$(call RUN_SESSION,s13_background_tasks/main.ts)
 
 s14: ## Run s14 cron scheduler
-	pnpm dev s14_cron_scheduler/main.ts
+	$(call RUN_SESSION,s14_cron_scheduler/main.ts)
 
 s15: ## Run s15 agent teams
-	pnpm dev s15_agent_teams/main.ts
+	$(call RUN_SESSION,s15_agent_teams/main.ts)
 
 s16: ## Run s16 team protocols
-	pnpm dev s16_team_protocols/main.ts
+	$(call RUN_SESSION,s16_team_protocols/main.ts)
 
 s17: ## Run s17 autonomous agents
-	pnpm dev s17_autonomous_agents/main.ts
+	$(call RUN_SESSION,s17_autonomous_agents/main.ts)
 
 s18: ## Run s18 worktree isolation
-	pnpm dev s18_worktree_isolation/main.ts
+	$(call RUN_SESSION,s18_worktree_isolation/main.ts)
 
 s19: ## Run s19 MCP plugin
-	pnpm dev s19_mcp_plugin/main.ts
+	$(call RUN_SESSION,s19_mcp_plugin/main.ts)
 
 s20: ## Run s20 comprehensive
-	pnpm dev s20_comprehensive/main.ts
+	$(call RUN_SESSION,s20_comprehensive/main.ts)
