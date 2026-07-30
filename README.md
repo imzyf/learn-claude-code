@@ -15,8 +15,7 @@ make s01 debug  # debug any session from s01 through s20 on port 9229
 ```
 
 For a debug run, attach VS Code with the
-`Attach session (make sXX debug)` launch configuration. The same commands also
-work from inside each `sXX_*` directory.
+`Attach session (make sXX debug)` launch configuration.
 
 ## Highlights
 
