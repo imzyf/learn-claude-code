@@ -13,7 +13,11 @@ make setup      # 安装依赖，并从 .env.example.upstream 生成 .env
 # 然后把 ANTHROPIC_API_KEY 填进 .env（MODEL_ID / ANTHROPIC_BASE_URL 可选）
 make smoke      # 发一次 API 调用，检查环境是否配好
 make s01        # 运行第 1 课（交互式）；make help 会列出 s01–s20
+make s01 debug  # 在 9229 端口调试 s01–s20 中的任意一课
 ```
+
+调试时，请使用 VS Code 的
+`Attach session (make sXX debug)` 启动配置进行连接。
 
 ## 亮点
 
