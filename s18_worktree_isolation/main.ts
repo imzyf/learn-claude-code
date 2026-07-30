@@ -556,11 +556,16 @@ function scanUnclaimedTasks(): Task[] {
   );
 }
 
-// Poll for 60s. Return 'work', 'shutdown', or 'timeout'.
+// Poll for 60s. claimedTaskId is set only when idle auto-claimed a task.
+type IdleOutcome = {
+  status: "work" | "shutdown" | "timeout";
+  claimedTaskId: string | null;
+};
+
 async function idlePoll(
   name: string,
   messages: Anthropic.MessageParam[],
-): Promise<"work" | "shutdown" | "timeout"> {
+): Promise<IdleOutcome> {
   for (let i = 0; i < IDLE_TIMEOUT / IDLE_POLL_INTERVAL; i++) {
     await sleep(IDLE_POLL_INTERVAL * 1000);
 
@@ -582,7 +587,7 @@ async function idlePoll(
           console.log(
             `  \x1b[35m[protocol] ${name} approved shutdown in idle (${reqId})\x1b[0m`,
           );
-          return "shutdown";
+          return { status: "shutdown", claimedTaskId: null };
         }
       }
 
@@ -591,7 +596,7 @@ async function idlePoll(
         content: `<inbox>${JSON.stringify(inbox)}</inbox>`,
       });
       console.log(`  \x1b[36m[idle] ${name} found inbox messages\x1b[0m`);
-      return "work";
+      return { status: "work", claimedTaskId: null };
     }
 
     const unclaimed = scanUnclaimedTasks();
@@ -610,14 +615,14 @@ async function idlePoll(
         console.log(
           `  \x1b[32m[idle] ${name} auto-claimed: ${task.subject}\x1b[0m`,
         );
-        return "work";
+        return { status: "work", claimedTaskId: task.id };
       }
       console.log(`  \x1b[33m[idle] ${name} claim failed: ${result}\x1b[0m`);
     }
   }
 
   console.log(`  \x1b[31m[idle] ${name} timeout (${IDLE_TIMEOUT}s)\x1b[0m`);
-  return "timeout";
+  return { status: "timeout", claimedTaskId: null };
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -673,6 +678,13 @@ function spawnTeammateThread(
 
     // Once a task with a worktree is claimed, all teammate file tools
     // transparently run inside that isolated directory.
+    const applyTaskWorktree = (taskId: string): void => {
+      const task = loadTask(taskId);
+      wtCtx.path = task.worktree
+        ? path.join(WORKTREES_DIR, task.worktree)
+        : null;
+    };
+
     const subListTasks = () => {
       const tasks = listTasks();
       if (!tasks.length) return "No tasks.";
@@ -687,13 +699,8 @@ function spawnTeammateThread(
 
     const subClaimTask = (taskId: string) => {
       const result = claimTask(taskId, name);
-      if (result.includes("Claimed")) {
-        // Set worktree cwd if task has one
-        const task = loadTask(taskId);
-        wtCtx.path = task.worktree
-          ? path.join(WORKTREES_DIR, task.worktree)
-          : null;
-      }
+      // Set worktree cwd if task has one
+      if (result.includes("Claimed")) applyTaskWorktree(taskId);
       return result;
     };
 
@@ -831,8 +838,10 @@ function spawnTeammateThread(
       if (shouldShutdown) break;
 
       // IDLE phase
-      const idleResult = await idlePoll(name, messages);
-      if (idleResult === "shutdown" || idleResult === "timeout") break;
+      const idle = await idlePoll(name, messages);
+      if (idle.status === "shutdown" || idle.status === "timeout") break;
+      // An auto-claimed task switches cwd too, same as a manual claim.
+      if (idle.claimedTaskId) applyTaskWorktree(idle.claimedTaskId);
     }
 
     // Send final summary to Lead

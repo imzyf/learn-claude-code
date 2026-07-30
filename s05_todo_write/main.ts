@@ -19,8 +19,9 @@
  *                           inject <reminder>
  *
  * 相比 s04 的变化：
- *   工具层：复用 s02 的 tools / TOOL_SCHEMAS + s03 的 TOOL_HANDLERS，
- *          只 append 一个 todo_write（外加 runTodoWrite 实现）。
+ *   工具层：复用 s02 的 tools / TOOL_SCHEMAS，只 append 一个 todo_write
+ *          （外加 runTodoWrite 实现）。dispatch 表在这里重新组装成
+ *          BASE_HANDLERS —— 权限层降级了，文件工具得换回带 safePath 的版本。
  *   Hook 层：hook 实例（createHooks）连同 contextInjectHook / logHook /
  *          summaryHook 全部从 s04 原样复用。
  *   + 唠叨提醒：连续 3 轮没更新 todo 就注入 <reminder>
@@ -45,16 +46,19 @@ import { createLogger, type SessionLogger } from "../lib/logger";
 import { createClient, MODEL_ID } from "../lib/model";
 import { colorize, print } from "../lib/terminal";
 import { printProse, textOf, zodTool } from "../lib/tools";
-// 来自 s02：tool 定义（tools）与 schema 表（TOOL_SCHEMAS）——纯数据，原样复用。
+// 来自 s02：tool 定义（tools）与 schema 表（TOOL_SCHEMAS）——纯数据，原样复用；
+// 四个文件工具也取 s02 的版本，它们带 safePath（理由见下面的 BASE_HANDLERS）。
 import {
-  TOOL_SCHEMAS as BASE_SCHEMAS,
   tools as baseTools,
+  type Handlers,
+  runEdit,
+  runGlob,
+  runRead,
+  runWrite,
+  TOOL_SCHEMAS as S02_TOOL_SCHEMAS,
 } from "../s02_tool_use/main";
-// 来自 s03：dispatch 表（TOOL_HANDLERS）+ 拒绝名单检查（checkDenyList）。
-import {
-  TOOL_HANDLERS as BASE_HANDLERS,
-  checkDenyList,
-} from "../s03_permission/main";
+// 来自 s03：runBash（内联危险命令检查已移除）+ 拒绝名单检查（checkDenyList）。
+import { checkDenyList, runBash } from "../s03_permission/main";
 // 来自 s04：hook 系统（createHooks 实例）与三个通用 hook，原样复用。
 import {
   createHooks,
@@ -145,6 +149,18 @@ const todoWriteSchema = z.object({
 //  三张表都用展开语法在基础之上追加，调用点（agentLoop）不用改。
 // ═══════════════════════════════════════════════════════════
 
+// s05 起权限层被精简成只剩拒绝名单（下游更是一道都不留），s03 的关卡 2/3
+// 不在了，所以基础 dispatch 表在这里重新组装：runBash 用 s03 的（危险命令
+// 交给拒绝名单），四个文件工具换回 s02 带 safePath 的版本兜住越界。
+export const BASE_HANDLERS: Handlers = {
+  bash: ({ command }) => runBash(command),
+  read_file: ({ path, limit }) => runRead(path, limit),
+  write_file: ({ path, content }) => runWrite(path, content),
+  edit_file: ({ path, old_text, new_text }) =>
+    runEdit(path, old_text, new_text),
+  glob: ({ pattern }) => runGlob(pattern),
+};
+
 // 装配好的三张表导出，供下游（s06）在其之上追加 task 等新工具复用。
 export const tools: Anthropic.Tool[] = [
   ...baseTools,
@@ -156,7 +172,7 @@ export const tools: Anthropic.Tool[] = [
 ];
 
 export const TOOL_SCHEMAS: Partial<Record<string, z.ZodObject>> = {
-  ...BASE_SCHEMAS,
+  ...S02_TOOL_SCHEMAS,
   todo_write: todoWriteSchema,
 };
 

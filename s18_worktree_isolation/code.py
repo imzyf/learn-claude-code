@@ -440,8 +440,8 @@ def scan_unclaimed_tasks() -> list[dict]:
 
 
 def idle_poll(agent_name: str, messages: list,
-              name: str, role: str) -> str:
-    """Poll for 60s. Return 'work', 'shutdown', or 'timeout'."""
+              name: str, role: str) -> tuple[str, str | None]:
+    """Poll for 60s. Return (result, auto_claimed_task_id)."""
     for _ in range(IDLE_TIMEOUT // IDLE_POLL_INTERVAL):
         time.sleep(IDLE_POLL_INTERVAL)
 
@@ -455,12 +455,12 @@ def idle_poll(agent_name: str, messages: list,
                              {"request_id": req_id, "approve": True})
                     print(f"  \033[35m[protocol] {name} approved shutdown "
                           f"in idle ({req_id})\033[0m")
-                    return "shutdown"
+                    return "shutdown", None
 
             messages.append({"role": "user",
                 "content": "<inbox>" + json.dumps(inbox) + "</inbox>"})
             print(f"  \033[36m[idle] {name} found inbox messages\033[0m")
-            return "work"
+            return "work", None
 
         unclaimed = scan_unclaimed_tasks()
         if unclaimed:
@@ -476,12 +476,12 @@ def idle_poll(agent_name: str, messages: list,
                                f"{task_data['subject']}{wt_info}</auto-claimed>"})
                 print(f"  \033[32m[idle] {name} auto-claimed: "
                       f"{task_data['subject']}\033[0m")
-                return "work"
+                return "work", task_data["id"]
             print(f"  \033[33m[idle] {name} claim failed: "
                   f"{result}\033[0m")
 
     print(f"  \033[31m[idle] {name} timeout ({IDLE_TIMEOUT}s)\033[0m")
-    return "timeout"
+    return "timeout", None
 
 
 # ── Teammate Thread (from s15 + s16 + s17 + s18) ──
@@ -661,11 +661,17 @@ def spawn_teammate_thread(name: str, role: str, prompt: str) -> str:
                 break
 
             # IDLE phase
-            idle_result = idle_poll(name, messages, name, role)
+            idle_result, claimed_task_id = idle_poll(name, messages, name, role)
             if idle_result == "shutdown":
                 break
             if idle_result == "timeout":
                 break
+            if idle_result == "work" and claimed_task_id:
+                task = load_task(claimed_task_id)
+                if task.get("worktree"):
+                    wt_ctx["path"] = str(WORKTREES_DIR / task["worktree"])
+                else:
+                    wt_ctx["path"] = None
 
         # Summary
         summary = "Done."

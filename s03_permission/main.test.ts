@@ -50,17 +50,21 @@ describe("checkDenyList", () => {
 
 // ── Gate 2: checkRules ────────────────────────────────────
 describe("checkRules", () => {
-  it("flags writing outside the workspace", () => {
+  it("flags every file tool reaching outside the workspace", () => {
     expect(checkRules("write_file", { path: "../escape.txt" })).toBe(
-      "Writing outside workspace",
+      "Access outside workspace",
     );
     expect(checkRules("edit_file", { path: "/etc/hosts" })).toBe(
-      "Writing outside workspace",
+      "Access outside workspace",
+    );
+    expect(checkRules("read_file", { path: "/etc/passwd" })).toBe(
+      "Access outside workspace",
     );
   });
 
-  it("allows writing inside the workspace", () => {
+  it("allows file tools inside the workspace", () => {
     expect(checkRules("write_file", { path: "sub/ok.txt" })).toBeNull();
+    expect(checkRules("read_file", { path: "sub/ok.txt" })).toBeNull();
   });
 
   it("flags potentially destructive bash commands", () => {
@@ -77,7 +81,7 @@ describe("checkRules", () => {
   });
 
   it("returns null for tools with no matching rule", () => {
-    expect(checkRules("read_file", { path: "anything" })).toBeNull();
+    expect(checkRules("glob", { pattern: "**/*.ts" })).toBeNull();
   });
 });
 

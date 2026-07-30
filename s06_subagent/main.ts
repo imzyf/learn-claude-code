@@ -42,11 +42,9 @@ import { colorize, print } from "../lib/terminal";
 import { printProse, textOf, zodTool } from "../lib/tools";
 // 来自 s02：基础工具层（bash + 四个文件工具）——subagent 只用这一层。
 import {
-  TOOL_SCHEMAS as BASE_SCHEMAS,
   tools as baseTools,
+  TOOL_SCHEMAS as S02_TOOL_SCHEMAS,
 } from "../s02_tool_use/main";
-// 来自 s03：基础 dispatch 表（bash/文件工具的 handler）——subagent 复用。
-import { TOOL_HANDLERS as BASE_HANDLERS } from "../s03_permission/main";
 // 来自 s04：共享的 Deps 类型（client + logger + hooks）。
 import type { Deps } from "../s04_hooks/main";
 // 来自 s05：hook 装配（loadHooks = createHooks + registerDefaultHooks）+ 装配好的
@@ -56,8 +54,9 @@ import {
   loadHooks,
   nagIfStale,
   resetNagCounter,
-  TOOL_HANDLERS as S05_HANDLERS,
-  TOOL_SCHEMAS as S05_SCHEMAS,
+  BASE_HANDLERS as S05_BASE_HANDLERS,
+  TOOL_HANDLERS as S05_TOOL_HANDLERS,
+  TOOL_SCHEMAS as S05_TOOL_SCHEMAS,
   tools as s05Tools,
 } from "../s05_todo_write/main";
 
@@ -99,7 +98,7 @@ export const tools: Anthropic.Tool[] = [
 ];
 
 export const TOOL_SCHEMAS: Partial<Record<string, z.ZodObject>> = {
-  ...S05_SCHEMAS,
+  ...S05_TOOL_SCHEMAS,
   task: taskSchema,
 };
 
@@ -108,7 +107,7 @@ export const TOOL_SCHEMAS: Partial<Record<string, z.ZodObject>> = {
 export const TOOL_HANDLERS: Partial<
   Record<string, (input: any, deps: Deps) => string | Promise<string>>
 > = {
-  ...S05_HANDLERS,
+  ...S05_TOOL_HANDLERS,
   task: ({ description }, deps) => spawnSubagent(description, deps),
 };
 
@@ -162,8 +161,8 @@ export async function spawnSubagent(
         continue;
       }
 
-      const schema = BASE_SCHEMAS[block.name];
-      const handler = BASE_HANDLERS[block.name];
+      const schema = S02_TOOL_SCHEMAS[block.name];
+      const handler = S05_BASE_HANDLERS[block.name];
       const output =
         handler && schema
           ? handler(schema.parse(block.input))

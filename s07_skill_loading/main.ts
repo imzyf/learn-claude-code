@@ -59,8 +59,8 @@ import {
 // 来自 s06：subagent（全新 messages[]、只回摘要）+ 装配好的工具三张表
 // （base + todo + task）——s07 只在其上追加 load_skill。
 import {
-  TOOL_HANDLERS as S06_HANDLERS,
-  TOOL_SCHEMAS as S06_SCHEMAS,
+  TOOL_HANDLERS as S06_TOOL_HANDLERS,
+  TOOL_SCHEMAS as S06_TOOL_SCHEMAS,
   tools as s06Tools,
 } from "../s06_subagent/main";
 
@@ -201,7 +201,7 @@ export const tools: Anthropic.Tool[] = [
 ];
 
 export const TOOL_SCHEMAS: Partial<Record<string, z.ZodObject>> = {
-  ...S06_SCHEMAS,
+  ...S06_TOOL_SCHEMAS,
   load_skill: loadSkillSchema,
 };
 
@@ -210,7 +210,7 @@ export const TOOL_SCHEMAS: Partial<Record<string, z.ZodObject>> = {
 export const TOOL_HANDLERS: Partial<
   Record<string, (input: any, deps: Deps) => string | Promise<string>>
 > = {
-  ...S06_HANDLERS,
+  ...S06_TOOL_HANDLERS,
   // load_skill 走 runLoadSkill：查表 + 专属 [skill] logger。
   load_skill: ({ name }, deps) => runLoadSkill(name, deps),
 };

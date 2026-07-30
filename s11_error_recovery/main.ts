@@ -5,7 +5,7 @@
  *
  * 相比 s10 的变化：
  *   工具层、prompt 组装、context 推导全部直接复用，不再内联：
- *     tools / TOOL_SCHEMAS 复用 s02，TOOL_HANDLERS 复用 s03，
+ *     tools / TOOL_SCHEMAS 复用 s02，dispatch 表复用 s05 的 BASE_HANDLERS，
  *     getSystemPrompt / updateContext / Context 复用 s10。
  *   本文件只新增错误恢复这一层：
  *   + LLM 调用被 try/catch 包裹，带三条恢复路径
@@ -41,9 +41,13 @@ import { createClient, MODEL_ID } from "../lib/model";
 import { colorize, print } from "../lib/terminal";
 import { printProse, textOf } from "../lib/tools";
 // 来自 s02：tool 定义 + schema 表。
-import { errMsg, TOOL_SCHEMAS, tools } from "../s02_tool_use/main";
-// 来自 s03：不含权限检查的基础 dispatch 表。
-import { TOOL_HANDLERS } from "../s03_permission/main";
+import {
+  errMsg,
+  TOOL_SCHEMAS as S02_TOOL_SCHEMAS,
+  tools,
+} from "../s02_tool_use/main";
+// 来自 s05：重新组装过的基础 dispatch 表（文件工具带 safePath）。
+import { BASE_HANDLERS as S05_BASE_HANDLERS } from "../s05_todo_write/main";
 // 来自 s09：默认记忆索引路径，s10 也复用同一份，不再各自拼接。
 import { MEMORY_INDEX } from "../s09_memory/main";
 // 来自 s10：运行时组装 + 缓存的 system prompt、依据真实状态推导的 context，
@@ -355,8 +359,8 @@ export async function agentLoop(
         continue;
       }
 
-      const schema = TOOL_SCHEMAS[block.name];
-      const handler = TOOL_HANDLERS[block.name];
+      const schema = S02_TOOL_SCHEMAS[block.name];
+      const handler = S05_BASE_HANDLERS[block.name];
       const output =
         handler && schema
           ? handler(schema.parse(block.input))

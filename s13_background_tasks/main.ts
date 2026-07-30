@@ -41,8 +41,8 @@ import { createClient, MODEL_ID } from "../lib/model";
 import { colorize, print } from "../lib/terminal";
 import { printProse, textOf, zodTool } from "../lib/tools";
 import { errMsg, type Handlers } from "../s02_tool_use/main";
-// 来自 s03：不含权限检查的基础 dispatch 表（前台 bash 走这里的同步 runBash）。
-import { TOOL_HANDLERS as BASE_TOOL_HANDLERS } from "../s03_permission/main";
+// 来自 s05：重新组装过的基础 dispatch 表（文件工具带 safePath）。
+import { BASE_HANDLERS as S05_BASE_HANDLERS } from "../s05_todo_write/main";
 // 来自 s09：记忆索引路径，s10 也复用同一份。
 import { MEMORY_INDEX } from "../s09_memory/main";
 // 来自 s10：只借 Context 类型（prompt 组装 / context 推导改用 s12 的版本）。
@@ -259,7 +259,7 @@ export async function agentLoop(
   let system = getSystemPrompt(context);
   // 基础工具（前台 bash / 文件工具）+ 任务工具（闭包捕获 logger + 存储目录）。
   const handlers: Handlers = {
-    ...BASE_TOOL_HANDLERS,
+    ...S05_BASE_HANDLERS,
     ...makeTaskHandlers(logger, tasksDir),
   };
 

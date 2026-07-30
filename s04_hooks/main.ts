@@ -60,12 +60,12 @@ import { colorize, print } from "../lib/terminal";
 import { printProse, textOf } from "../lib/tools";
 import type { Deps as S01Deps } from "../s01_agent_loop/main";
 // 来自 s02：tool 定义（tools）与 schema 表（TOOL_SCHEMAS）——纯数据，原样复用。
-import { TOOL_SCHEMAS, tools } from "../s02_tool_use/main";
+import { TOOL_SCHEMAS as S02_TOOL_SCHEMAS, tools } from "../s02_tool_use/main";
 // 来自 s03：dispatch 表（TOOL_HANDLERS）+ 权限确认抽象（Confirm / makeConfirm）。
 import {
   type Confirm,
   makeConfirm,
-  TOOL_HANDLERS,
+  TOOL_HANDLERS as S03_TOOL_HANDLERS,
 } from "../s03_permission/main";
 
 const WORKDIR = process.cwd();
@@ -181,6 +181,8 @@ const DENY_LIST = [
   "osascript",
 ];
 const DESTRUCTIVE = ["rm ", "> /etc/", "chmod 777"];
+// 文件工具的 safePath 硬拦截在 s03 已移除，越界检查只剩这个 hook。
+const PATH_TOOLS = ["read_file", "write_file", "edit_file"];
 
 // PreToolUse：s03 的 checkPermission() 逻辑搬到这里。
 // 工厂函数：闭包捕获 confirm，返回真正的 hook（这就是给回调注入依赖的标准手法）。
@@ -207,10 +209,10 @@ export function makePermissionHook(confirm: Confirm): Hook {
         }
       }
     }
-    if (call.name === "write_file" || call.name === "edit_file") {
+    if (PATH_TOOLS.includes(call.name)) {
       const resolved = path.resolve(WORKDIR, input.path ?? "");
       if (resolved !== WORKDIR && !resolved.startsWith(WORKDIR + path.sep)) {
-        if (!(await confirm(call, "Writing outside workspace"))) {
+        if (!(await confirm(call, "Access outside workspace"))) {
           return "Permission denied by user";
         }
       }
@@ -350,8 +352,8 @@ export async function agentLoop(
         continue;
       }
 
-      const schema = TOOL_SCHEMAS[block.name];
-      const handler = TOOL_HANDLERS[block.name];
+      const schema = S02_TOOL_SCHEMAS[block.name];
+      const handler = S03_TOOL_HANDLERS[block.name];
       const output =
         handler && schema
           ? handler(schema.parse(block.input))

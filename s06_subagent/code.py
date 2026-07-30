@@ -312,10 +312,8 @@ register_hook("Stop", summary_hook)
 #  agent_loop — same as s05 + nag reminder, task auto-dispatches
 # ═══════════════════════════════════════════════════════════
 
-rounds_since_todo = 0
-
 def agent_loop(messages: list):
-    global rounds_since_todo
+    rounds_since_todo = 0
     while True:
         # s05: nag reminder
         if rounds_since_todo >= 3 and messages:

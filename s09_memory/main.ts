@@ -58,11 +58,11 @@ import {
   buildSystem as buildSkillSystem,
   loadSkills,
   parseFrontmatter,
+  TOOL_HANDLERS as S07_TOOL_HANDLERS,
+  TOOL_SCHEMAS as S07_TOOL_SCHEMAS,
   type Deps as S07Deps,
   SKILLS_DIR,
   type SkillRegistry,
-  TOOL_HANDLERS,
-  TOOL_SCHEMAS,
 } from "../s07_skill_loading/main";
 // 来自 s08：完整工具列表（base + todo + task + load_skill + compact）+
 // 四层压缩流水线 + reactive 应急压缩 + 原地替换工具 + 各层阈值（env 可配）。
@@ -618,8 +618,8 @@ export async function agentLoop(
         break; // 结束本轮，用压缩后的上下文重新开始
       }
 
-      const schema = TOOL_SCHEMAS[block.name];
-      const handler = TOOL_HANDLERS[block.name];
+      const schema = S07_TOOL_SCHEMAS[block.name];
+      const handler = S07_TOOL_HANDLERS[block.name];
       // await —— task handler（spawnSubagent）是 async。
       const output =
         handler && schema

@@ -95,6 +95,12 @@ describe("makePermissionHook", () => {
     expect(await hook(noopLogger, call)).toBe("Permission denied by user");
   });
 
+  it("asks before reading outside the workspace", async () => {
+    const hook = makePermissionHook(refuse);
+    const call = toolUseBlock("t", "read_file", { path: "/etc/passwd" });
+    expect(await hook(noopLogger, call)).toBe("Permission denied by user");
+  });
+
   it("does not ask for a safe command", async () => {
     const confirm = vi.fn(grant);
     const hook = makePermissionHook(confirm);

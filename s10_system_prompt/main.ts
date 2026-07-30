@@ -5,8 +5,8 @@
  *
  * 相比 s09 的变化：
  *   工具层：回到基础五工具（不带 todo/task/skill/compact）——tools / TOOL_SCHEMAS
- *          复用 s02，TOOL_HANDLERS 复用 s03（纯分发表，权限关卡在 s03 的循环里，
- *          不在 handler 里，所以这里拿到的就是干净的基础实现）。
+ *          复用 s02，dispatch 表复用 s05 的 BASE_HANDLERS。s10 没有权限层，
+ *          所以要的是文件工具带 safePath 的那一版，而不是 s03 那版。
  *   + PROMPT_SECTIONS：按主题分类的 prompt 片段集合
  *   + assembleSystemPrompt(context)：根据真实状态挑选并拼接各片段
  *   + getSystemPrompt(context)：用稳定的 JSON key 做确定性缓存
@@ -26,9 +26,10 @@ import { createClient, MODEL_ID } from "../lib/model";
 import { colorize, print } from "../lib/terminal";
 import { printProse, textOf } from "../lib/tools";
 import type { Deps as S01Deps } from "../s01_agent_loop/main";
-// 来自 s02：tool 定义 + schema 表；来自 s03：不含权限检查的基础 dispatch 表。
-import { TOOL_SCHEMAS, tools } from "../s02_tool_use/main";
-import { TOOL_HANDLERS } from "../s03_permission/main";
+// 来自 s02：tool 定义 + schema 表。
+import { TOOL_SCHEMAS as S02_TOOL_SCHEMAS, tools } from "../s02_tool_use/main";
+// 来自 s05：重新组装过的基础 dispatch 表（文件工具带 safePath）。
+import { BASE_HANDLERS as S05_BASE_HANDLERS } from "../s05_todo_write/main";
 // 来自 s09：记忆索引路径，s11 也复用同一份。
 import { MEMORY_INDEX } from "../s09_memory/main";
 
@@ -41,13 +42,10 @@ export type Deps = S01Deps & { memoryIndex: string };
 //  s10 新增：Prompt 片段
 // ═══════════════════════════════════════════════════════════
 
-// tools 片段由 dispatch 表推导，工具增减时 prompt 自动跟上（依据真实状态）。
+// identity 是唯一写死的片段。tools / workspace / memory 都从 context 取，
+// 工具增减或换工作区时 prompt 自动跟上（依据真实状态，而非关键词）。
 const PROMPT_SECTIONS = {
   identity: "You are a coding agent. Act, don't explain.",
-  tools: `Available tools: ${Object.keys(TOOL_HANDLERS).join(", ")}.`,
-  workspace: `Working directory: ${WORKDIR}`,
-  // 记忆片段只在 .memory/MEMORY.md 存在时才加载（依据真实状态，而非关键词）。
-  memory: "Relevant memories are injected below when available.",
 };
 
 // 由真实状态推导出的 context。
@@ -83,7 +81,9 @@ export function getSystemPrompt(context: Context): string {
   lastContextKey = key;
   lastPrompt = assembleSystemPrompt(context);
 
-  const loaded = ["identity", "tools", "workspace"];
+  const loaded = ["identity"];
+  if (context.enabled_tools.length) loaded.push("tools");
+  loaded.push("workspace");
   if (context.memories) loaded.push("memory");
   print(`  [assembled] sections: ${loaded.join(", ")}`, "gray");
   return lastPrompt;
@@ -93,10 +93,13 @@ export function getSystemPrompt(context: Context): string {
 export function assembleSystemPrompt(context: Context): string {
   const sections: string[] = [];
 
-  // 始终加载：identity / tools / workspace。
+  // 始终加载：identity。
   sections.push(PROMPT_SECTIONS.identity);
-  sections.push(PROMPT_SECTIONS.tools);
-  sections.push(PROMPT_SECTIONS.workspace);
+
+  // 动态加载：tools / workspace 来自 context。
+  const toolList = context.enabled_tools.join(", ");
+  if (toolList) sections.push(`Available tools: ${toolList}.`);
+  sections.push(`Working directory: ${context.workspace}`);
 
   // 条件加载：MEMORY.md 存在且非空时才加上记忆片段。
   if (context.memories) {
@@ -128,7 +131,7 @@ export function updateContext(memoryIndex: string): Context {
     memories = fs.readFileSync(memoryIndex, "utf8").trim();
   }
   return {
-    enabled_tools: Object.keys(TOOL_HANDLERS),
+    enabled_tools: Object.keys(S05_BASE_HANDLERS),
     workspace: WORKDIR,
     memories,
   };
@@ -174,8 +177,8 @@ export async function agentLoop(
       if (block.type !== "tool_use") {
         continue;
       }
-      const schema = TOOL_SCHEMAS[block.name];
-      const handler = TOOL_HANDLERS[block.name];
+      const schema = S02_TOOL_SCHEMAS[block.name];
+      const handler = S05_BASE_HANDLERS[block.name];
       const output =
         handler && schema
           ? handler(schema.parse(block.input))

@@ -43,7 +43,8 @@ describe("assembleSystemPrompt", () => {
   it("always includes identity, tools, and workspace", () => {
     const prompt = assembleSystemPrompt(ctx());
     expect(prompt).toContain("You are a coding agent");
-    expect(prompt).toContain("Available tools");
+    expect(prompt).toContain("Available tools: bash, read_file, write_file.");
+    expect(prompt).toContain("Working directory: /repo");
     expect(prompt).not.toContain("Relevant memories:");
   });
 

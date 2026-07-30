@@ -53,8 +53,8 @@ import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
 import { createPrompt, print, printFinal } from "../lib/terminal";
 import { printProse, textOf, zodTool } from "../lib/tools";
 import { errMsg, type Handlers } from "../s02_tool_use/main";
-// 来自 s03：基础 dispatch 表（队友的 bash/read/write 直接借这里的 handler）。
-import { TOOL_HANDLERS as BASE_TOOL_HANDLERS } from "../s03_permission/main";
+// 来自 s05：重新组装过的基础 dispatch 表（文件工具带 safePath）。
+import { BASE_HANDLERS as S05_BASE_HANDLERS } from "../s05_todo_write/main";
 // 来自 s09：记忆索引路径。
 import { MEMORY_INDEX } from "../s09_memory/main";
 // 来自 s10：只借 Context 类型。
@@ -221,9 +221,9 @@ export function spawnTeammateThread(
   };
   // 基础 bash/read/write 直接借 s03 的 handler，只自加 send_message。
   const subHandlers: Handlers = {
-    bash: BASE_TOOL_HANDLERS.bash,
-    read_file: BASE_TOOL_HANDLERS.read_file,
-    write_file: BASE_TOOL_HANDLERS.write_file,
+    bash: S05_BASE_HANDLERS.bash,
+    read_file: S05_BASE_HANDLERS.read_file,
+    write_file: S05_BASE_HANDLERS.write_file,
     send_message: ({ to, content }) => {
       bus.send(name, to, content);
       return "Sent";
@@ -381,7 +381,7 @@ export async function agentLoop(
   let system = getSystemPrompt(context);
   // 基础工具（前台 bash / 文件工具）+ 任务工具 + cron 工具 + 团队工具。
   const handlers: Handlers = {
-    ...BASE_TOOL_HANDLERS,
+    ...S05_BASE_HANDLERS,
     ...makeTaskHandlers(logger, tasksDir),
     ...makeCronHandlers(cron, logger),
     ...makeTeamHandlers(team, client, logger),

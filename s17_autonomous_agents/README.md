@@ -195,15 +195,15 @@ if len(messages) <= 3:
 | 组件 | 之前 (s16) | 之后 (s17) |
 |------|-----------|-----------|
 | 任务分配 | Lead 手动 assign | 队友自动认领（can_start 检查依赖） |
-| 队友状态 | WORK 或退出 | WORK → IDLE（轮询 60s） → SHUTDOWN |
+| 队友状态 | WORK → IDLE（每 1s 轮询 inbox）→ WORK / SHUTDOWN | WORK → IDLE（每 5s 轮询 inbox + 任务板，60s 超时）→ WORK / SHUTDOWN |
 | claim_task | 无 owner 检查 | 拒绝已有 owner 的任务 |
-| IDLE 阶段关机 | 不处理 shutdown_request | 直接 dispatch shutdown 并退出 |
-| Lead inbox | 只打印，不进上下文 | consume_lead_inbox 统一注入 history |
-| 新函数 | — | idle_poll, scan_unclaimed_tasks, consume_lead_inbox |
+| IDLE 阶段关机 | 收到 shutdown_request 后退出 | 直接 dispatch shutdown 并退出 |
+| Lead inbox | consume_lead_inbox 路由协议响应并注入上下文 | 沿用 consume_lead_inbox 机制 |
+| 新函数 | 已有 consume_lead_inbox | idle_poll, scan_unclaimed_tasks（沿用 consume_lead_inbox） |
 | 身份保持 | 仅 system prompt | 压缩后自动重注入 |
-| Lead 工具 | 14 (s16) | 14（不变） |
+| Lead 工具 | 14 | 14（不变） |
 | 队友工具 | 5 | 8（+ list_tasks, claim_task, complete_task） |
-| 队友退出条件 | 完成任务即退出 | 60s 无新任务才退出 |
+| 队友退出条件 | WORK 完进入 IDLE，等待 shutdown_request 后退出（无超时） | 60s 无新任务或收到 shutdown_request 后退出 |
 
 ---
 

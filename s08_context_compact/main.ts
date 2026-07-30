@@ -70,11 +70,11 @@ import {
 import {
   buildSystem,
   loadSkills,
+  TOOL_HANDLERS as S07_TOOL_HANDLERS,
+  TOOL_SCHEMAS as S07_TOOL_SCHEMAS,
   type Deps as S07Deps,
   SKILLS_DIR,
   tools as s07Tools,
-  TOOL_HANDLERS,
-  TOOL_SCHEMAS,
 } from "../s07_skill_loading/main";
 
 // s08 导出自己拥有的东西：压缩流水线（L1~L4 + reactive）+ agentLoop，
@@ -581,8 +581,8 @@ export async function agentLoop(
         break; // 结束本轮，用压缩后的上下文重新开始
       }
 
-      const schema = TOOL_SCHEMAS[block.name];
-      const handler = TOOL_HANDLERS[block.name];
+      const schema = S07_TOOL_SCHEMAS[block.name];
+      const handler = S07_TOOL_HANDLERS[block.name];
       // await —— task handler（spawnSubagent）是 async。
       const output =
         handler && schema

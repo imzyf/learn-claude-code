@@ -43,12 +43,12 @@ import { colorize, print } from "../lib/terminal";
 import { printProse, textOf, zodTool } from "../lib/tools";
 // 来自 s02：基础工具定义 + schema 表。
 import {
-  TOOL_SCHEMAS as BASE_TOOL_SCHEMAS,
   tools as baseTools,
   type Handlers,
+  TOOL_SCHEMAS as S02_TOOL_SCHEMAS,
 } from "../s02_tool_use/main";
-// 来自 s03：不含权限检查的基础 dispatch 表。
-import { TOOL_HANDLERS as BASE_TOOL_HANDLERS } from "../s03_permission/main";
+// 来自 s05：重新组装过的基础 dispatch 表（文件工具带 safePath）。
+import { BASE_HANDLERS as S05_BASE_HANDLERS } from "../s05_todo_write/main";
 // 来自 s09：记忆索引路径，s10 也复用同一份。
 import { MEMORY_INDEX } from "../s09_memory/main";
 // 来自 s10：复用 Context 类型、缓存 key，以及 memory/workspace 的推导逻辑
@@ -293,7 +293,7 @@ const taskTools: Anthropic.Tool[] = [
 export const tools: Anthropic.Tool[] = [...baseTools, ...taskTools];
 // 任务工具的 schema，合并进基础工具的 TOOL_SCHEMAS。
 export const TOOL_SCHEMAS: Partial<Record<string, z.ZodObject>> = {
-  ...BASE_TOOL_SCHEMAS,
+  ...S02_TOOL_SCHEMAS,
   create_task: createTaskSchema,
   list_tasks: listTasksSchema,
   get_task: getTaskSchema,
@@ -379,7 +379,7 @@ export async function agentLoop(
   let system = getSystemPrompt(context);
   // 基础工具（无需 logger）+ 任务工具（闭包捕获 logger + 存储目录）。
   const handlers = {
-    ...BASE_TOOL_HANDLERS,
+    ...S05_BASE_HANDLERS,
     ...makeTaskHandlers(logger, tasksDir),
   };
 

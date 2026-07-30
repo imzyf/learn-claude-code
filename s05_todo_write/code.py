@@ -232,10 +232,8 @@ register_hook("Stop", summary_hook)
 #  agent_loop — same as s04 + nag reminder counter
 # ═══════════════════════════════════════════════════════════
 
-rounds_since_todo = 0
-
 def agent_loop(messages: list):
-    global rounds_since_todo
+    rounds_since_todo = 0
     while True:
         # s05: nag reminder — inject if model hasn't updated todos for 3 rounds
         if rounds_since_todo >= 3 and messages:
