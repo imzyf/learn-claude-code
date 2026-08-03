@@ -17,17 +17,14 @@ SYNC_DIRS=(
   s07_skill_loading
   s08_context_compact
   s09_memory
-  s10_system_prompt
-  s11_error_recovery
-  s12_task_system
-  s13_background_tasks
-  s14_cron_scheduler
-  s15_agent_teams
-  s16_team_protocols
-  s17_autonomous_agents
-  s18_worktree_isolation
-  s19_mcp_plugin
-  s20_comprehensive
+  # s10_task_system
+  # s11_background_tasks
+  # s12_cron_scheduler
+  # s13_agent_teams
+  # s14_mcp_plugin
+  # s15_integrated_harness
+  # s16_workflow_runtime
+  # s17_goal_loop
   skills
 )
 
@@ -39,7 +36,7 @@ SYNC_FILES=(
 
 # 从同步中排除的本地化文件（rsync --exclude）。
 EXCLUDE_GLOBS=(
-  '*.en.md'
+  'README.md'
   '*.ja.md'
   '*.en.svg'
   '*.ja.svg'
