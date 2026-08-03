@@ -1,34 +1,31 @@
 #!/usr/bin/env python3
 """
-s05: TodoWrite — add a planning tool on top of s04 hooks.
+s05_todo_write.py - TodoWrite
 
-  +---------+      +-------+      +------------------+
-  |  User   | ---> |  LLM  | ---> | TOOL_HANDLERS    |
-  | prompt  |      |       |      |  bash            |
-  +---------+      +---+---+      |  read_file       |
-                        ^         |  write_file      |
-                        | result  |  edit_file       |
-                        +---------+  glob            |
-                                      todo_write ← NEW
-                                   +------------------+
-                                        |
-                         in-memory current_todos
-                                        |
-                        if rounds_since_todo >= 3:
-                          inject <reminder>
+The model tracks its progress through a TodoManager. After three rounds
+without an update, the harness adds a reminder alongside the tool results.
 
-Changes from s04:
-  + todo_write tool + run_todo_write() implementation
-  + Nag reminder (inject reminder after 3 rounds without todo update)
-  + SYSTEM prompt includes "plan before execute" guidance
-  + rounds_since_todo counter in agent_loop
-  Loop unchanged: new tool auto-dispatches via TOOL_HANDLERS.
+    +----------+      +-------+      +--------------+
+    |   User   | ---> |  LLM  | ---> | Tools        |
+    |  prompt  |      |       |      | + todo_write |
+    +----------+      +---^---+      +------+-------+
+                          |                 | update
+                          |          +------v----------+
+                          |          | TodoManager     |
+                          |          | [ ] pending     |
+                          |          | [>] in progress |
+                          |          | [x] completed   |
+                          |          +------+----------+
+                          | tool_result     |
+                          +-----------------+
 
-Run: python s05_todo_write/code.py
-Needs: pip install anthropic python-dotenv + ANTHROPIC_API_KEY in .env
+              rounds_since_todo >= 3 -> add <reminder>
 """
 
-import ast, json, os, subprocess
+import ast
+import json
+import os
+import subprocess
 from pathlib import Path
 
 try:
@@ -47,7 +44,6 @@ if os.getenv("ANTHROPIC_BASE_URL"):
 WORKDIR = Path.cwd()
 client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
 MODEL = os.environ["MODEL_ID"]
-CURRENT_TODOS: list[dict] = []
 
 # s05 change: SYSTEM prompt adds planning guidance
 SYSTEM = (
@@ -57,15 +53,7 @@ SYSTEM = (
 )
 
 
-# ═══════════════════════════════════════════════════════════
-#  FROM s02-s04 (unchanged): Tool Implementations
-# ═══════════════════════════════════════════════════════════
-
-def safe_path(p: str) -> Path:
-    path = (WORKDIR / p).resolve()
-    if not path.is_relative_to(WORKDIR):
-        raise ValueError(f"Path escapes workspace: {p}")
-    return path
+# -- Tool implementations from s02-s04 --
 
 def run_bash(command: str) -> str:
     try:
@@ -78,7 +66,7 @@ def run_bash(command: str) -> str:
 
 def run_read(path: str, limit: int | None = None) -> str:
     try:
-        lines = safe_path(path).read_text().splitlines()
+        lines = (WORKDIR / path).resolve().read_text().splitlines()
         if limit and limit < len(lines):
             lines = lines[:limit] + [f"... ({len(lines) - limit} more lines)"]
         return "\n".join(lines)
@@ -87,7 +75,7 @@ def run_read(path: str, limit: int | None = None) -> str:
 
 def run_write(path: str, content: str) -> str:
     try:
-        file_path = safe_path(path)
+        file_path = (WORKDIR / path).resolve()
         file_path.parent.mkdir(parents=True, exist_ok=True)
         file_path.write_text(content)
         return f"Wrote {len(content)} bytes to {path}"
@@ -96,7 +84,7 @@ def run_write(path: str, content: str) -> str:
 
 def run_edit(path: str, old_text: str, new_text: str) -> str:
     try:
-        file_path = safe_path(path)
+        file_path = (WORKDIR / path).resolve()
         text = file_path.read_text()
         if old_text not in text:
             return f"Error: text not found in {path}"
@@ -117,42 +105,77 @@ def run_glob(pattern: str) -> str:
         return f"Error: {e}"
 
 
-# ═══════════════════════════════════════════════════════════
-#  NEW in s05: todo_write tool — plan only, no execution
-# ═══════════════════════════════════════════════════════════
+# -- New in s05: structured state the model updates --
 
-def _normalize_todos(todos):
-    if isinstance(todos, str):
-        try:
-            todos = json.loads(todos)
-        except json.JSONDecodeError:
+class TodoManager:
+    def __init__(self):
+        self.items: list[dict] = []
+
+    def update(self, todos: list | str) -> str:
+        if isinstance(todos, str):
             try:
-                todos = ast.literal_eval(todos)
-            except (SyntaxError, ValueError):
-                return None, "Error: todos must be a list or JSON array string"
-    if not isinstance(todos, list):
-        return None, "Error: todos must be a list"
-    for i, t in enumerate(todos):
-        if not isinstance(t, dict):
-            return None, f"Error: todos[{i}] must be an object"
-        if "content" not in t or "status" not in t:
-            return None, f"Error: todos[{i}] missing 'content' or 'status'"
-        if t["status"] not in ("pending", "in_progress", "completed"):
-            return None, f"Error: todos[{i}] has invalid status '{t['status']}'"
-    return todos, None
+                todos = json.loads(todos)
+            except json.JSONDecodeError:
+                try:
+                    todos = ast.literal_eval(todos)
+                except (SyntaxError, ValueError) as e:
+                    raise ValueError("todos must be a list or JSON array string") from e
 
-def run_todo_write(todos: list) -> str:
-    global CURRENT_TODOS
-    todos, error = _normalize_todos(todos)
-    if error:
-        return error
-    CURRENT_TODOS = todos
-    lines = ["\n\033[33m## Current Tasks\033[0m"]
-    for t in CURRENT_TODOS:
-        icon = {"pending": " ", "in_progress": "\033[36m▸\033[0m", "completed": "\033[32m✓\033[0m"}[t["status"]]
-        lines.append(f"  [{icon}] {t['content']}")
-    print("\n".join(lines))
-    return f"Updated {len(CURRENT_TODOS)} tasks"
+        if not isinstance(todos, list):
+            raise ValueError("todos must be a list")
+        if len(todos) > 20:
+            raise ValueError("Max 20 todos allowed")
+
+        validated = []
+        in_progress_count = 0
+        for index, todo in enumerate(todos):
+            if not isinstance(todo, dict):
+                raise ValueError(f"todos[{index}] must be an object")
+
+            content = str(todo.get("content", "")).strip()
+            status = str(todo.get("status", "pending")).lower()
+            if not content:
+                raise ValueError(f"todos[{index}] requires content")
+            if status not in ("pending", "in_progress", "completed"):
+                raise ValueError(f"todos[{index}] has invalid status '{status}'")
+            if status == "in_progress":
+                in_progress_count += 1
+            validated.append({"content": content, "status": status})
+
+        if in_progress_count > 1:
+            raise ValueError("Only one todo can be in_progress at a time")
+
+        self.items = validated
+        return self.render()
+
+    def render(self) -> str:
+        if not self.items:
+            return "No todos."
+
+        lines = []
+        for todo in self.items:
+            marker = {
+                "pending": "[ ]",
+                "in_progress": "[>]",
+                "completed": "[x]",
+            }[todo["status"]]
+            lines.append(f"{marker} {todo['content']}")
+
+        done = sum(todo["status"] == "completed" for todo in self.items)
+        lines.append(f"\n({done}/{len(self.items)} completed)")
+        return "\n".join(lines)
+
+
+TODO = TodoManager()
+
+
+def run_todo_write(todos: list | str) -> str:
+    try:
+        output = TODO.update(todos)
+    except ValueError as e:
+        return f"Error: {e}"
+    print(f"\n\033[33m## Current Tasks\033[0m\n{output}")
+    return output
 
 TOOLS = [
     {"name": "bash", "description": "Run a shell command.",
@@ -167,7 +190,7 @@ TOOLS = [
      "input_schema": {"type": "object", "properties": {"pattern": {"type": "string"}}, "required": ["pattern"]}},
     # s05: new tool
     {"name": "todo_write", "description": "Create and manage a task list for your current coding session.",
-     "input_schema": {"type": "object", "properties": {"todos": {"type": "array", "items": {"type": "object", "properties": {"content": {"type": "string"}, "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]}}, "required": ["content", "status"]}}}, "required": ["todos"]}},
+     "input_schema": {"type": "object", "properties": {"todos": {"type": "array", "maxItems": 20, "items": {"type": "object", "properties": {"content": {"type": "string", "minLength": 1}, "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]}}, "required": ["content", "status"]}}}, "required": ["todos"]}},
 ]
 
 TOOL_HANDLERS = {
@@ -176,9 +199,7 @@ TOOL_HANDLERS = {
 }
 
 
-# ═══════════════════════════════════════════════════════════
-#  FROM s04 (unchanged): Hook System
-# ═══════════════════════════════════════════════════════════
+# -- Hook system from s04 --
 
 HOOKS = {"UserPromptSubmit": [], "PreToolUse": [], "PostToolUse": [], "Stop": []}
 
@@ -192,21 +213,44 @@ def trigger_hooks(event: str, *args):
             return result
     return None
 
-# s04 hooks preserved
 DENY_LIST = ["rm -rf /", "sudo", "shutdown", "reboot", "mkfs", "dd if="]
+DESTRUCTIVE = ["rm ", "> /etc/", "chmod 777"]
 
 def permission_hook(block):
-    """PreToolUse: deny list check."""
+    """PreToolUse: s03 permission logic, registered as an s04 hook."""
     if block.name == "bash":
-        for p in DENY_LIST:
-            if p in block.input.get("command", ""):
-                print(f"\n\033[31m⛔ Blocked: '{p}'\033[0m")
-                return "Permission denied"
+        command = block.input.get("command", "")
+        for pattern in DENY_LIST:
+            if pattern in command:
+                print(f"\n\033[31m[blocked] '{pattern}'\033[0m")
+                return "Permission denied by deny list"
+        for keyword in DESTRUCTIVE:
+            if keyword in command:
+                print(f"\n\033[33m[permission] Potentially destructive command\033[0m")
+                print(f"   Tool: {block.name}({block.input})")
+                choice = input("   Allow? [y/N] ").strip().lower()
+                if choice not in ("y", "yes"):
+                    return "Permission denied by user"
+    if block.name in ("read_file", "write_file", "edit_file"):
+        path = block.input.get("path", "")
+        if not (WORKDIR / path).resolve().is_relative_to(WORKDIR):
+            print(f"\n\033[33m[permission] Access outside workspace\033[0m")
+            print(f"   Tool: {block.name}({block.input})")
+            choice = input("   Allow? [y/N] ").strip().lower()
+            if choice not in ("y", "yes"):
+                return "Permission denied by user"
     return None
 
 def log_hook(block):
-    """PreToolUse: log tool calls."""
-    print(f"\033[90m[HOOK] {block.name}\033[0m")
+    """PreToolUse: log every tool call."""
+    args_preview = str(list(block.input.values())[:2])[:60]
+    print(f"\033[90m[HOOK] {block.name}({args_preview})\033[0m")
+    return None
+
+def large_output_hook(block, output):
+    """PostToolUse: warn on large output."""
+    if len(str(output)) > 100000:
+        print(f"\033[33m[HOOK] Large output from {block.name}: {len(str(output))} chars\033[0m")
     return None
 
 def context_inject_hook(query: str):
@@ -225,22 +269,15 @@ def summary_hook(messages: list):
 register_hook("UserPromptSubmit", context_inject_hook)
 register_hook("PreToolUse", permission_hook)
 register_hook("PreToolUse", log_hook)
+register_hook("PostToolUse", large_output_hook)
 register_hook("Stop", summary_hook)
 
 
-# ═══════════════════════════════════════════════════════════
-#  agent_loop — same as s04 + nag reminder counter
-# ═══════════════════════════════════════════════════════════
+# -- Agent loop with the reminder counter --
 
 def agent_loop(messages: list):
     rounds_since_todo = 0
     while True:
-        # s05: nag reminder — inject if model hasn't updated todos for 3 rounds
-        if rounds_since_todo >= 3 and messages:
-            messages.append({"role": "user",
-                             "content": "<reminder>Update your todos.</reminder>"})
-            rounds_since_todo = 0
-
         response = client.messages.create(
             model=MODEL, system=SYSTEM, messages=messages,
             tools=TOOLS, max_tokens=8000,
@@ -254,8 +291,8 @@ def agent_loop(messages: list):
                 continue
             return
 
-        rounds_since_todo += 1
         results = []
+        used_todo = False
         for block in response.content:
             if block.type != "tool_use":
                 continue
@@ -267,23 +304,31 @@ def agent_loop(messages: list):
                 continue
 
             handler = TOOL_HANDLERS.get(block.name)
-            output = handler(**block.input) if handler else f"Unknown: {block.name}"
+            try:
+                output = handler(**block.input) if handler else f"Unknown: {block.name}"
+            except Exception as e:
+                output = f"Error: {e}"
 
             trigger_hooks("PostToolUse", block, output)
 
-            # s05: reset nag counter when todo_write is called
             if block.name == "todo_write":
-                rounds_since_todo = 0
+                used_todo = True
 
             results.append({"type": "tool_result", "tool_use_id": block.id,
-                            "content": output})
+                            "content": str(output)})
+
+        rounds_since_todo = 0 if used_todo else rounds_since_todo + 1
+        if rounds_since_todo >= 3:
+            results.append({"type": "text",
+                            "text": "<reminder>Update your todos.</reminder>"})
+            rounds_since_todo = 0
 
         messages.append({"role": "user", "content": results})
 
 
 if __name__ == "__main__":
-    print("s05: TodoWrite — plan before execute, nag if you forget")
-    print("Type a question, press Enter. Type q to quit.\n")
+    print("s05: TodoWrite - plan before execution")
+    print("Enter a question, press Enter to send. Type q to quit.\n")
 
     history = []
     while True:

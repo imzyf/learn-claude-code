@@ -1,19 +1,28 @@
 #!/usr/bin/env python3
 """
-s02: Tool Use — 在 s01 基础上新增 4 个工具 + 分发映射。
+s02_tool_use.py - Tools
 
-运行: python s02_tool_use/code.py
-需要: pip install anthropic python-dotenv + .env 中配置 ANTHROPIC_API_KEY
+The agent loop from s01 does not change. This lesson adds four tools
+and a dispatch map:
 
-本文件 = s01 的全部代码 + 以下新增:
-  + run_read / run_write / run_edit / run_glob 四个工具实现
-  + TOOL_HANDLERS 分发映射（替代 s01 中硬编码的 run_bash 调用）
-  + safe_path 路径安全校验
+    +----------+      +-------+      +--------------------------+
+    |   User   | ---> |  LLM  | ---> | Tool Dispatch            |
+    |  prompt  |      |       |      | bash       -> run_bash   |
+    +----------+      +---+---+      | read_file  -> run_read   |
+                          ^          | write_file -> run_write  |
+                          |          | edit_file  -> run_edit   |
+                          +----------+ glob       -> run_glob   |
+                          tool_result+--------------------------+
 
-循环本身（agent_loop）与 s01 完全一致。
+  + run_read / run_write / run_edit / run_glob
+  + TOOL_HANDLERS instead of a hard-coded run_bash call
+  + safe_path to keep file tools inside the workspace
+
+Key insight: the loop stays the same; only tool registration and dispatch grow.
 """
 
-import os, subprocess
+import os
+import subprocess
 from pathlib import Path
 
 try:
@@ -39,9 +48,7 @@ MODEL = os.environ["MODEL_ID"]
 SYSTEM = f"You are a coding agent at {WORKDIR}. Use tools to solve tasks. Act, don't explain."
 
 
-# ═══════════════════════════════════════════════════════════
-#  FROM s01 (unchanged)
-# ═══════════════════════════════════════════════════════════
+# -- From s01 (unchanged) --
 
 def run_bash(command: str) -> str:
     dangerous = ["rm -rf /", "sudo", "shutdown", "reboot", "> /dev/"]
@@ -59,9 +66,7 @@ def run_bash(command: str) -> str:
         return f"Error: {e}"
 
 
-# ═══════════════════════════════════════════════════════════
-#  NEW in s02: 4 个新工具
-# ═══════════════════════════════════════════════════════════
+# -- New in s02: four tools --
 
 def safe_path(p: str) -> Path:
     path = (WORKDIR / p).resolve()
@@ -114,9 +119,7 @@ def run_glob(pattern: str) -> str:
         return f"Error: {e}"
 
 
-# ═══════════════════════════════════════════════════════════
-#  NEW in s02: 工具定义（s01 只有一个 bash，现在扩展到 5 个）
-# ═══════════════════════════════════════════════════════════
+# -- New in s02: tool definitions (one tool in s01, five in s02) --
 
 TOOLS = [
     {"name": "bash", "description": "Run a shell command.",
@@ -131,9 +134,7 @@ TOOLS = [
      "input_schema": {"type": "object", "properties": {"pattern": {"type": "string"}}, "required": ["pattern"]}},
 ]
 
-# ═══════════════════════════════════════════════════════════
-#  NEW in s02: 工具分发映射（s01 是硬编码 run_bash，现在改为查表）
-# ═══════════════════════════════════════════════════════════
+# -- New in s02: dispatch map (replaces s01's hard-coded run_bash call) --
 
 TOOL_HANDLERS = {
     "bash": run_bash, "read_file": run_read, "write_file": run_write,
@@ -141,11 +142,9 @@ TOOL_HANDLERS = {
 }
 
 
-# ═══════════════════════════════════════════════════════════
-#  agent_loop — 与 s01 结构完全一致，只改了工具执行那部分
-#  s01: output = run_bash(block.input["command"])
-#  s02: output = TOOL_HANDLERS[block.name](**block.input)
-# ═══════════════════════════════════════════════════════════
+# -- The agent loop keeps the same shape as s01; only dispatch changes --
+# s01: output = run_bash(block.input["command"])
+# s02: output = TOOL_HANDLERS[block.name](**block.input)
 
 def agent_loop(messages: list):
     while True:
@@ -171,8 +170,8 @@ def agent_loop(messages: list):
 
 
 if __name__ == "__main__":
-    print("s02: Tool Use — 在 s01 基础上加了 4 个工具")
-    print("输入问题，回车发送。输入 q 退出。\n")
+    print("s02: Tool Use - four tools added to s01")
+    print("Enter a question, press Enter to send. Type q to quit.\n")
 
     history = []
     while True:

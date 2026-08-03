@@ -68,17 +68,37 @@ describe("normalizeTodos", () => {
 
 // ── runTodoWrite ──────────────────────────────────────────
 describe("runTodoWrite", () => {
-  it("reports how many tasks were stored", () => {
+  it("renders the stored list with a progress line", () => {
     expect(
       runTodoWrite(
-        [todo("a", "pending"), todo("b", "in_progress")],
+        [todo("a", "completed"), todo("b", "in_progress")],
         noopLogger,
       ),
-    ).toBe("Updated 2 tasks");
+    ).toBe("[x] a\n[>] b\n\n(1/2 completed)");
   });
 
   it("returns the error for invalid input", () => {
     expect(runTodoWrite("bad", noopLogger)).toMatch(/JSON array string/);
+  });
+
+  it("rejects blank content", () => {
+    expect(runTodoWrite([todo("   ", "pending")], noopLogger)).toBe(
+      "Error: todos[0] requires content",
+    );
+  });
+
+  it("rejects two todos in_progress at once", () => {
+    expect(
+      runTodoWrite(
+        [todo("a", "in_progress"), todo("b", "in_progress")],
+        noopLogger,
+      ),
+    ).toBe("Error: Only one todo can be in_progress at a time");
+  });
+
+  it("rejects more than 20 todos", () => {
+    const many = Array.from({ length: 21 }, (_, i) => todo(`t${i}`, "pending"));
+    expect(runTodoWrite(many, noopLogger)).toBe("Error: Max 20 todos allowed");
   });
 });
 

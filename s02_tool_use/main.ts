@@ -1,13 +1,24 @@
 /**
  * s02_tool_use/main.ts - 工具使用
  *
- * 在 s01 的循环基础上新增：
- *   + runRead / runWrite / runEdit / runGlob —— 四个新的工具实现
- *     （bash 工具直接复用 s01 导出的 runBash）
- *   + TOOL_HANDLERS 分发表（取代 s01 里写死的 runBash 调用）
- *   + safePath 工作区越界检查
+ * s01 的 agent 循环不变。这一节新增四个工具和一张分发表：
  *
- * 循环本身（agentLoop）和 s01 完全一样，内部唯一改变的一行是：
+ *     +----------+      +-------+      +--------------------------+
+ *     |   User   | ---> |  LLM  | ---> | Tool Dispatch            |
+ *     |  prompt  |      |       |      | bash       -> runBash    |
+ *     +----------+      +---+---+      | read_file  -> runRead    |
+ *                           ^          | write_file -> runWrite   |
+ *                           |          | edit_file  -> runEdit    |
+ *                           +----------+ glob       -> runGlob    |
+ *                           tool_result+--------------------------+
+ *
+ *   + runRead / runWrite / runEdit / runGlob
+ *     （bash 工具直接复用 s01 导出的 runBash）
+ *   + TOOL_HANDLERS 分发表，取代 s01 里写死的 runBash 调用
+ *   + safePath 把文件工具限制在工作区内
+ *
+ * 关键点：循环本身不变，长出来的只有 tool 注册和 dispatch。
+ * agentLoop 内部唯一改变的一行是：
  *   s01: output = runBash(input.command)
  *   s02: output = TOOL_HANDLERS[block.name](input)
  *
@@ -240,7 +251,7 @@ if (import.meta.main) {
   const logger = createLogger(import.meta.dirname);
   logger.config({ model: MODEL_ID, system: SYSTEM, tools });
 
-  print("s02: Tool Use — s01 plus four new tools", "cyan");
+  print("s02: Tool Use - four tools added to s01", "cyan");
   print("输入问题，回车发送。输入 q 退出。\n", "green");
 
   const rl = readline.createInterface({

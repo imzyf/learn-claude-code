@@ -7,13 +7,17 @@
  *     关卡 2：规则匹配（是否写到工作区外？是否是破坏性命令？）
  *     关卡 3：用户批准（暂停并等待确认）
  *
- *     +-------+    +--------+    +--------+    +--------+    +------+
- *     | Tool  | -> | Gate 1 | -> | Gate 2 | -> | Gate 3 | -> | Exec |
- *     | call  |    | deny?  |    | match? |    | allow? |    |      |
- *     +-------+    +--------+    +--------+    +--------+    +------+
- *          |            |             |             |
- *          v            v             v             v
- *       (normal)     (blocked)    (ask user)   (user says no?)
+ *     +----------+      +-------+      +--------------+      +---------------+
+ *     |   User   | ---> |  LLM  | ---> | Permission   | ---> | Tool Dispatch |
+ *     |  prompt  |      |       |      | 1. deny list |      | execute       |
+ *     +----------+      +---+---+      | 2. rules     |      +-------+-------+
+ *                           ^          | 3. approval  |              |
+ *                           |          +------+-------+              |
+ *                           |                 | deny                 |
+ *                           |                 v                      v
+ *                           |          +-------------------------------+
+ *                           +----------+ tool_result: denied or output |
+ *                                      +-------------------------------+
  *
  * agent 循环里只加了一行：
  *
@@ -226,7 +230,7 @@ export function makeConfirm(
   logger: SessionLogger,
 ): Confirm {
   return async function confirmWithUser(call, warning) {
-    print(`\n⚠  ${warning}`, "yellow");
+    print(`\n[permission] ${warning}`, "yellow");
     print(`   Tool: ${call.name}(${JSON.stringify(call.input)})`);
     let choice: string;
     try {
@@ -266,7 +270,7 @@ export async function checkPermission(
   if (block.name === "bash") {
     const reason = checkDenyList((block.input as any).command ?? "");
     if (reason) {
-      print(`\n⛔ ${reason}`, "red");
+      print(`\n[blocked] ${reason}`, "red");
       logPermission(logger, block.name, block.input, reason, "deny");
       return false;
     }

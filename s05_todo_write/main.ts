@@ -1,22 +1,24 @@
 /**
  * s05_todo_write/main.ts - TodoWrite
  *
- * 在 s04 hooks 基础上加一个规划工具 todo_write：
+ * 在 s04 hooks 基础上加一个规划工具 todo_write：模型通过 TodoManager
+ * 记录自己的进度，连续 3 轮没更新就补一条提醒。
  *
- *   +---------+      +-------+      +------------------+
- *   |  User   | ---> |  LLM  | ---> | TOOL_HANDLERS    |
- *   | prompt  |      |       |      |  bash            |
- *   +---------+      +---+---+      |  read_file       |
- *                        ^          |  write_file      |
- *                        | result   |  edit_file       |
- *                        +----------+  glob            |
- *                                   |  todo_write ← NEW|
- *                                   +------------------+
- *                                        |
- *                          in-memory currentTodos
- *                                        |
- *                         if roundsSinceTodo >= 3:
- *                           inject <reminder>
+ *     +----------+      +-------+      +--------------+
+ *     |   User   | ---> |  LLM  | ---> | Tools        |
+ *     |  prompt  |      |       |      | + todo_write |
+ *     +----------+      +---^---+      +------+-------+
+ *                           |                 | update
+ *                           |          +------v----------+
+ *                           |          | TodoManager     |
+ *                           |          | [ ] pending     |
+ *                           |          | [>] in progress |
+ *                           |          | [x] completed   |
+ *                           |          +------+----------+
+ *                           | tool_result     |
+ *                           +-----------------+
+ *
+ *               roundsSinceTodo >= 3 -> inject <reminder>
  *
  * 相比 s04 的变化：
  *   工具层：复用 s02 的 tools / TOOL_SCHEMAS，只 append 一个 todo_write
@@ -30,9 +32,10 @@
  *   - permissionHook 精简为只剩拒绝名单（复用 s03 的 checkDenyList），
  *     不再有 s04 的 Allow? 确认关卡——把注意力留给 todo_write 本身。
  *
- * 一处 TS 特有的差异：Python 版本在 _normalize_todos 里手动校验 todos；
- * 这里改用 zod 的 safeParse 做条目校验，normalizeTodos 只负责解开偶尔
- * 出现的 JSON 字符串形式。
+ * 一处 TS 特有的差异：Python 版本在 TodoManager.update 里手动校验条目结构；
+ * 这里把结构校验交给 zod 的 safeParse（normalizeTodos），TodoManager 只做
+ * zod 表达不了的那几条规则：20 条上限、content 去空白后非空、同时只能有
+ * 一个 in_progress。
  *
  * 基于 s04（hooks）构建。Usage:
  *
@@ -50,6 +53,7 @@ import { printProse, textOf, zodTool } from "../lib/tools";
 // 四个文件工具也取 s02 的版本，它们带 safePath（理由见下面的 BASE_HANDLERS）。
 import {
   tools as baseTools,
+  errMsg,
   type Handlers,
   runEdit,
   runGlob,
@@ -86,11 +90,11 @@ const todoItem = z.object({
 });
 type Todo = z.infer<typeof todoItem>;
 
-// todo 清单存在内存里，跨轮持续（Python 版是模块级 _current_todos）。
-let currentTodos: Todo[] = [];
+const MAX_TODOS = 20;
 
 // 模型偶尔把 `todos` 当成 JSON 字符串发来（不是数组）——input schema 两者都收，
-// 这里解开并校验。（Python 的 _normalize_todos 还会试 ast.literal_eval，JSON 足够了。）
+// 这里解开并校验结构。（Python 版还会试 ast.literal_eval，JSON 足够了。）
+// 错误文案不带 `Error: ` 前缀，由 runTodoWrite 统一加，和 Python 抛 ValueError 一致。
 export function normalizeTodos(todos: unknown): {
   todos?: Todo[];
   error?: string;
@@ -99,17 +103,59 @@ export function normalizeTodos(todos: unknown): {
     try {
       todos = JSON.parse(todos);
     } catch {
-      return { error: "Error: todos must be a list or JSON array string" };
+      return { error: "todos must be a list or JSON array string" };
     }
   }
   const parsed = z.array(todoItem).safeParse(todos);
   if (!parsed.success) {
-    return {
-      error: "Error: todos must be a list of {content, status} objects",
-    };
+    return { error: "todos must be a list of {content, status} objects" };
   }
   return { todos: parsed.data };
 }
+
+// todo 清单是模型自己维护的结构化状态，跨轮存在内存里。
+// 校验失败抛 Error，由 runTodoWrite 转成一条 tool_result 文案回给模型。
+export class TodoManager {
+  items: Todo[] = [];
+
+  update(todosInput: unknown): string {
+    const { todos, error } = normalizeTodos(todosInput);
+    if (error || !todos) throw new Error(error ?? "invalid todos");
+    if (todos.length > MAX_TODOS) {
+      throw new Error(`Max ${MAX_TODOS} todos allowed`);
+    }
+
+    const validated: Todo[] = [];
+    let inProgress = 0;
+    todos.forEach((todo, index) => {
+      const content = todo.content.trim();
+      if (!content) throw new Error(`todos[${index}] requires content`);
+      if (todo.status === "in_progress") inProgress += 1;
+      validated.push({ content, status: todo.status });
+    });
+    if (inProgress > 1) {
+      throw new Error("Only one todo can be in_progress at a time");
+    }
+
+    this.items = validated;
+    return this.render();
+  }
+
+  render(): string {
+    if (!this.items.length) return "No todos.";
+    const markers: Record<Todo["status"], string> = {
+      pending: "[ ]",
+      in_progress: "[>]",
+      completed: "[x]",
+    };
+    const lines = this.items.map((t) => `${markers[t.status]} ${t.content}`);
+    const done = this.items.filter((t) => t.status === "completed").length;
+    lines.push(`\n(${done}/${this.items.length} completed)`);
+    return lines.join("\n");
+  }
+}
+
+export const TODO = new TodoManager();
 
 // 把 todo 清单按 `[status] content` 逐行写进 transcript（纯文本、无 ANSI）。
 export function logTodos(logger: SessionLogger, todos: readonly Todo[]): void {
@@ -121,27 +167,33 @@ export function runTodoWrite(
   todosInput: unknown,
   logger: SessionLogger,
 ): string {
-  const { todos, error } = normalizeTodos(todosInput);
-  if (error || !todos) return error ?? "Error: invalid todos";
-  currentTodos = todos;
-  const icons: Record<Todo["status"], string> = {
-    pending: " ",
-    in_progress: colorize("▸", "cyan"),
-    completed: colorize("✓", "green"),
-  };
-  const lines = [`\n${colorize("## Current Tasks", "yellow")}`];
-  for (const t of currentTodos) {
-    lines.push(`  [${icons[t.status]}] ${t.content}`);
+  let output: string;
+  try {
+    output = TODO.update(todosInput);
+  } catch (e) {
+    return `Error: ${errMsg(e)}`;
   }
-  print(lines.join("\n"));
-  // 终端看彩色清单；transcript 另存一份纯文本条目（toolResult 只有 "Updated N tasks"）。
-  logTodos(logger, currentTodos);
-  return `Updated ${currentTodos.length} tasks`;
+  print(`\n${colorize("## Current Tasks", "yellow")}\n${output}`);
+  // 渲染结果同时回给模型；transcript 另存一份带 status 名的条目清单。
+  logTodos(logger, TODO.items);
+  return output;
 }
 
+// dispatch 处 parse 用的 schema：只管结构，不带条数/非空限制。越界输入要走
+// TodoManager 返回 Error 文案，而不是在 schema.parse 处抛异常打断循环。
 const todoWriteSchema = z.object({
   // string 一支：兼容模型偶尔把数组发成 JSON 字符串，schema.parse 才不会抛错（normalizeTodos 负责解开）。
   todos: z.union([z.array(todoItem), z.string()]),
+});
+
+// 发给模型的 tool 声明：带上 20 条上限和 content 非空（JSON Schema 里的
+// maxItems / minLength），和 Python 版的 input_schema 对齐。这只是给模型的
+// 约束提示，真正的兜底仍在 TodoManager。
+const todoWriteToolSchema = z.object({
+  todos: z.union([
+    z.array(todoItem.extend({ content: z.string().min(1) })).max(MAX_TODOS),
+    z.string(),
+  ]),
 });
 
 // ═══════════════════════════════════════════════════════════
@@ -167,7 +219,7 @@ export const tools: Anthropic.Tool[] = [
   zodTool(
     "todo_write",
     "Create and manage a task list for your current coding session.",
-    todoWriteSchema,
+    todoWriteToolSchema,
   ),
 ];
 
@@ -203,7 +255,7 @@ export function permissionHook(
     const reason = checkDenyList((call.input as any).command ?? "");
     if (reason) {
       logger.console(
-        `[HOOK] PreToolUse(permissionHook): ⛔ Blocked: '${reason}'`,
+        `[HOOK] PreToolUse(permissionHook): [blocked] '${reason}'`,
         "red",
       );
       return reason;
@@ -351,7 +403,7 @@ if (import.meta.main) {
     process.exit(0);
   });
 
-  print("s05: TodoWrite — plan before execute, nag if you forget", "cyan");
+  print("s05: TodoWrite - plan before execution", "cyan");
   print("输入问题，回车发送。输入 q 退出。\n", "green");
 
   const history: Anthropic.MessageParam[] = [];

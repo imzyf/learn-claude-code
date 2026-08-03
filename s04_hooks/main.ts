@@ -1,39 +1,23 @@
 /**
  * s04_hooks/main.ts - Hooks
  *
- * 把扩展逻辑从循环里搬出来，交给 hooks 管理：
+ * 把扩展逻辑从循环里搬出来，交给 hooks 管理：hook 在 agent 循环的固定位置
+ * 被回调触发。
  *
- *   User types query
- *        │
- *        ▼
- *   ┌──────────────────┐
- *   │ UserPromptSubmit │ ── hooks.trigger() before LLM
- *   └────────┬─────────┘
- *            ▼
- *   ┌────────────┐     ┌──────────────────────────────┐
- *   │  messages  │────▶│ LLM (stop_reason=tool_use?)   │
- *   └────────────┘     │   No ──▶ Stop hooks ──▶ exit  │
- *                      │   Yes ──▶ tool call ────────┐ │
- *                      └─────────────────────────────┘ │
- *                                                      ▼
- *                                          ┌──────────────────┐
- *                                          │ hooks.trigger()   │
- *                                          │  PreToolUse:      │
- *                                          │   permissionHook  │
- *                                          │   logHook         │
- *                                          └───────┬──────────┘
- *                                                  │ (not blocked)
- *                                          ┌───────▼──────────┐
- *                                          │ TOOL_HANDLERS[x]  │
- *                                          └───────┬──────────┘
- *                                                  │
- *                                          ┌───────▼──────────┐
- *                                          │ hooks.trigger()   │
- *                                          │  PostToolUse:     │
- *                                          │   largeOutput     │
- *                                          └───────┬──────────┘
- *                                                  │
- *                                          results ──▶ back to messages
+ *     User prompt
+ *          |
+ *          v
+ *     UserPromptSubmit
+ *          |
+ *          v
+ *     +----------+      +-------+      +------------+      +-------+
+ *     | messages | ---> |  LLM  | ---> | PreToolUse | ---> | Tool  |
+ *     +----------+      +---+---+      | permission |      +---+---+
+ *          ^                | stop     | log        |          |
+ *          |                v          +------------+          v
+ *          |            Stop hook                         PostToolUse
+ *          |                                               |
+ *          +---------------- tool_result ------------------+
  *
  * 相比 s03 的变化：
  *   + hook 实例 createHooks()（注册表 + logger 收进闭包，经 deps 传递）
@@ -120,7 +104,7 @@ export function createHooks(logger: SessionLogger): HookSystem {
         const result = await callback(logger, ...args);
         // 执行记录集中在这里，而不是散落进每个 hook。
         logHookResult(logger, event, callback.name, args, result);
-        if (result != null) return result; // teaching shortcut: block this tool call
+        if (result != null) return result; // hook 返回非 null 即拦截这次 tool call
       }
       return null;
     },
@@ -197,7 +181,7 @@ export function makePermissionHook(confirm: Confirm): Hook {
       for (const pattern of DENY_LIST) {
         if (command.includes(pattern)) {
           logger.console(
-            `[HOOK] PreToolUse(permissionHook): ⛔ Blocked: '${pattern}'`,
+            `[HOOK] PreToolUse(permissionHook): [blocked] '${pattern}'`,
             "red",
           );
           return "Permission denied by deny list";
@@ -241,7 +225,7 @@ export function largeOutputHook(
 ): null {
   if (output.length > 100_000) {
     logger.console(
-      `[HOOK] PostToolUse(largeOutputHook): ⚠ Large output from ${call.name}: ${output.length} chars`,
+      `[HOOK] PostToolUse(largeOutputHook): Large output from ${call.name}: ${output.length} chars`,
       "yellow",
     );
   }
@@ -397,7 +381,7 @@ if (import.meta.main) {
 
   const hooks = loadHooks(logger, confirm);
 
-  print("s04: Hooks — extension logic on hooks, loop stays clean", "cyan");
+  print("s04: Hooks - extension logic on hooks, loop stays clean", "cyan");
   print("输入问题，回车发送。输入 q 退出。\n", "green");
 
   const history: Anthropic.MessageParam[] = [];

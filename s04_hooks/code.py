@@ -1,54 +1,27 @@
 #!/usr/bin/env python3
 """
-s04: Hooks — move extension logic out of the loop, onto hooks.
+s04_hooks.py - Hooks
 
-  User types query
-       │
-       ▼
-  ┌──────────────────┐
-  │ UserPromptSubmit │ ── trigger_hooks() before LLM
-  └────────┬─────────┘
-           ▼
-  ┌────────────┐     ┌─────────────────────────────┐
-  │  messages  │────▶│  LLM (stop_reason=tool_use?)│
-  └────────────┘     │   No ──▶ Stop hooks ──▶ exit │
-                     │   Yes ──▶ tool_use block ──┐ │
-                     └────────────────────────────┘ │
-                                                    ▼
-                                          ┌──────────────────┐
-                                          │ trigger_hooks()   │
-                                          │  PreToolUse:      │
-                                          │   permission_hook │
-                                          │   log_hook        │
-                                          └───────┬──────────┘
-                                                  │ (not blocked)
-                                          ┌───────▼──────────┐
-                                          │ TOOL_HANDLERS[x]  │
-                                          └───────┬──────────┘
-                                                  │
-                                          ┌───────▼──────────┐
-                                          │ trigger_hooks()   │
-                                          │  PostToolUse:     │
-                                          │   large_output    │
-                                          └───────┬──────────┘
-                                                  │
-                                          results ──▶ back to messages
+Hooks run callbacks at fixed points in the agent loop:
 
-Changes from s03:
-  + HOOKS registry (event -> list of callbacks)
-  + register_hook() / trigger_hooks()
-  + context_inject_hook (UserPromptSubmit)
-  + permission_hook, log_hook (PreToolUse)
-  + large_output_hook (PostToolUse)
-  + summary_hook (Stop)
-  - check_permission() removed from loop body
-    (logic moved into permission_hook, triggered via PreToolUse)
-
-Run: python s04_hooks/code.py
-Needs: pip install anthropic python-dotenv + ANTHROPIC_API_KEY in .env
+    User prompt
+         |
+         v
+    UserPromptSubmit
+         |
+         v
+    +----------+      +-------+      +------------+      +-------+
+    | messages | ---> |  LLM  | ---> | PreToolUse | ---> | Tool  |
+    +----------+      +---+---+      | permission |      +---+---+
+         ^                | stop     | log        |          |
+         |                v          +------------+          v
+         |            Stop hook                         PostToolUse
+         |                                               |
+         +---------------- tool_result ------------------+
 """
 
-import os, subprocess
+import os
+import subprocess
 from pathlib import Path
 
 try:
@@ -74,9 +47,7 @@ MODEL = os.environ["MODEL_ID"]
 SYSTEM = f"You are a coding agent at {WORKDIR}. Use tools to solve tasks. Act, don't explain."
 
 
-# ═══════════════════════════════════════════════════════════
-#  FROM s02-s03 : Tool Implementations
-# ═══════════════════════════════════════════════════════════
+# -- From s02-s03: tool implementations --
 
 def run_bash(command: str) -> str:
     try:
@@ -147,9 +118,7 @@ TOOL_HANDLERS = {
 }
 
 
-# ═══════════════════════════════════════════════════════════
-#  NEW in s04: Hook System (s03 permission logic now via hooks)
-# ═══════════════════════════════════════════════════════════
+# -- New in s04: hook system (s03 permission logic now uses hooks) --
 
 HOOKS = {"UserPromptSubmit": [], "PreToolUse": [], "PostToolUse": [], "Stop": []}
 
@@ -159,7 +128,7 @@ def register_hook(event: str, callback):
 def trigger_hooks(event: str, *args):
     for callback in HOOKS[event]:
         result = callback(*args)
-        if result is not None:  # teaching shortcut: block this tool call
+        if result is not None:  # A hook result blocks this tool call.
             return result
     return None
 
@@ -173,11 +142,11 @@ def permission_hook(block):
     if block.name == "bash":
         for pattern in DENY_LIST:
             if pattern in block.input.get("command", ""):
-                print(f"\n\033[31m⛔ Blocked: '{pattern}'\033[0m")
+                print(f"\n\033[31m[blocked] '{pattern}'\033[0m")
                 return "Permission denied by deny list"
         for kw in DESTRUCTIVE:
             if kw in block.input.get("command", ""):
-                print(f"\n\033[33m⚠  Potentially destructive command\033[0m")
+                print(f"\n\033[33m[permission] Potentially destructive command\033[0m")
                 print(f"   Tool: {block.name}({block.input})")
                 choice = input("   Allow? [y/N] ").strip().lower()
                 if choice not in ("y", "yes"):
@@ -185,7 +154,7 @@ def permission_hook(block):
     if block.name in ("read_file", "write_file", "edit_file"):
         path = block.input.get("path", "")
         if not (WORKDIR / path).resolve().is_relative_to(WORKDIR):
-            print(f"\n\033[33m⚠  Access outside workspace\033[0m")
+            print(f"\n\033[33m[permission] Access outside workspace\033[0m")
             print(f"   Tool: {block.name}({block.input})")
             choice = input("   Allow? [y/N] ").strip().lower()
             if choice not in ("y", "yes"):
@@ -201,7 +170,7 @@ def log_hook(block):
 def large_output_hook(block, output):
     """PostToolUse: warn on large output."""
     if len(str(output)) > 100000:
-        print(f"\033[33m[HOOK] ⚠ Large output from {block.name}: {len(str(output))} chars\033[0m")
+        print(f"\033[33m[HOOK] Large output from {block.name}: {len(str(output))} chars\033[0m")
     return None
 
 # UserPromptSubmit hook: log user input before it reaches the LLM
@@ -224,11 +193,9 @@ register_hook("PostToolUse", large_output_hook)
 register_hook("Stop", summary_hook)
 
 
-# ═══════════════════════════════════════════════════════════
-#  agent_loop — same structure as s03, but no hard-coded check
-#  s03: if not check_permission(block): ...
-#  s04: if trigger_hooks("PreToolUse", block): ...
-# ═══════════════════════════════════════════════════════════
+# -- Agent loop: same structure as s03, but no hard-coded check --
+# s03: if not check_permission(block): ...
+# s04: if trigger_hooks("PreToolUse", block): ...
 
 def agent_loop(messages: list):
     while True:
@@ -268,8 +235,8 @@ def agent_loop(messages: list):
 
 
 if __name__ == "__main__":
-    print("s04: Hooks — extension logic on hooks, loop stays clean")
-    print("Type a question, press Enter. Type q to quit.\n")
+    print("s04: Hooks - extension logic on hooks, loop stays clean")
+    print("Enter a question, press Enter to send. Type q to quit.\n")
 
     history = []
     while True:
