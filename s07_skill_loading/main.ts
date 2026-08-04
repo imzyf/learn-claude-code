@@ -1,33 +1,30 @@
 /**
  * s07_skill_loading/main.ts - Skill 加载
  *
- * 两级按需知识注入：
+ * SYSTEM prompt 里只放技能目录（名称 + 一行描述），完整的 SKILL.md 要等模型
+ * 调用 load_skill 才进上下文：
  *
- *   第一层（便宜，始终存在）：
- *     SYSTEM prompt 里包含 skill 名称 + 一行描述（约 100 tokens/skill）
- *     "Skills available: agent-builder, code-review, mcp-builder, pdf"
+ *   skills/                    启动时
+ *   +------------------+       +------------------+
+ *   | code-review/     | ----> | scanSkills       |
+ *   |   SKILL.md       |       | name + 描述      |
+ *   | pdf/             |       +--------+---------+
+ *   |   SKILL.md       |                |
+ *   +------------------+                v
+ *                              SYSTEM 里的技能目录
  *
- *   第二层（昂贵，按需）：
- *     Agent 调用 load_skill("code-review") → 完整 SKILL.md 内容
- *     通过 tool_result 注入（约 2000 tokens/skill）
- *
- *   skills/
- *     agent-builder/SKILL.md
- *     code-review/SKILL.md
- *     mcp-builder/SKILL.md
- *     pdf/SKILL.md
+ *   LLM -- load_skill(name) --> 完整 SKILL.md
+ *    ^                              |
+ *    +--------- tool_result --------+
  *
  * 相比 s06 的变化：
- *   工具层：parent 复用 s06 的 tools / TOOL_SCHEMAS / TOOL_HANDLERS（base + todo + task），
- *          在其上只追加 load_skill；subagent 由 s06 的 spawnSubagent 内部只拿 base 工具。
+ *   工具层：s02 的基础工具层 + 一个 load_skill，和 code.py 一致；s05 的 todo_write、
+ *          s06 的 task 都不在本章的工具表里。dispatch 复用 s05 的 BASE_HANDLERS。
  *   Hook 层：hook 实例与默认 hook 全部复用 s05（它又复用 s04），s07 不再重复定义。
- *   Subagent：直接复用 s06 的 spawnSubagent（全新 messages[]、只回摘要、无法递归）。
- *   Nag 机制：nagIfStale / bumpNagCounter / resetNagCounter 全部复用 s05。
- *   + buildSystem() —— 启动时扫描 skills/ 目录，把清单注入 SYSTEM
+ *   + scanSkills() / buildSystem() —— 启动时扫描 skills/ 目录，把目录注入 SYSTEM
  *   + loadSkill(name) —— 通过 tool_result 返回完整 SKILL.md 内容
  *   + SKILLS_DIR 配置
- *   agentLoop 与 s06 几乎相同，只有两点不同：system 来自 deps（清单是动态的），
- *   工具表多了 load_skill。
+ *   agentLoop 与 s06 的区别只有一处：system 来自 deps，因为目录是启动时扫出来的。
  *
  * frontmatter 解析：和 Python 版一样用 YAML 库（Python 是 PyYAML，这里是 `yaml`），
  * 才能正确处理 `description: |` 这类多行块标量——手写的逐行 `key: value` 解析
@@ -48,31 +45,25 @@ import { createLogger, type SessionLogger } from "../lib/logger";
 import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
 import { colorize, print } from "../lib/terminal";
 import { printProse, textOf, zodTool } from "../lib/tools";
+// 来自 s02：基础工具层（bash + 四个文件工具）。
+import {
+  tools as baseTools,
+  TOOL_SCHEMAS as S02_TOOL_SCHEMAS,
+} from "../s02_tool_use/main";
 import type { Deps as S04Deps } from "../s04_hooks/main";
-// 来自 s05：hook 装配（loadHooks = createHooks + registerDefaultHooks）+ nag 机制。
-import {
-  bumpNagCounter,
-  loadHooks,
-  nagIfStale,
-  resetNagCounter,
-} from "../s05_todo_write/main";
-// 来自 s06：subagent（全新 messages[]、只回摘要）+ 装配好的工具三张表
-// （base + todo + task）——s07 只在其上追加 load_skill。
-import {
-  TOOL_HANDLERS as S06_TOOL_HANDLERS,
-  TOOL_SCHEMAS as S06_TOOL_SCHEMAS,
-  tools as s06Tools,
-} from "../s06_subagent/main";
+// 来自 s05：hook 装配（loadHooks = createHooks + registerDefaultHooks）+ 基础
+// dispatch 表（BASE_HANDLERS）——单一出处在 s05。
+import { BASE_HANDLERS, loadHooks } from "../s05_todo_write/main";
 
 // s07 导出自己拥有的东西：技能层 + agentLoop + Deps，
-// 外加装配好的三张工具表（base + todo + task + load_skill），供 s08 继续叠加。
-// 复用来的符号（spawnSubagent / 各 hook / nag）由测试各自从源头 import。
+// 外加装配好的三张工具表（base + load_skill），供 s08 继续叠加。
+// 复用来的符号（各 hook / 基础 handler）由测试各自从源头 import。
 
 const WORKDIR = process.cwd();
 export const SKILLS_DIR = path.join(WORKDIR, "skills");
 
 // ═══════════════════════════════════════════════════════════
-//  s07 新增：技能目录扫描 + 带清单的 SYSTEM
+//  s07 新增：技能目录扫描 + 带目录的 SYSTEM
 // ═══════════════════════════════════════════════════════════
 
 export type Skill = { name: string; description: string; content: string };
@@ -114,33 +105,44 @@ export function scanSkills(dir: string): SkillRegistry {
     const manifest = path.join(dir, entry.name, "SKILL.md");
     if (!fs.existsSync(manifest)) continue;
     const raw = fs.readFileSync(manifest, "utf8");
-    const { meta } = parseFrontmatter(raw);
-    const name = meta.name ?? entry.name;
-    // 描述优先取 frontmatter 的 description，缺省则退回正文首行（去掉开头的 # 号）
-    const description =
-      meta.description ?? (raw.split("\n")[0] ?? "").replace(/^#+/, "").trim();
+    const { meta, body } = parseFrontmatter(raw);
+    const name = (meta.name ?? entry.name).trim();
+    // 描述优先取 frontmatter 的 description，缺省则退回正文首行；两种来源都压成
+    // 单行（去掉开头的 # 号、合并空白），目录里每个技能只占一行。
+    const description = collapse(meta.description ?? body.split("\n")[0] ?? "");
     registry[name] = { name, description, content: raw };
   }
   return registry;
+}
+
+// 去掉开头的 # 与空格，再把所有空白折成单个空格：多行块标量的 description
+// 也能塞进目录的一行里。
+function collapse(text: string): string {
+  return text
+    .replace(/^[#\s]+/, "")
+    .split(/\s+/)
+    .join(" ")
+    .trim();
 }
 
 // 列出所有技能（名称 + 一行描述）。
 export function listSkills(registry: SkillRegistry): string {
   const skills = Object.values(registry);
   if (!skills.length) return "(no skills found)";
-  return skills.map((s) => `- **${s.name}**: ${s.description}`).join("\n");
+  return skills.map((s) => `- ${s.name}: ${s.description}`).join("\n");
 }
 
-// s07：SYSTEM 里带上技能清单（便宜——只有名称 + 描述）。
+// s07：SYSTEM 里带上技能目录（便宜——只有名称 + 描述）。
 export function buildSystem(registry: SkillRegistry): string {
   return (
-    `You are a coding agent at ${WORKDIR}. ` +
-    `Skills available:\n${listSkills(registry)}\n` +
-    "Use load_skill to get full details when needed."
+    `You are a coding agent at ${WORKDIR}. Use tools to solve tasks. ` +
+    "Act, don't explain.\n\n" +
+    `Skills available:\n${listSkills(registry)}\n\n` +
+    "Use load_skill to read the full instructions when a skill applies."
   );
 }
 
-// 入口层 helper：扫描 + 把技能清单单独记进 transcript，返回 registry。
+// 入口层 helper：扫描 + 把技能目录单独记进 transcript，返回 registry。
 // scanSkills 保持纯净，副作用（日志）留在这层，s07/s08 入口复用。
 export function loadSkills(dir: string, logger: SessionLogger): SkillRegistry {
   const registry = scanSkills(dir);
@@ -149,10 +151,12 @@ export function loadSkills(dir: string, logger: SessionLogger): SkillRegistry {
 }
 
 // 加载技能完整内容。经 registry 查表——不做路径拼接，杜绝目录穿越。
+// 查不到时把可选名字一并回给模型，它下一轮就能改用正确的名字。
 export function loadSkill(registry: SkillRegistry, name: string): string {
   const skill = registry[name];
-  if (!skill) return `Skill not found: ${name}`;
-  return skill.content;
+  if (skill) return skill.content;
+  const available = Object.keys(registry).join(", ") || "none";
+  return `Error: Unknown skill '${name}'. Available: ${available}`;
 }
 
 // agentLoop 需要的完整依赖：基础 Deps + 技能表 + 本轮 system prompt。
@@ -183,41 +187,40 @@ export function runLoadSkill(name: string, deps: Deps): string {
 }
 
 // ═══════════════════════════════════════════════════════════
-//  工具装配：parent = s06（base + todo + task）+ load_skill
-//  三张表都在 s06 之上用展开语法追加，调用点（agentLoop）不用改。
-//  subagent 的工具由 s06 的 spawnSubagent 内部持有（只有 base，不能递归）。
+//  工具装配：s02 的基础工具层 + 一个 load_skill
+//  三张表都用展开语法在基础之上追加，调用点（agentLoop）不用改。
 // ═══════════════════════════════════════════════════════════
 
 const loadSkillSchema = z.object({ name: z.string() });
 
 export const tools: Anthropic.Tool[] = [
-  ...s06Tools,
-  // s07 新增：load_skill（清单已在 SYSTEM 里，这里加载完整内容）
+  ...baseTools,
+  // s07 新增：load_skill（目录已在 SYSTEM 里，这里加载完整内容）
   zodTool(
     "load_skill",
-    "Load the full content of a skill by name.",
+    "Load the full SKILL.md content by skill name.",
     loadSkillSchema,
   ),
 ];
 
 export const TOOL_SCHEMAS: Partial<Record<string, z.ZodObject>> = {
-  ...S06_TOOL_SCHEMAS,
+  ...S02_TOOL_SCHEMAS,
   load_skill: loadSkillSchema,
 };
 
-// s06 的 handler 收 S04Deps，放进 Deps 表没问题——参数逆变：收窄依赖的函数
-// 能接受更宽的实参。第二参 deps 让 load_skill 拿到 skills/logger。
+// 基础 handler 是 (input)=>string，忽略第二参；load_skill 靠它拿到 skills/logger。
+// handler 类型留着 Promise 分支，供 s08 在这张表上追加异步工具。
 export const TOOL_HANDLERS: Partial<
   Record<string, (input: any, deps: Deps) => string | Promise<string>>
 > = {
-  ...S06_TOOL_HANDLERS,
+  ...BASE_HANDLERS,
   // load_skill 走 runLoadSkill：查表 + 专属 [skill] logger。
   load_skill: ({ name }, deps) => runLoadSkill(name, deps),
 };
 
 // ═══════════════════════════════════════════════════════════
-//  agentLoop —— 和 s06 一样（nag 机制复用 s05），task/load_skill 自动分发
-//  和 s06 的唯一区别：system 来自 deps（清单是动态的），工具表多了 load_skill。
+//  agentLoop —— 和 s06 一样，load_skill 通过 TOOL_HANDLERS 自动分发
+//  和 s06 的唯一区别：system 来自 deps，因为目录是启动时扫出来的。
 // ═══════════════════════════════════════════════════════════
 
 export async function agentLoop(
@@ -226,8 +229,6 @@ export async function agentLoop(
 ): Promise<string> {
   const { client, logger, system, hooks } = deps;
   while (true) {
-    nagIfStale(messages, logger);
-
     logger.request(messages);
     const response = await client.messages.create({
       model: MODEL_ID,
@@ -248,7 +249,6 @@ export async function agentLoop(
       return textOf(response);
     }
 
-    bumpNagCounter();
     const results: Anthropic.ToolResultBlockParam[] = [];
     for (const block of response.content) {
       if (block.type !== "tool_use") {
@@ -268,7 +268,7 @@ export async function agentLoop(
 
       const schema = TOOL_SCHEMAS[block.name];
       const handler = TOOL_HANDLERS[block.name];
-      // await —— task handler（spawnSubagent）是 async。
+      // await —— 表里的 handler 类型允许异步（s08 会往这张表里加 async 工具）。
       const output =
         handler && schema
           ? await handler(schema.parse(block.input), deps)
@@ -276,9 +276,6 @@ export async function agentLoop(
       logger.toolResult(block.name, output);
 
       await hooks.trigger("PostToolUse", block, output);
-
-      // todo_write 被调用即复位唠叨计数器。
-      if (block.name === "todo_write") resetNagCounter();
 
       results.push({
         type: "tool_result",
@@ -312,7 +309,7 @@ if (import.meta.main) {
     process.exit(0);
   });
 
-  print("s07: Skill Loading — 清单进 SYSTEM，内容按需加载", "cyan");
+  print("s07: Skill Loading - 目录进 SYSTEM，内容按需加载", "cyan");
   print("输入问题，回车发送。输入 q 退出。\n", "green");
 
   const history: Anthropic.MessageParam[] = [];

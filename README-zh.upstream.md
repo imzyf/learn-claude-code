@@ -172,35 +172,29 @@ Claude Code = 一个 agent loop
 >
 > **s05** &nbsp; *"没有计划的 agent 走哪算哪"* &mdash; 先列步骤再动手, 完成率翻倍
 >
-> **s06** &nbsp; *"大任务拆小, 每个小任务干净的上下文"* &mdash; 子 Agent 自己干活，只把结果带回来
+> **s06** &nbsp; 给子任务全新的 `messages[]`，最终文本作为一条工具结果返回
 >
 > **s07** &nbsp; *"用到时再加载, 别全塞 prompt 里"* &mdash; 技能先列目录，用到时再展开
 >
-> **s08** &nbsp; *"上下文总会满, 要有办法腾地方"* &mdash; 四层压缩策略, 便宜的先跑贵的后跑
+> **s08** &nbsp; *"上下文总会满, 要有办法腾地方"* &mdash; 四步压缩，先整理工具结果，仍然超限时再生成历史摘要
 >
 > **s09** &nbsp; *"记住该记的, 忘掉该忘的"* &mdash; 三个子系统: 筛选、提取、整理
 >
-> **s10** &nbsp; *"prompt 是组装出来的, 不是写死的"* &mdash; 分段 + 按需拼接
+> **s10** &nbsp; *"大目标拆成小任务, 排好序, 持久化"* &mdash; 文件持久化的任务图, 多 agent 协作的基础
 >
-> **s11** &nbsp; *"错误不是终点, 是重试的起点"* &mdash; 出错时会重试、腾空间、换路子
+> **s11** &nbsp; *"慢操作丢后台, agent 继续思考"* &mdash; 后台线程跑命令, 完成后注入通知
 >
-> **s12** &nbsp; *"大目标拆成小任务, 排好序, 持久化"* &mdash; 文件持久化的任务图, 多 agent 协作的基础
+> **s12** &nbsp; *"定时触发, 不需要人推"* &mdash; 按时间自动触发任务
 >
-> **s13** &nbsp; *"慢操作丢后台, agent 继续思考"* &mdash; 后台线程跑命令, 完成后注入通知
+> **s13** &nbsp; *"一个 Agent 顾不过来，就让队友分工协作"* &mdash; 持久队友协作、认领就绪任务，并使用任务绑定的工作目录
 >
-> **s14** &nbsp; *"定时触发, 不需要人推"* &mdash; 按时间自动触发任务
+> **s14** &nbsp; *"能力不够? 插上 MCP"* &mdash; 把外部工具接进同一个工具池
 >
-> **s15** &nbsp; *"一个搞不定, 组队来"* &mdash; 持久化队友 + 异步邮箱
+> **s15** &nbsp; *"多种机制，一个循环"* &mdash; 集成示例用到的机制归到同一个 harness
 >
-> **s16** &nbsp; *"队友之间要有约定"* &mdash; 用固定的请求-回复格式沟通
+> **s16** &nbsp; *"编排形状固定时，就把它写进代码"* &mdash; 保存好的 workflow 使用 journal 续跑
 >
-> **s17** &nbsp; *"队友自己看板, 有活就认领"* &mdash; 不需要领导逐个分配, 自组织
->
-> **s18** &nbsp; *"各干各的目录, 互不干扰"* &mdash; 任务管目标, worktree 管目录, 按 ID 绑定
->
-> **s19** &nbsp; *"能力不够? 插上 MCP"* &mdash; 把外部工具接进同一个工具池
->
-> **s20** &nbsp; *"机制很多，循环一个"* &mdash; 前面所有机制回到一个完整 harness
+> **s17** &nbsp; *"目标决定循环什么时候真正结束"* &mdash; 每次准备停止时都由独立判断器审查；目标不可能、执行失败或超过续跑上限时把控制权交还用户
 
 ---
 
@@ -362,20 +356,17 @@ flowchart TD
 | [s04](./s04_hooks/) | Hooks | `PreToolUse` / `PostToolUse` / 扩展点 |
 | [s05](./s05_todo_write/) | TodoWrite | `TodoItem` / 先计划后执行 |
 | [s06](./s06_subagent/) | Subagent | `fresh messages[]` / 上下文隔离 |
-| [s07](./s07_skill_loading/) | Skill Loading | `SkillManifest` / 按需注入 |
-| [s08](./s08_context_compact/) | Context Compact | snip / micro / budget / auto 四层压缩 |
+| [s07](./s07_skill_loading/) | Skill Loading | `SkillLoader` / 技能目录 / 按需注入 |
+| [s08](./s08_context_compact/) | Context Compact | budget / snip / micro / summary 四步压缩 |
 | [s09](./s09_memory/) | Memory | selection / extraction / consolidation |
-| [s10](./s10_system_prompt/) | System Prompt | 运行时组装 / 分段拼接 |
-| [s11](./s11_error_recovery/) | Error Recovery | token 升级 / fallback 模型 / 重试策略 |
-| [s12](./s12_task_system/) | Task System | `TaskRecord` / `blockedBy` / 磁盘持久化 |
-| [s13](./s13_background_tasks/) | Background Tasks | 线程执行 / 通知队列 |
-| [s14](./s14_cron_scheduler/) | Cron Scheduler | 持久化调度 / 会话级触发 |
-| [s15](./s15_agent_teams/) | Agent Teams | `MessageBus` / 收件箱 / 权限冒泡 |
-| [s16](./s16_team_protocols/) | Team Protocols | 关机握手 / 计划审批 |
-| [s17](./s17_autonomous_agents/) | Autonomous Agents | 空闲循环 / 自动认领 |
-| [s18](./s18_worktree_isolation/) | Worktree Isolation | `WorktreeRecord` / 任务-目录绑定 |
-| [s19](./s19_mcp_plugin/) | MCP Plugin | 多传输 / 通道路由 / 工具池组装 |
-| [s20](./s20_comprehensive/) | Comprehensive Agent | 全部机制归到一个循环 |
+| [s10](./s10_task_system/) | Task System | `TaskRecord` / `blockedBy` / 磁盘持久化 |
+| [s11](./s11_background_tasks/) | Background Tasks | 线程执行 / 通知队列 |
+| [s12](./s12_cron_scheduler/) | Cron Scheduler | 持久化调度 / 会话级触发 |
+| [s13](./s13_agent_teams/) | Agent Teams | 持久队友 / 原子认领 / 任务绑定的 Worktree / 类型协议 |
+| [s14](./s14_mcp_plugin/) | MCP Plugin | 工具发现 / 命名空间 / 工具池组装 |
+| [s15](./s15_integrated_harness/) | Agent Harness 集成 | 工具、运行时上下文、任务、团队、调度和 MCP 归到一个循环 |
+| [s16](./s16_workflow_runtime/) | Workflow Runtime | 脚本编排 / 生命周期事件 / journal 续跑 |
+| [s17](./s17_goal_loop/) | Goal Loop | 目标闸门 / 对话判断 / 自动续轮 |
 
 ## 项目结构
 
