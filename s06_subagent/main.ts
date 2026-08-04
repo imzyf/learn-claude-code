@@ -1,32 +1,29 @@
 /**
  * s06_subagent/main.ts - Subagent
  *
- * 用全新的 messages[] 派生子 agent，实现上下文隔离：
+ * task 工具跑起第二个 agent loop，它的 messages[] 是全新的。两个循环共享
+ * 工作目录，但只有最终文本会回到父对话里：
  *
- *   Parent Agent                           Subagent
- *   +------------------+                  +------------------+
- *   | messages=[...]   |                  | messages=[task]  | <-- fresh
- *   |                  |   dispatch       |                  |
- *   | tool: task       | ---------------> | own while loop   |
- *   |   prompt="..."   |                  |   bash/read/...  |
- *   |                  |   summary only   |   (max 30 turns) |
- *   | result = "..."   | <--------------- | return last text |
- *   +------------------+                  +------------------+
- *         ^                                      |
- *         |      intermediate results DISCARDED  |
- *         +--------------------------------------+
+ *   Parent agent                    Subagent
+ *   +------------------+            +------------------+
+ *   | messages=[...]   |            | messages=[prompt]|
+ *   |                  |   task     |                  |
+ *   | tool: task       | ---------> | own agent loop   |
+ *   |                  |            | base tools only  |
+ *   | tool_result      | <--------- | final text       |
+ *   +------------------+            +------------------+
  *
- *   子 agent 的工具：bash、read、write、edit、glob（没有 task——不能递归）
+ * 子 agent 没有 task 工具，所以无法继续委派。
  *
  * 相比 s05 的变化：
- *   工具层：parent 复用 s05 的 tools / TOOL_SCHEMAS / TOOL_HANDLERS（base + todo），
- *          只 append 一个 task；subagent 只拿 s02 的基础工具层 + s03 的 handler。
+ *   工具层：父 agent 是 s02 的基础工具层 + 一个 task，和 code.py 一致；
+ *          s05 的 todo_write 与唠叨提醒不在本章的工具表里。
+ *          dispatch 复用 s05 的 BASE_HANDLERS（单一出处）。
  *   Hook 层：注册表/触发器与默认 hook 全部复用 s05（它又复用 s04），s06 不再重复定义。
  *   + task 工具 + 带全新 messages[] 的 spawnSubagent()
  *   + 安全限制：每个子 agent 最多 30 轮
- *   子 agent 不能再派生子子 agent（subTools 里没有 task 工具）。
- *   主循环几乎没变：task 通过 TOOL_HANDLERS 自动分发——
- *   唯一区别是 `await handler(...)`，因为 spawnSubagent 是异步的。
+ *   主循环几乎没变：task 通过 TOOL_HANDLERS 自动分发，唯一区别是
+ *   `await handler(...)`，因为 spawnSubagent 是异步的。
  *
  * 基于 s05（todo_write）构建。Usage:
  *
@@ -40,65 +37,55 @@ import { createLogger } from "../lib/logger";
 import { createClient, MODEL_ID } from "../lib/model";
 import { colorize, print } from "../lib/terminal";
 import { printProse, textOf, zodTool } from "../lib/tools";
-// 来自 s02：基础工具层（bash + 四个文件工具）——subagent 只用这一层。
+// 来自 s02：基础工具层（bash + 四个文件工具）——父子 agent 都建立在这一层上。
 import {
   tools as baseTools,
   TOOL_SCHEMAS as S02_TOOL_SCHEMAS,
 } from "../s02_tool_use/main";
 // 来自 s04：共享的 Deps 类型（client + logger + hooks）。
 import type { Deps } from "../s04_hooks/main";
-// 来自 s05：hook 装配（loadHooks = createHooks + registerDefaultHooks）+ 装配好的
-// 工具三张表 + nag 机制（nagIfStale / bumpNagCounter / resetNagCounter）——单一出处在 s05。
-import {
-  bumpNagCounter,
-  loadHooks,
-  nagIfStale,
-  resetNagCounter,
-  BASE_HANDLERS as S05_BASE_HANDLERS,
-  TOOL_HANDLERS as S05_TOOL_HANDLERS,
-  TOOL_SCHEMAS as S05_TOOL_SCHEMAS,
-  tools as s05Tools,
-} from "../s05_todo_write/main";
+// 来自 s05：hook 装配（loadHooks = createHooks + registerDefaultHooks）+ 基础
+// dispatch 表（BASE_HANDLERS）——单一出处在 s05。
+import { BASE_HANDLERS, loadHooks } from "../s05_todo_write/main";
 
 // s06 导出自己拥有的东西：agentLoop / spawnSubagent，
-// 以及装配好的三张工具表（base + todo + task），供 s07 继续叠加。
+// 以及装配好的三张工具表（base + task），供 s07 继续叠加。
 // 复用来的符号由测试各自从源头（s01/s04/s05）import。
 
 const WORKDIR = process.cwd();
 
 const SYSTEM =
   `You are a coding agent at ${WORKDIR}. ` +
-  "For complex sub-problems, use the task tool to spawn a subagent.";
+  "Use task for focused exploration or a self-contained subtask.";
 
-// s06: subagent 自己的 system prompt —— 没有 task，不能递归。
+// s06: subagent 自己的 system prompt。
 const SUB_SYSTEM =
   `You are a coding agent at ${WORKDIR}. ` +
-  "Complete the task you were given, then return a concise summary. " +
-  "Do not delegate further.";
+  "Complete the given task, then return a concise final answer.";
 
 // ═══════════════════════════════════════════════════════════
-//  工具装配：parent = s05（base + todo）+ task；subagent = s02 base
-//  三张表都用展开语法在 s05 之上追加一个 task，调用点（agentLoop）不用改。
+//  工具装配：父 agent = base + task；subagent = base
+//  三张表都用展开语法在基础之上追加一个 task，调用点（agentLoop）不用改。
 // ═══════════════════════════════════════════════════════════
 
-const taskSchema = z.object({ description: z.string() });
+const taskSchema = z.object({ prompt: z.string().min(1) });
 
 // subagent 只拿基础工具层（没有 task），从源头杜绝递归派生。
 const subTools = baseTools;
 
-// 三张装配表导出，供 s07 在其上继续叠加（base + todo + task）。
+// 三张装配表导出，供 s07 在其上继续叠加。
 export const tools: Anthropic.Tool[] = [
-  ...s05Tools,
+  ...baseTools,
   // s06 新增：task 工具
   zodTool(
     "task",
-    "Launch a subagent to handle a complex subtask. Returns only the final conclusion.",
+    "Run a subagent with fresh conversation context and return its final text.",
     taskSchema,
   ),
 ];
 
 export const TOOL_SCHEMAS: Partial<Record<string, z.ZodObject>> = {
-  ...S05_TOOL_SCHEMAS,
+  ...S02_TOOL_SCHEMAS,
   task: taskSchema,
 };
 
@@ -107,27 +94,26 @@ export const TOOL_SCHEMAS: Partial<Record<string, z.ZodObject>> = {
 export const TOOL_HANDLERS: Partial<
   Record<string, (input: any, deps: Deps) => string | Promise<string>>
 > = {
-  ...S05_TOOL_HANDLERS,
-  task: ({ description }, deps) => spawnSubagent(description, deps),
+  ...BASE_HANDLERS,
+  task: ({ prompt }, deps) => spawnSubagent(prompt, deps),
 };
 
 // ═══════════════════════════════════════════════════════════
-//  s06 新增：Subagent —— 全新 messages[]，只回摘要
+//  s06 新增：Subagent —— 全新 messages[]，只回最终文本
 // ═══════════════════════════════════════════════════════════
 
 export async function spawnSubagent(
-  description: string,
+  prompt: string,
   deps: Deps,
 ): Promise<string> {
   const { client, hooks } = deps;
   // 子 agent 用 scope="sub" 的 child logger：同一对文件，记录标注来源。
   const logger = deps.logger.child("sub");
 
-  print("[Subagent spawned]", "magenta");
+  logger.console("[Subagent started]", "magenta");
   const messages: Anthropic.MessageParam[] = [
-    { role: "user", content: description },
+    { role: "user", content: prompt },
   ]; // fresh context
-  let lastText = "";
 
   for (let turn = 0; turn < 30; turn++) {
     // safety limit
@@ -141,9 +127,19 @@ export async function spawnSubagent(
     });
     logger.response(response);
     messages.push({ role: "assistant", content: response.content });
-    const text = textOf(response);
-    if (text) lastText = text;
-    if (response.stop_reason !== "tool_use") break;
+
+    if (response.stop_reason !== "tool_use") {
+      // 子循环同样跑 Stop hook：拿到文案就再问一轮。
+      const force = await hooks.trigger("Stop", messages);
+      if (force) {
+        messages.push({ role: "user", content: force });
+        continue;
+      }
+      logger.console("[Subagent done]", "magenta");
+      // 只有最终文本回到父 agent；subagent 的消息历史被丢弃。
+      // 空回复由 textOf 补上占位文案，不会返回空字符串。
+      return textOf(response);
+    }
 
     const results: Anthropic.ToolResultBlockParam[] = [];
     for (const block of response.content) {
@@ -162,7 +158,7 @@ export async function spawnSubagent(
       }
 
       const schema = S02_TOOL_SCHEMAS[block.name];
-      const handler = S05_BASE_HANDLERS[block.name];
+      const handler = BASE_HANDLERS[block.name];
       const output =
         handler && schema
           ? handler(schema.parse(block.input))
@@ -179,14 +175,13 @@ export async function spawnSubagent(
     messages.push({ role: "user", content: results });
   }
 
-  logger.console("[Subagent done]", "magenta");
-  // 兜底：命中安全上限时 lastText 保留最近一段 assistant 文本。
-  // 只有摘要回到父 agent；subagent 的消息历史被丢弃。
-  return lastText || "Subagent stopped after 30 turns without final answer.";
+  // 兜底：撞上 30 轮安全上限时，父 agent 收到的就是这句话。
+  logger.console("[Subagent stopped]", "magenta");
+  return "Subagent stopped after 30 turns without a final answer.";
 }
 
 // ═══════════════════════════════════════════════════════════
-//  agentLoop —— 和 s05 一样（nag 机制复用 s05），task 自动分发到 subagent
+//  agentLoop —— 和 s05 一样，task 自动分发到 subagent
 //  唯一区别：handler 可能是 async，所以 `await handler(...)`。
 // ═══════════════════════════════════════════════════════════
 
@@ -196,8 +191,6 @@ export async function agentLoop(
 ): Promise<string> {
   const { client, logger, hooks } = deps;
   while (true) {
-    nagIfStale(messages, logger);
-
     logger.request(messages);
     const response = await client.messages.create({
       model: MODEL_ID,
@@ -218,7 +211,6 @@ export async function agentLoop(
       return textOf(response);
     }
 
-    bumpNagCounter();
     const results: Anthropic.ToolResultBlockParam[] = [];
     for (const block of response.content) {
       if (block.type !== "tool_use") {
@@ -246,9 +238,6 @@ export async function agentLoop(
       logger.toolResult(block.name, output);
 
       await hooks.trigger("PostToolUse", block, output);
-
-      // todo_write 被调用即复位唠叨计数器。
-      if (block.name === "todo_write") resetNagCounter();
 
       results.push({
         type: "tool_result",
@@ -279,10 +268,7 @@ if (import.meta.main) {
     process.exit(0);
   });
 
-  print(
-    "s06: Subagent — spawn sub-agents with fresh context, summary only",
-    "cyan",
-  );
+  print("s06: Subagent - fresh messages, final text returns", "cyan");
   print("输入问题，回车发送。输入 q 退出。\n", "green");
 
   const history: Anthropic.MessageParam[] = [];

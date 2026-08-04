@@ -8,7 +8,7 @@
  */
 
 import type Anthropic from "@anthropic-ai/sdk";
-import { beforeEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
   fakeClient,
   fakeMessage,
@@ -17,32 +17,8 @@ import {
   toolUseBlock,
 } from "../lib/testing";
 import { createHooks } from "../s04_hooks/main";
-import {
-  normalizeTodos,
-  permissionHook,
-  resetNagCounter,
-  runTodoWrite,
-} from "../s05_todo_write/main";
+import { permissionHook } from "../s05_todo_write/main";
 import { agentLoop, spawnSubagent } from "./main";
-
-beforeEach(() => {
-  resetNagCounter();
-});
-
-// ── todo helpers (same as s05) ────────────────────────────
-describe("todo helpers", () => {
-  it("normalizeTodos accepts an array", () => {
-    expect(
-      normalizeTodos([{ content: "a", status: "pending" }]).error,
-    ).toBeUndefined();
-  });
-
-  it("runTodoWrite reports the count", () => {
-    expect(
-      runTodoWrite([{ content: "a", status: "pending" }], noopLogger),
-    ).toBe("Updated 1 tasks");
-  });
-});
 
 // ── permissionHook ────────────────────────────────────────
 describe("permissionHook", () => {
@@ -106,7 +82,9 @@ describe("spawnSubagent", () => {
       hooks: createHooks(noopLogger),
     });
 
-    expect(result).toBe("[no text in response]");
+    expect(result).toBe(
+      "Subagent stopped after 30 turns without a final answer.",
+    );
   });
 });
 
@@ -115,7 +93,7 @@ describe("agentLoop", () => {
   it("dispatches the task tool to a subagent and keeps only its summary", async () => {
     const client = fakeClient(
       fakeMessage(
-        [toolUseBlock("tu_1", "task", { description: "sub work" })],
+        [toolUseBlock("tu_1", "task", { prompt: "sub work" })],
         "tool_use",
       ),
       fakeMessage([textBlock("sub result")], "end_turn"), // subagent's own turn
