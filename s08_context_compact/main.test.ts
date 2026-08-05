@@ -1,13 +1,14 @@
 /**
  * s08_context_compact/main.test.ts
  *
- * s08 的新增点是四层压缩流水线。三个预处理器（snip/micro/budget）是纯函数，
- * 不发 API 也不写盘（只测 under-budget 的 no-op 路径，避免落 .transcripts/），
- * 直接单测最合适；summarizeHistory 用 fake client 验证摘要提取。
+ * s08 的新增点是四层压缩流水线。三个预处理器（snip/micro/budget）不发 API，
+ * 直接单测最合适；写盘的路径（snip 存档）把 sessionDir 指到临时目录，
+ * L3 只测 under-budget 的 no-op 路径；summarizeHistory 用 fake client 验证摘要提取。
  * agentLoop 复用 s07 的分发骨架：load_skill / task / 普通工具。
  * 其余（技能层、permissionHook、subagent 隔离、todo）沿用 s05/s06/s07，其测试不在此重复。
  */
 
+import * as fs from "node:fs";
 import type Anthropic from "@anthropic-ai/sdk";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
@@ -91,14 +92,14 @@ function parallelToolRound(
 
 // ── compaction preprocessors (pure, no I/O) ───────────────
 describe("snipCompact", () => {
-  it("leaves short histories untouched", () => {
+  it("历史条数没超上限时原样返回", () => {
     const messages: Anthropic.MessageParam[] = [
       { role: "user", content: "hi" },
     ];
-    expect(snipCompact(messages, 50, noopLogger)).toBe(messages);
+    expect(snipCompact(messages, 50, noopLogger, tmp)).toBe(messages);
   });
 
-  it("trims the middle when over the limit, keeping head and tail", () => {
+  it("超上限时裁掉中间，保留头尾并落盘存档", () => {
     const messages: Anthropic.MessageParam[] = Array.from(
       { length: 20 },
       (_, i) => ({
@@ -106,16 +107,24 @@ describe("snipCompact", () => {
         content: `m${i}`,
       }),
     );
-    const out = snipCompact(messages, 10, noopLogger);
+    const out = snipCompact(messages, 10, noopLogger, tmp);
     expect(out.length).toBe(11); // head(3) + 1 placeholder + tail(7)
     expect(out[0]).toBe(messages[0]); // head kept
     expect(out[out.length - 1]).toBe(messages[19]); // tail kept
-    expect(out[3]).toEqual({ role: "user", content: "[snipped 10 messages]" });
+    // 占位符指向存档，被裁掉的 10 条仍可从磁盘读回。
+    const placeholder = out[3].content as string;
+    expect(placeholder).toMatch(/^\[10 messages archived at .+\]$/);
+    const archived = fs
+      .readFileSync(placeholder.slice("[10 messages archived at ".length, -1))
+      .toString()
+      .trim()
+      .split("\n");
+    expect(archived).toHaveLength(20);
   });
 });
 
 describe("microCompact", () => {
-  it("keeps the most recent results and compacts older long ones", () => {
+  it("保留最近几条结果，只压缩更早的长结果", () => {
     const messages: Anthropic.MessageParam[] = [
       ...toolRound("t1", "x".repeat(200)), // old + long → compacted
       ...toolRound("t2", "recent-1"),
@@ -130,13 +139,27 @@ describe("microCompact", () => {
     expect(results[3].content).toBe("recent-3"); // within KEEP_RECENT
   });
 
-  it("does nothing when there are few results", () => {
+  it("结果已被 L3 落盘时，占位符保留磁盘路径", () => {
+    const persisted = `<persisted-output>\nFull output: ${tmp}/out.txt\nPreview:\n${"x".repeat(200)}\n</persisted-output>`;
+    const messages: Anthropic.MessageParam[] = [
+      ...toolRound("t1", persisted),
+      ...toolRound("t2", "recent-1"),
+      ...toolRound("t3", "recent-2"),
+      ...toolRound("t4", "recent-3"),
+    ];
+    microCompact(messages, noopLogger);
+    expect(collectToolResults(messages)[0].content).toBe(
+      `[Earlier tool result saved at ${tmp}/out.txt]`,
+    );
+  });
+
+  it("结果条数太少时什么都不做", () => {
     const messages: Anthropic.MessageParam[] = toolRound("t1", "y".repeat(200));
     microCompact(messages, noopLogger);
     expect(collectToolResults(messages)[0].content).toBe("y".repeat(200));
   });
 
-  it("keeps the whole latest parallel round intact", () => {
+  it("最新一轮并行结果整轮不压", () => {
     const ids = ["p1", "p2", "p3", "p4"];
     const messages: Anthropic.MessageParam[] = [
       ...toolRound("t1", "x".repeat(200)), // old + long → compacted
@@ -151,7 +174,7 @@ describe("microCompact", () => {
       expect(results[i + 1].content).toBe(`${id}-`.padEnd(200, "z"));
   });
 
-  it("does nothing when all results belong to the latest round", () => {
+  it("全部结果都属于最新一轮时什么都不做", () => {
     const messages: Anthropic.MessageParam[] = parallelToolRound(
       ["p1", "p2", "p3", "p4"],
       () => "w".repeat(200),
@@ -161,7 +184,7 @@ describe("microCompact", () => {
       expect(part.content).toBe("w".repeat(200));
   });
 
-  it("protects the latest round even when a reminder trails it", () => {
+  it("末尾跟着 reminder 时仍能保住最新一轮", () => {
     const messages: Anthropic.MessageParam[] = [
       ...parallelToolRound(["p1", "p2", "p3", "p4"], () => "w".repeat(200)),
       { role: "user", content: "<reminder>Update your todos.</reminder>" },
@@ -173,26 +196,26 @@ describe("microCompact", () => {
 });
 
 describe("toolResultBudget", () => {
-  it("is a no-op when the last turn is within budget", () => {
+  it("最新一轮在预算内时不落盘", () => {
     const messages: Anthropic.MessageParam[] = toolRound("t1", "small output");
     expect(toolResultBudget(messages, 200_000, noopLogger, tmp)).toBe(messages);
   });
 });
 
 describe("persistLargeOutput", () => {
-  it("returns short output unchanged without touching disk", () => {
+  it("短输出原样返回，不碰磁盘", () => {
     expect(persistLargeOutput("id1", "short", tmp)).toBe("short");
   });
 });
 
 describe("estimateSize / replaceMessages", () => {
-  it("estimateSize grows with content", () => {
+  it("estimateSize 随内容变长而增大", () => {
     const small = estimateSize([{ role: "user", content: "a" }]);
     const big = estimateSize([{ role: "user", content: "a".repeat(1000) }]);
     expect(big).toBeGreaterThan(small);
   });
 
-  it("replaceMessages replaces contents in place (same reference)", () => {
+  it("replaceMessages 原地替换内容，引用不变", () => {
     const messages: Anthropic.MessageParam[] = [
       { role: "user", content: "old" },
     ];
@@ -203,7 +226,7 @@ describe("estimateSize / replaceMessages", () => {
 
 // ── summarizeHistory (LLM summary, fake client) ───────────
 describe("summarizeHistory", () => {
-  it("returns the model's summary text", async () => {
+  it("返回模型给出的摘要文本", async () => {
     const client = fakeClient(
       fakeMessage([textBlock("a compact summary")], "end_turn"),
     );
@@ -220,7 +243,7 @@ describe("summarizeHistory", () => {
     expect(summary).toBe("a compact summary");
   });
 
-  it("falls back when the model returns no text", async () => {
+  it("模型没返回文本时给出兜底文案", async () => {
     const client = fakeClient(fakeMessage([], "end_turn"));
 
     const summary = await summarizeHistory([{ role: "user", content: "x" }], {
@@ -245,7 +268,7 @@ describe("agentLoop", () => {
     sessionDir: tmp,
   });
 
-  it("dispatches load_skill and injects the full content", async () => {
+  it("分发 load_skill 并注入技能全文", async () => {
     const client = fakeClient(
       fakeMessage(
         [toolUseBlock("tu_1", "load_skill", { name: "code-review" })],
@@ -265,10 +288,10 @@ describe("agentLoop", () => {
     expect(toolResults[0].content).toBe("FULL code-review content");
   });
 
-  it("dispatches task to a subagent and keeps only its summary", async () => {
+  it("分发 task 给子 agent，只保留它的总结", async () => {
     const client = fakeClient(
       fakeMessage(
-        [toolUseBlock("tu_1", "task", { description: "sub work" })],
+        [toolUseBlock("tu_1", "task", { prompt: "sub work" })],
         "tool_use",
       ),
       fakeMessage([textBlock("sub result")], "end_turn"),
@@ -289,7 +312,7 @@ describe("agentLoop", () => {
     expect(toolResults[0].content).toBe("sub result");
   });
 
-  it("executes a plain tool call", async () => {
+  it("执行普通工具调用", async () => {
     const client = fakeClient(
       fakeMessage(
         [toolUseBlock("tu_1", "bash", { command: "echo hi" })],

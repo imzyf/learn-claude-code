@@ -1,310 +1,337 @@
-# s08: Context Compact — 上下文总会满，要有办法腾地方
+# s08: Context Compact：上下文总会满，先整理，再总结
 
-[中文](README.md) · [English](README.en.md) · [日本語](README.ja.md)
+[English](README.md) · [中文](README.zh.md) · [日本語](README.ja.md)
 
-s01 → s02 → s03 → s04 → s05 → s06 → s07 → `s08` → [s09](../s09_memory/) → s10 → ... → s20
-> *"上下文总会满, 要有办法腾地方"* — 四层压缩策略, 便宜的先跑贵的后跑。
+s01 → s02 → s03 → s04 → s05 → s06 → s07 → `s08` → [s09](../s09_memory/) → s10 → ... → s16 → s17
+
+> *"上下文总会满，要有办法腾地方。"* 四步压缩，低成本的操作优先执行。
 >
-> **Harness 层**: 压缩 — 干净的记忆, 无限的会话。
+> **Harness 层**：压缩让有限的上下文持续服务于长任务。
 
----
 
-## 问题
+Agent 持续工作时，读过的文件、执行过的命令和模型回复都会留在 `messages` 中。消息越积越多，最终会超过模型能够接收的上下文长度。
 
-Agent 跑着跑着，不动了。
+本节将实现一条四步压缩管线。它先整理可以恢复的工具结果，空间仍然不足时再总结历史。
 
-手里有 bash、有 read、有 write，能力是够的。但它读了一个 1000 行的文件（~4000 token），又读了 30 个文件，跑了 20 条命令。每条命令的输出、每个文件的内容，全都堆在 `messages` 列表里。
+![Context Compact 全景](images/compact-overview.svg)
 
-上下文窗口是有限的。满了之后，API 直接拒绝：`prompt_too_long`。
 
-不压缩，Agent 根本没法在大项目里干活。
+## 先理解上下文
 
----
+可以把上下文窗口看作模型当前使用的一张草稿纸。用户消息、模型回复、`tool_use` 和 `tool_result` 都会按顺序写在这张纸上。模型每次继续工作时，都要重新读取这些内容。
 
-## 解决方案
+草稿纸的大小固定。内容超过上限后，API 会拒绝请求并返回 `prompt_too_long`。在代码任务里，工具结果通常占据最多空间：
 
-![Compact Overview](images/compact-overview.svg)
+- 读取一个长文件会把文件内容放进上下文；
+- 测试和构建日志可能一次产生几十 KB 文本；
+- 搜索多个文件会持续追加结果。
 
-保留 s07 的 hook 结构、技能加载、子 Agent 等骨架，省略部分工具细节以聚焦压缩。核心变动：每轮 LLM 调用前插入三层预处理器（0 API），token 仍超阈值时触发 LLM 摘要（1 API），API 报错时应急裁剪。
+任务持续得越久，`messages` 就越大。压缩的目标是控制其中的信息量，同时尽可能保留当前目标、用户约束和正在进行的工作。
 
-核心设计：便宜的先跑，贵的后跑。
 
----
+## 为什么先整理工具结果
 
-## 工作原理
+直接让模型总结整段历史可以明显缩短上下文，但摘要一定会遗漏部分细节，而且还会多产生一次模型调用。
 
-![四层压缩管线](images/compaction-layers.svg)
+工具结果具有更适合优先处理的特点：
 
-### L1: snip_compact — 裁掉无关的旧对话
+1. 大文件可以保存到磁盘，需要时重新读取。
+2. 旧命令可以重新执行。
+3. 最新几条结果通常比早期结果更接近当前工作。
+4. 文本裁剪和结构调整不需要调用模型。
 
-Agent 跑了 80 轮对话，`messages` 攒了 160 条。最前面的"帮我创建 hello.py"和当前工作几乎无关了，但全占着位置。
+因此压缩顺序按照信息损失和调用成本排列：先转存，再裁剪，再替换旧结果，最后才生成摘要。
 
-消息数超过 50 条 → 保留头部 3 条（初始上下文）和尾部 47 条（当前工作），中间裁掉；唯一额外边界条件是，不能把 `assistant(tool_use)` 和后面的 `user(tool_result)` 拆开：
+![四步压缩管线](images/compaction-layers.svg)
 
-```python
-def snip_compact(messages, max_messages=50):
-    if len(messages) <= max_messages:
-        return messages
-    head_end, tail_start = 3, len(messages) - (max_messages - 3)
-    if head_end > 0 and _message_has_tool_use(messages[head_end - 1]):
-        while head_end < len(messages) and _is_tool_result_message(messages[head_end]):
-            head_end += 1
-    if (tail_start > 0 and tail_start < len(messages)
-            and _is_tool_result_message(messages[tail_start])
-            and _message_has_tool_use(messages[tail_start - 1])):
-        tail_start -= 1
-    snipped = tail_start - head_end
-    placeholder = {"role": "user", "content": f"[snipped {snipped} messages from conversation middle]"}
-    return messages[:head_end] + [placeholder] + messages[tail_start:]
+
+## 第一步：tool_result_budget
+
+一次模型回复可能同时调用多个工具。执行完成后，这些 `tool_result` 会一起写进最后一条 user 消息。它们的总大小超过 `200_000` 字符时，`tool_result_budget` 从最大的结果开始处理。
+
+超过 `LARGE_RESULT_CHAR_LIMIT = 30000` 的结果会完整写入：
+
+```text
+.task_outputs/tool-results/<tool_use_id>.txt
 ```
 
-裁掉的是消息本身，只是在切口处多做一步保护；剩下的消息里 `tool_result` 内容仍在累积——第 34 条消息里可能躺着 30KB 的旧文件内容。→ L2。
+上下文中保留文件路径和前 2000 个字符的预览：
 
-### L2: micro_compact — 旧工具结果占位
+![大结果转存](images/layer1-budget.svg)
 
-![旧结果占位](images/micro-compact.svg)
-
-Agent 连续读了 10 个文件。第 1-7 次的完整内容还躺在上下文里，早就不需要了，但占着大量空间。
-
-只保留最近 3 条 `tool_result` 的完整内容，更旧的替换为一行占位符：
+核心循环按照结果大小依次转存：
 
 ```python
-KEEP_RECENT_TOOL_RESULTS = 3
+blocks = [block for block in content
+          if isinstance(block, dict)
+          and block.get("type") == "tool_result"]
+total = sum(len(str(block.get("content", ""))) for block in blocks)
 
-def micro_compact(messages):
-    tool_results = collect_tool_result_blocks(messages)
-    if len(tool_results) <= KEEP_RECENT_TOOL_RESULTS:
-        return messages
-    for _, _, block in tool_results[:-KEEP_RECENT_TOOL_RESULTS]:
-        if len(block.get("content", "")) > 120:
-            block["content"] = "[Earlier tool result compacted. Re-run if needed.]"
-    return messages
+ranked = sorted(
+    blocks,
+    key=lambda block: len(str(block.get("content", ""))),
+    reverse=True,
+)
+for block in ranked:
+    if total <= max_chars:
+        break
+    content = str(block.get("content", ""))
+    if len(content) <= self.LARGE_RESULT_CHAR_LIMIT:
+        continue
+    block["content"] = self.persist_large_output(
+        block.get("tool_use_id", "unknown"), content)
+    total = sum(len(str(item.get("content", ""))) for item in blocks)
 ```
 
-旧结果清掉了，但单条新结果可能就有 500KB——一个 `cat` 大文件的输出就能打满上下文。→ L3。
+这一步只处理最新一批工具结果。完整内容仍然可以从路径中取回，因此适合最先执行。
 
-### L3: tool_result_budget — 大结果落盘
 
-![大结果落盘](images/layer1-budget.svg)
+## 第二步：snip_compact
 
-模型一次读了 5 个大文件，单条 user 消息里所有 `tool_result` 加起来 500KB。
-
-统计最后一条 user 消息里所有 `tool_result` 的总大小。超过 200KB → 按大小排序，从最大的开始落盘到 `.task_outputs/tool-results/`，上下文里只留 `<persisted-output>` 标记 + 前 2000 字符预览。模型看到标记后知道完整内容在磁盘上，需要时可以重新读。
+消息数量超过 50 条后，`snip_compact` 先把完整历史写入 `.transcripts/`，再保留最初 3 条和最近 47 条。中间的标记会写明删去了多少条消息，以及完整记录保存在哪里。
 
 ```python
-def tool_result_budget(messages, max_bytes=200_000):
-    last = messages[-1]
-    blocks = [(i, b) for i, b in enumerate(last["content"])
-              if b.get("type") == "tool_result"]
-    total = sum(len(str(b.get("content", ""))) for _, b in blocks)
-    if total <= max_bytes:
-        return messages
-    ranked = sorted(blocks, key=lambda p: len(str(p[1].get("content", ""))), reverse=True)
-    for idx, block in ranked:
-        if total <= max_bytes:
-            break
-        block["content"] = persist_large_output(block["tool_use_id"], str(block["content"]))
-        total = recalculate_total(blocks)
-    return messages
+head_end = 3
+tail_start = len(messages) - (max_messages - head_end)
+
+if self.has_tool_use(messages[head_end - 1]):
+    while (head_end < tail_start
+           and self.is_tool_result(messages[head_end])):
+        head_end += 1
+
+if (tail_start > 0
+        and self.is_tool_result(messages[tail_start])
+        and self.has_tool_use(messages[tail_start - 1])):
+    tail_start -= 1
+
+transcript = self.write_transcript(messages)
+marker = {"role": "user", "content":
+          f"[{tail_start - head_end} messages archived at {transcript}]"}
+messages = [*messages[:head_end], marker, *messages[tail_start:]]
 ```
 
-前三层都是纯文本/结构操作，0 API 调用，但也无法"理解"对话内容。上下文可能仍然太大。→ L4。
+切点需要保护 `assistant(tool_use)` 和 `user(tool_result)` 的配对关系。孤立的工具结果缺少对应调用，下一次 API 请求会被判定为无效。
 
-### L4: compact_history — LLM 全量摘要
+这一步控制消息数量，但保留下来的旧消息仍可能包含很长的工具结果。
 
-![LLM 全量摘要](images/auto-compact.svg)
 
-前三层全跑完了，但在超大项目中连续工作 30 分钟后，token 仍然超过阈值。
+## 第三步：micro_compact
 
-三步流程：
+`micro_compact` 收集当前历史里的全部 `tool_result`。最近 3 条保持完整，更早且超过 120 个字符的结果会缩短。已经转存的结果保留文件路径，其他结果只留下占位符：
 
-1. **保存 transcript**：完整对话写入 `.transcripts/`，JSONL 格式。transcript 保留了可恢复记录，但模型的活跃上下文里只剩摘要。对模型当下推理来说，细节已经不在上下文中了。教学代码没有提供 transcript 检索工具。
-2. **LLM 生成摘要**：把对话历史发给 LLM，要求保留当前目标、重要发现、已改文件、剩余工作、用户约束等关键信息。
-3. **替换消息列表**：所有旧消息被替换为一条摘要。教学版只保留摘要；真实 Claude Code 会在 compact 后重新附加部分最近文件、计划、agent/skill/tool 等上下文。
+![旧结果替换为占位符](images/micro-compact.svg)
 
 ```python
-def compact_history(messages):
-    transcript_path = write_transcript(messages)  # 先保存完整对话
-    summary = summarize_history(messages)          # LLM 生成摘要
-    return [{"role": "user",
-             "content": f"[Compacted]\n\n{summary}"}]
+for block in results[:-self.KEEP_RECENT_RESULTS]:
+    content = str(block.get("content", ""))
+    if len(content) <= 120:
+        continue
+    saved_path = next(
+        (line.removeprefix("Full output: ") for line in content.splitlines()
+         if line.startswith("Full output: ")),
+        None,
+    )
+    block["content"] = (
+        f"[Earlier tool result saved at {saved_path}]"
+        if saved_path else "[Earlier tool result omitted.]"
+    )
 ```
 
-**熔断器**：连续失败 3 次后停止重试，防止死循环浪费 API 调用。
+未转存的旧结果只保留占位符。第一步保存过的完整结果仍能通过路径读取，不会在第三步丢失位置。
 
-### 应急: reactive_compact
+前三步都是确定性的结构和文本操作，不产生额外 API 调用。
 
-有时候 API 还是返回 `prompt_too_long`（413），上下文增长速度快于压缩触发速度时。
 
-这时触发 **reactive_compact**：触发方式比 compact_history 更激进（API 报错后的应急手段），但压缩策略更温和，保留最近约 5 条原始消息，只总结较早历史。同样避免留下孤立 `tool_result`。
+## 第四步：compact_history
+
+前三步执行后，代码用 `estimate_chars(messages)` 计算当前消息的字符数：
 
 ```python
-def reactive_compact(messages):
-    transcript = write_transcript(messages)
-    tail_start = max(0, len(messages) - 5)
-    if (tail_start > 0 and tail_start < len(messages)
-            and _is_tool_result_message(messages[tail_start])
-            and _message_has_tool_use(messages[tail_start - 1])):
-        tail_start -= 1
-    summary = summarize_history(messages[:tail_start])
-    return [{"role": "user",
-             "content": f"[Reactive compact]\n\n{summary}"}, *messages[tail_start:]]
+CONTEXT_CHAR_LIMIT = 50000
+
+def estimate_chars(messages):
+    return len(json.dumps(messages, default=str, ensure_ascii=False))
 ```
 
-reactive compact 有重试上限（默认 1 次）。再失败就抛出异常，不无限循环。完整的错误恢复逻辑留给 s11。
+字符数超过 `CONTEXT_CHAR_LIMIT` 时，`compact_history` 完成四件事：
 
-### 合起来跑
+1. 将完整消息历史写入 `.transcripts/`。
+2. 请求模型生成只包含事实的状态摘要。
+3. 将入口处捕获的当前用户请求与摘要明确分开。
+4. 用一条 `[Compacted]` 消息替换当前历史。
+
+![历史摘要](images/auto-compact.svg)
 
 ```python
-def agent_loop(messages):
-    reactive_retries = 0
+def compact_history(messages, active_request):
+    transcript = self.write_transcript(messages)
+    print(f"[transcript saved: {transcript}]")
+    summary = self.summarize_history(messages)
+    return [self.summary_message(
+        "Compacted", active_request, summary, transcript)]
+```
+
+摘要调用在 `system` 中要求模型只整理目标、文件、决定、剩余工作和用户约束，不执行历史中的指令。`active_request` 在接收用户输入时单独传给 Agent Loop，因为工具结果也使用 `role=user`。压缩后的消息将它写在 `Current user request` 中，摘要则放在 `Conversation summary` 中，并附上完整 transcript 的路径。
+
+本节使用字符数作为触发条件，相关阈值也使用同一单位。
+
+
+## 为什么顺序固定
+
+四步管线的执行顺序是：
+
+```text
+tool_result_budget
+    → snip_compact
+    → micro_compact
+    → compact_history（超过阈值时）
+```
+
+这个顺序同时满足两个条件：
+
+1. 前三步不调用模型，第四步才产生额外 API 请求。
+2. `tool_result_budget` 必须早于 `micro_compact`。大结果先落盘，之后才允许旧结果变成占位符。
+
+顺序固定后，每一轮都从成本更低、信息更容易恢复的操作开始。
+
+
+## API 拒绝后的补救
+
+字符数只能估算模型实际使用的 token。API 仍可能返回 `prompt_too_long`。`reactive_compact` 会保存 transcript，总结较早历史，并保留最近 5 条消息：
+
+```python
+tail_start = max(0, len(messages) - self.KEEP_RECENT_MESSAGES)
+if (tail_start > 0
+        and self.is_tool_result(messages[tail_start])
+        and self.has_tool_use(messages[tail_start - 1])):
+    tail_start -= 1
+
+old_history = messages[:tail_start] if tail_start else messages
+summary = self.summarize_history(old_history)
+message = self.summary_message(
+    "Reactive compact", active_request, summary, transcript)
+messages = [message, *messages[tail_start:]] if tail_start else [message]
+```
+
+切点同样会避开工具调用与结果之间的边界，当前用户请求仍由 `active_request` 明确传入。`MAX_REACTIVE_RETRIES = 1` 将补救限制为一次；再次收到同类错误时，异常会继续向外抛出。
+
+
+## 放回 Agent Loop
+
+```python
+def agent_loop(messages, active_request):
     while True:
-        # 三个预处理器（0 API 调用）
-        # 顺序：budget 先跑，确保大内容落盘后再做占位和裁剪
-        messages[:] = tool_result_budget(messages)    # L3: 大结果落盘
-        messages[:] = snip_compact(messages)          # L1: 裁中间
-        messages[:] = micro_compact(messages)         # L2: 旧结果占位
-
-        # 还不够？LLM 摘要（1 API 调用）
-        if estimate_token_count(messages) > THRESHOLD:
-            messages[:] = compact_history(messages)
+        messages[:] = COMPACTOR.prepare(messages, active_request)
 
         try:
-            response = client.messages.create(...)
-        except PromptTooLongError:
-            if reactive_retries < MAX_REACTIVE_RETRIES:
-                messages[:] = reactive_compact(messages)  # 应急
+            response = client.messages.create(
+                model=MODEL, system=SYSTEM, messages=messages,
+                tools=TOOLS, max_tokens=8000)
+            reactive_retries = 0
+        except Exception as error:
+            message = str(error).lower()
+            too_long = ("prompt_too_long" in message
+                        or "too many tokens" in message)
+            if too_long and reactive_retries < MAX_REACTIVE_RETRIES:
+                messages[:] = COMPACTOR.reactive_compact(
+                    messages, active_request)
                 reactive_retries += 1
                 continue
-            raise  # 超过重试上限，抛出异常
-        # ... 工具执行 ...
-
-        # compact 工具：模型主动调用时触发 compact_history
-        if block.name == "compact":
-            messages[:] = compact_history(messages)
-            results.append({..., "content": "[Compacted. History summarized.]"})
-            messages.append({"role": "user", "content": results})
-            break  # 结束当前 turn，用压缩后的上下文开始新一轮
+            raise
 ```
 
-**顺序不能换。** L3（budget）在 L2（micro）前面，因为 micro 会把旧的大 tool_result 替换成一行占位符，budget 必须在那之前把完整内容落盘。这也是为什么 CC 源码把 `applyToolResultBudget` 放在最前面。
+每次调用模型前都会经过同一条管线。CLI 在追加 `query` 后调用 `agent_loop(history, query)`，所以压缩多少次都不会丢失本轮请求。前三步处理后仍超过阈值，或者 API 明确拒绝上下文时，代码才会请求模型生成摘要。
 
----
 
-## 相对 s07 的变更
+## compact 工具
 
-| 组件 | 之前 (s07) | 之后 (s08) |
-|------|-----------|-----------|
-| 上下文管理 | 无（上下文无限膨胀） | 四层压缩管线 + 应急 |
-| 新函数 | — | snip_compact, micro_compact, tool_result_budget, compact_history, reactive_compact |
-| 工具 | bash, read, write, edit, glob, todo_write, task, load_skill (8) | 8 + compact (9) |
-| 循环 | LLM 调用 → 工具执行 | 每轮前跑三层预处理器 + 阈值触发 compact_history |
-| 设计原则 | — | 便宜的先跑，贵的后跑 |
+自动阈值只知道上下文有多大。模型还可以在一个阶段结束后主动调用 `compact`，表示后续工作只需要保留当前阶段的摘要：
 
----
+```python
+{"name": "compact",
+ "description": "Summarize earlier conversation to free context space."}
+```
+
+一次响应可以同时包含多个工具调用，例如先写文件再请求压缩。Harness 必须先执行完整批次，并为每个 `tool_use` 追加对应的 `tool_result`，然后再摘要这个已经闭合的回合：
+
+```python
+results = []
+compact_requested = False
+
+for block in response.content:
+    if block.type != "tool_use":
+        continue
+
+    if block.name == "compact":
+        output = "Compaction requested after this tool batch."
+        compact_requested = True
+    else:
+        output = execute_tool(block)
+    results.append({"type": "tool_result", "tool_use_id": block.id,
+                    "content": output})
+
+messages.append({"role": "user", "content": results})
+
+if compact_requested:
+    messages[:] = COMPACTOR.compact_history(messages, active_request)
+```
+
+这样既不会留下孤立的工具结果，也不会在已经发生文件写入后丢失执行记录，导致模型重复同一个副作用。
+
+
+## 本节代码
+
+| 组件 | 共同执行骨架 | s08 新增 |
+| --- | --- | --- |
+| Agent Loop | 调用模型、执行工具、追加结果 | 每次调用模型前运行 `COMPACTOR.prepare()` |
+| Hooks | 权限检查、工具日志、结果处理 | 保持相同的工具执行入口 |
+| 上下文 | `messages` 持续追加 | 大结果转存、旧历史归档、摘要和一次错误补救 |
+| 工具 | 5 个基础工具 | 新增 `compact`，共 6 个 |
+
+> **与 s09 的边界：** s08 管理当前会话的有限上下文，压缩时允许舍弃可恢复的细节；s09 保存需要跨压缩、跨会话继续存在的信息。
+
 
 ## 试一下
 
-```sh
+```bash
 cd learn-claude-code
 python s08_context_compact/code.py
 ```
 
-试试这些 prompt：
+### 实验一：较早的结果被替换
 
-1. `Read the file README.md, then read code.py, then read s01_agent_loop/README.md`（连续读多个文件，观察 L2 压缩旧结果）
-2. `Read every file in s08_context_compact/`（一次性读大量内容，观察 L3 落盘）
-3. 反复对话 20+ 轮，观察是否出现 `[auto compact]` 或 `[reactive compact]`
+```text
+请读取 s01_agent_loop 到 s05_todo_write 五节课程的 README.md，
+比较它们的一级标题，并总结这些标题的命名规律。
+```
 
-观察重点：每次工具执行后，旧 tool_result 是否被压缩？连续对话后 token 超阈值时，是否自动触发了摘要？
+任务会产生至少 5 条文件读取结果。最近 3 条保持完整，更早且较长的结果会变成 `[Earlier tool result omitted.]`。已经转存的结果会保留保存路径。
 
----
+### 实验二：大结果转存
+
+```text
+请分析 web/src/data/generated/docs.json 的数据结构，
+并说明一条课程记录包含哪些主要字段。
+```
+
+文件内容超过单轮预算时，终端仍能完成任务，同时 `.task_outputs/tool-results/` 中会出现完整结果文件。
+
+### 实验三：自动摘要
+
+```text
+请比较 s08_context_compact/code.py 和 s09_memory/code.py，
+说明它们分别怎样管理当前上下文和持久记忆。
+```
+
+当读取结果使 `estimate_chars(messages)` 超过 50000 时，终端会打印 `[auto compact]` 和 transcript 路径。后续调用使用 `[Compacted]` 摘要继续完成比较。
+
+观察 `.transcripts/` 和 `.task_outputs/tool-results/`，可以分别看到历史留档与大结果转存。
+
 
 ## 接下来
 
-上下文压缩让 Agent 能跑很久不会崩。但每次压缩后，用户之前告诉它的偏好、约束也跟着丢了。能不能让 Agent 有选择地记住重要的事？
+上下文压缩让 Agent 可以在有限窗口中继续长任务。需要跨压缩、跨会话保留的信息，还要进入独立的持久记忆系统。
 
-s09 Memory → 三个子系统：选择记什么、提取关键信息、整理巩固。跨压缩、跨会话。
+s09 Memory 将实现记忆写入、检索与整理。
 
-<details>
-<summary>深入 CC 源码</summary>
-
-> 以下基于 CC 源码 `compact.ts`、`autoCompact.ts`、`microCompact.ts`、`query.ts` 的分析。
-
-### 执行顺序对照
-
-教学版为了讲解方便按 L1/L2/L3/L4 编号，但实际执行顺序和编号不完全对应：
-
-| 维度 | 教学版 | Claude Code |
-|------|--------|-------------|
-| 执行顺序 | budget → snip → micro → auto | budget → snip → micro → collapse → auto（`query.ts:379-468`） |
-| snip_compact | 保留头 3 + 尾 47 | CC 仅主线程启用；实现不在开源仓库中（`HISTORY_SNIP` feature gate），但接口可见：`snipCompactIfNeeded(messages)` → `{ messages, tokensFreed, boundaryMessage? }`，还暴露了 `SnipTool` 工具让模型主动调用。教学版的 3/47 是简化参数 |
-| micro_compact | 文本占位符替换 | 两条路径：time-based 直接清内容，cached 走 API `cache_edits`（legacy path 已移除） |
-| micro_compact 白名单 | 按位置（最近 3 条） | time-based 按时间阈值触发；cached 按计数触发（`microCompact.ts`） |
-| tool_result_budget | 200KB 字符 | 200,000 字符（`toolLimits.ts:49`） |
-| compact_history 阈值 | 字符数估算 | 精确 token：`contextWindow - maxOutputTokens - 13_000` |
-| 摘要要求 | 5 类信息 | 9 个部分 + `<analysis>`/`<summary>` 双标签 |
-| 压缩 prompt | 简单 prompt | 首尾双重防呆禁止调工具 |
-| PTL retry | 有（简化） | `truncateHeadForPTLRetry()` 按消息组回退（`compact.ts:243-290`） |
-| 后压缩恢复 | 无（教学版只保留摘要） | 自动重新读取最近文件、计划、agent/skill/tool 等 |
-| 熔断器 | 3 次 | 3 次（`autoCompact.ts:70`） |
-| reactive 重试 | 1 次 | CC 有更精细的分级重试 |
-
-### 执行顺序详解
-
-CC 源码 `query.ts` 中的真实顺序：
-
-1. `applyToolResultBudget`（L379）：先处理大结果，确保完整内容落盘
-2. `snipCompact`（L403）：裁中间消息
-3. `microcompact`（L414）：旧结果占位
-4. `contextCollapse`（L441）：独立的上下文管理系统（教学版无）
-5. `autoCompact`（L454）：LLM 全量摘要
-
-教学版的 budget → snip → micro 顺序与此一致。教学版没有 contextCollapse 机制。
-
-### read_file 的取舍
-
-教学版的 `micro_compact` 会把旧 `tool_result` 统一替换成占位符，包括 `read_file`。这通常不影响功能正确性：如果后续还需要文件内容，模型可以重新读一次。代价是可能多一次工具调用，也可能降低 prompt cache 命中率。
-
-Claude Code 没有用教学版这种简单规则解决这个问题。它把 `Read` 也放进可 microcompact 的工具集合，但同时维护 `readFileState`：重复读取未变化文件时返回 `FILE_UNCHANGED_STUB`，compact 后再按预算恢复最近读过的文件内容（例如最多 5 个文件、每个 5K token、总预算 50K token）。这是生产级实现里的缓存和恢复机制，教学版不展开，保留“压缩旧结果，必要时重新读取”的简单 trade-off。
-
-### 完整常量参考
-
-| 常量 | 值 | 源文件 |
-|------|-----|--------|
-| `AUTOCOMPACT_BUFFER_TOKENS` | 13,000 | `autoCompact.ts:62` |
-| `MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES` | 3 | `autoCompact.ts:70` |
-| `MAX_OUTPUT_TOKENS_FOR_SUMMARY` | 20,000 | `autoCompact.ts:30` |
-| `POST_COMPACT_TOKEN_BUDGET` | 50,000 | `compact.ts:123` |
-| `POST_COMPACT_MAX_FILES_TO_RESTORE` | 5 | `compact.ts:122` |
-| `POST_COMPACT_MAX_TOKENS_PER_FILE` | 5,000 | `compact.ts:124` |
-| 时间 micro_compact 间隔 | 60 分钟 | `timeBasedMCConfig.ts` |
-| `MAX_COMPACT_STREAMING_RETRIES` | 2 | `compact.ts:131` |
-
-### contextCollapse 和 sessionMemoryCompact
-
-CC 源码中还有两个机制本教学版没有展开：
-
-- **contextCollapse**：独立的上下文管理系统，启用时抑制 proactive autocompact（`autoCompact.ts:215-222`），由 collapse 的 commit/blocking 流程接管上下文管理。但 manual `/compact` 和 reactive fallback 仍是独立路径，不受 contextCollapse 影响。
-- **sessionMemoryCompact**：compact_history 之前，CC 会先尝试用已有的 session memory（s09 会讲到）做轻量摘要，不调 LLM。这个机制等学完 s09 之后回头看会更清楚。
-
-### 压缩 prompt 长什么样？
-
-CC 的压缩 prompt 有两个硬性要求：
-
-1. **绝对禁止调用工具**：开头就是 `CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.`，末尾还会再 REMINDER 一次
-2. **先分析再总结**：模型需要先在 `<analysis>` 标签里理清思路，然后在 `<summary>` 标签里输出正式摘要。analysis 在格式化时被剥离
-
-### 教学版的简化是刻意的
-
-- micro_compact 用文本占位 → 我们没有 API 层的 `cache_edits` 权限
-- read_file 不特殊处理 → 教学版接受必要时重新读取，避免引入 readFileState 和后压缩恢复机制
-- token 用字符数估算 → 精确 tokenizer 不在教学范围内
-- 后压缩恢复省略 → 教学版只保留摘要，不自动重新附加文件
-- 两个辅助机制不展开 → 属于 10% 的细节
-
-核心设计思想，便宜的先跑贵的后跑，完整保留。
-
-</details>
-
-<!-- translation-sync: zh@v2, en@v2, ja@v2 -->
+<!-- translation-sync: zh@v8, en@v8, ja@v8 -->
