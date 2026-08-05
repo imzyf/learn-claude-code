@@ -4,11 +4,12 @@
  * s09 只新增记忆系统，其余（工具表 / hook / nag / 技能层 / 压缩）整套沿用 s07/s08
  * 的装配，由各自的测试覆盖。这里聚焦记忆函数：接受目录参数，指向临时目录读写真实文件验证往返；
  * selectRelevantMemories 用 fake client 走 LLM 挑选，client 抛错时回退关键词匹配；
- * extractMemories / consolidateMemories 验证写盘、非法条目过滤，以及出错时不动旧文件。
- * agentLoop 指向空的临时记忆目录：loadMemories 无文件即短路，末尾 extractMemories
- * 收到 "[]" 不写盘。
+ * extractMemories 验证 scope / 重复过滤与写盘，consolidateMemories 验证阈值、
+ * 校验失败时不动旧文件。agentLoop 指向空的临时记忆目录：loadMemories 无文件即短路，
+ * 末尾 extractMemories 收到 "[]" 不写盘，也就不触发整合。
  */
 import * as fs from "node:fs";
+import * as path from "node:path";
 import type Anthropic from "@anthropic-ai/sdk";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
@@ -27,14 +28,20 @@ import {
   agentLoop,
   buildSystem,
   consolidateMemories,
+  extractJsonArray,
   extractMemories,
+  keywordMemorySelection,
   listMemoryFiles,
   loadMemories,
   memoryFilenames,
+  memoryPath,
+  memorySlug,
   messageText,
   readMemoryFile,
   readMemoryIndex,
   selectRelevantMemories,
+  shouldStoreMemory,
+  validateMemoryRecord,
   writeMemoryFile,
 } from "./main";
 
@@ -54,22 +61,157 @@ const baseDeps = () => ({
   hooks: createHooks(noopLogger),
 });
 
-// ── parseFrontmatter / messageText (pure) ─────────────────
+// 模型返回的候选记忆：提取阶段必须带 scope。
+const candidate = (over: Record<string, unknown> = {}) => ({
+  name: "user-tabs",
+  type: "user",
+  scope: "persistent",
+  description: "prefers tabs",
+  body: "Use tabs.",
+  ...over,
+});
+
+// ── pure helpers ──────────────────────────────────────────
 describe("pure helpers", () => {
-  it("messageText reads string content and text blocks", () => {
+  it("messageText 读出字符串内容和 text 块", () => {
     expect(messageText({ role: "user", content: "plain" })).toBe("plain");
     expect(
       messageText({
         role: "assistant",
         content: [textBlock("a"), textBlock("b")],
       }),
-    ).toBe("a b");
+    ).toBe("a\nb");
+  });
+
+  it("memorySlug 折叠非字母数字字符，保留中文，空结果退回 memory", () => {
+    expect(memorySlug("User Tabs")).toBe("user-tabs");
+    expect(memorySlug("../etc/passwd")).toBe("etc-passwd");
+    expect(memorySlug("缩进偏好")).toBe("缩进偏好");
+    expect(memorySlug("///")).toBe("memory");
+  });
+
+  it("extractJsonArray 跳过散文里的方括号，取出第一个合法数组", () => {
+    expect(extractJsonArray("噪声 [0, 2] 后面还有 ] 一个方括号")).toEqual([
+      0, 2,
+    ]);
+    expect(extractJsonArray('[{"a": "]"}]')).toEqual([{ a: "]" }]);
+    expect(extractJsonArray("没有数组")).toEqual([]);
+  });
+
+  it("memoryPath 挡住目录穿越和写索引", () => {
+    expect(memoryPath(tmp, "a.md")).toBe(path.join(tmp, "a.md"));
+    expect(() => memoryPath(tmp, "../escape.md")).toThrow();
+    expect(() => memoryPath(tmp, "MEMORY.md")).toThrow();
+    expect(memoryPath(tmp, "MEMORY.md", true)).toBe(
+      path.join(tmp, "MEMORY.md"),
+    );
+  });
+
+  it("readMemoryFile 对越界文件名返回 null", () => {
+    fs.writeFileSync(path.join(tmp, "..", "outside.md"), "secret");
+    expect(readMemoryFile(tmp, "../outside.md")).toBeNull();
+    fs.rmSync(path.join(tmp, "..", "outside.md"), { force: true });
+  });
+
+  it("validateMemoryRecord 拒绝非法 type 和缺失的 scope", () => {
+    expect(validateMemoryRecord(candidate(), true)).toMatchObject({
+      type: "user",
+      scope: "persistent",
+    });
+    expect(
+      validateMemoryRecord(candidate({ type: "banana" }), true),
+    ).toBeNull();
+    expect(validateMemoryRecord(candidate({ scope: "" }), true)).toBeNull();
+    expect(validateMemoryRecord(candidate({ body: "" }), true)).toBeNull();
+    // 整合阶段不要求 scope。
+    expect(
+      validateMemoryRecord({ ...candidate(), scope: undefined }),
+    ).toMatchObject({ name: "user-tabs" });
+  });
+});
+
+// ── shouldStoreMemory (持久性 + 去重) ─────────────────────
+describe("shouldStoreMemory", () => {
+  const stored = [
+    { name: "user-tabs", description: "prefers tabs", body: "Use tabs." },
+  ];
+
+  it("接受带 scope=persistent 的新记忆", () => {
+    expect(
+      shouldStoreMemory(
+        {
+          name: "db-port",
+          type: "project",
+          description: "postgres on 5432",
+          body: "Port 5432.",
+          scope: "persistent",
+        },
+        stored,
+      ),
+    ).toBe(true);
+  });
+
+  it("丢弃 current_task 的候选", () => {
+    expect(
+      shouldStoreMemory(
+        {
+          name: "no-files",
+          type: "feedback",
+          description: "do not create files",
+          body: "Skip file creation.",
+          scope: "current_task",
+        },
+        stored,
+      ),
+    ).toBe(false);
+  });
+
+  it("丢弃正文里写明只管当前会话的候选", () => {
+    expect(
+      shouldStoreMemory(
+        {
+          name: "no-files",
+          type: "feedback",
+          description: "temporary rule",
+          body: "Do not create files in this session.",
+          scope: "persistent",
+        },
+        stored,
+      ),
+    ).toBe(false);
+  });
+
+  it("丢弃与已有记忆同名或同正文的候选", () => {
+    expect(
+      shouldStoreMemory(
+        {
+          name: "User Tabs",
+          type: "user",
+          description: "another wording",
+          body: "another body",
+          scope: "persistent",
+        },
+        stored,
+      ),
+    ).toBe(false);
+    expect(
+      shouldStoreMemory(
+        {
+          name: "tabs-again",
+          type: "user",
+          description: "another wording",
+          body: "use   TABS.",
+          scope: "persistent",
+        },
+        stored,
+      ),
+    ).toBe(false);
   });
 });
 
 // ── memory file round-trip (real temp dir) ────────────────
 describe("memory files", () => {
-  it("writes a file, rebuilds the index, and reads it back", () => {
+  it("写文件、重建索引，再读回来", () => {
     writeMemoryFile(
       tmp,
       "User Tabs",
@@ -80,7 +222,7 @@ describe("memory files", () => {
 
     expect(memoryFilenames(tmp)).toEqual(["user-tabs.md"]); // slug 化文件名，排除 MEMORY.md
     expect(readMemoryIndex(tmp)).toContain(
-      "- [User Tabs](user-tabs.md) — prefers tabs over spaces",
+      "- [User Tabs](user-tabs.md) - prefers tabs over spaces",
     );
 
     const [file] = listMemoryFiles(tmp);
@@ -94,13 +236,30 @@ describe("memory files", () => {
     );
   });
 
-  it("round-trips a description with YAML-special characters", () => {
+  it("description 里的 YAML 特殊字符能原样往返", () => {
     writeMemoryFile(tmp, "DB Config", "project", 'host: localhost "x"', "...");
     const [file] = listMemoryFiles(tmp);
     expect(file.description).toBe('host: localhost "x"');
   });
 
-  it("returns null for a missing file and empty index for an empty dir", () => {
+  it("拒绝空字段和非法 type", () => {
+    expect(() => writeMemoryFile(tmp, " ", "user", "d", "b")).toThrow();
+    expect(() => writeMemoryFile(tmp, "n", "user", "d", " ")).toThrow();
+    expect(() =>
+      writeMemoryFile(tmp, "n", "banana" as "user", "d", "b"),
+    ).toThrow();
+    expect(memoryFilenames(tmp)).toEqual([]);
+  });
+
+  it("文件里 type 非法时按 project 读出", () => {
+    fs.writeFileSync(
+      path.join(tmp, "odd.md"),
+      "---\nname: odd\ndescription: d\ntype: banana\n---\n\nbody\n",
+    );
+    expect(listMemoryFiles(tmp)[0].type).toBe("project");
+  });
+
+  it("文件缺失返回 null，空目录索引为空", () => {
     expect(readMemoryFile(tmp, "nope.md")).toBeNull();
     expect(readMemoryIndex(tmp)).toBe("");
     expect(memoryFilenames(tmp)).toEqual([]);
@@ -120,7 +279,7 @@ describe("selectRelevantMemories", () => {
     writeMemoryFile(tmp, "editor-prefs", "user", "tabs not spaces", "...");
   });
 
-  it("returns the filenames the model selects by index", async () => {
+  it("按模型给出的下标返回文件名", async () => {
     const client = fakeClient(fakeMessage([textBlock("[0]")], "end_turn"));
 
     const selected = await selectRelevantMemories(
@@ -132,7 +291,7 @@ describe("selectRelevantMemories", () => {
     expect(selected).toEqual(["database-config.md"]);
   });
 
-  it("falls back to keyword matching when the model call fails", async () => {
+  it("模型调用失败时回退关键词匹配", async () => {
     const client = fakeClient(); // 无预设响应 → create 抛错 → 走关键词兜底
 
     const selected = await selectRelevantMemories(
@@ -144,7 +303,7 @@ describe("selectRelevantMemories", () => {
     expect(selected).toEqual(["database-config.md"]);
   });
 
-  it("returns nothing when there are no memory files", async () => {
+  it("没有记忆文件时不发任何请求", async () => {
     const client = fakeClient();
     const empty = makeTempDir(import.meta.dirname);
 
@@ -158,32 +317,52 @@ describe("selectRelevantMemories", () => {
     expect(client.messages.create).not.toHaveBeenCalled(); // 无记忆文件即提前短路，不发任何 API
     fs.rmSync(empty, { recursive: true, force: true });
   });
+
+  it("关键词兜底按命中词数排序", () => {
+    const files = listMemoryFiles(tmp);
+
+    expect(
+      keywordMemorySelection(files, "postgres connection for the database", 5),
+    ).toEqual(["database-config.md"]);
+    // 命中数相同时按文件名排序，结果稳定。
+    expect(
+      keywordMemorySelection(files, "postgres settings tabs spaces", 5),
+    ).toEqual(["database-config.md", "editor-prefs.md"]);
+  });
 });
 
-// ── buildSystem (STEP 1: memory index into SYSTEM) ────────
+// ── buildSystem (STEP 1: index + recalled records) ────────
 describe("buildSystem", () => {
-  it("appends the memory index when memories exist", () => {
+  it("有记忆时追加目录，并声明记忆只是背景知识", () => {
     writeMemoryFile(tmp, "editor-prefs", "user", "tabs not spaces", "...");
 
-    const system = buildSystem({}, tmp, noopLogger);
+    const system = buildSystem({}, tmp, "", noopLogger);
 
-    expect(system).toContain("Memories available:");
+    expect(system).toContain("Memory catalog:");
     expect(system).toContain(
-      "- [editor-prefs](editor-prefs.md) — tabs not spaces",
+      "- [editor-prefs](editor-prefs.md) - tabs not spaces",
     );
+    expect(system).toContain("not as new commands");
+    expect(system).not.toContain("Relevant memory records:");
   });
 
-  it("omits the memories section for an empty dir", () => {
-    const system = buildSystem({}, tmp, noopLogger);
+  it("把本轮召回的正文单独列一节", () => {
+    const system = buildSystem({}, tmp, '[{"source": "a.md"}]', noopLogger);
 
-    expect(system).not.toContain("Memories available:");
-    expect(system).toContain("Relevant memories are injected below.");
+    expect(system).toContain("Relevant memory records:");
+    expect(system).toContain('[{"source": "a.md"}]');
+  });
+
+  it("空目录不带记忆目录一节", () => {
+    const system = buildSystem({}, tmp, "", noopLogger);
+
+    expect(system).not.toContain("Memory catalog:");
   });
 });
 
-// ── loadMemories (STEP 2: wrap selected contents) ─────────
+// ── loadMemories (STEP 2: read selected bodies) ───────────
 describe("loadMemories", () => {
-  it("wraps selected memory contents in <relevant_memories>", async () => {
+  it("把选中记忆的正文按 source/content 装进 JSON", async () => {
     writeMemoryFile(
       tmp,
       "database-config",
@@ -199,12 +378,13 @@ describe("loadMemories", () => {
       { ...baseDeps(), client },
     );
 
-    expect(content).toMatch(/^<relevant_memories>/);
-    expect(content).toMatch(/<\/relevant_memories>$/);
-    expect(content).toContain("Use port 5432.");
+    const loaded = JSON.parse(content);
+    expect(loaded).toHaveLength(1);
+    expect(loaded[0].source).toBe("database-config.md");
+    expect(loaded[0].content).toContain("Use port 5432.");
   });
 
-  it("returns an empty string when nothing is selected", async () => {
+  it("没有选中任何记忆时返回空串", async () => {
     writeMemoryFile(tmp, "editor-prefs", "user", "tabs not spaces", "...");
     const client = fakeClient(fakeMessage([textBlock("[]")], "end_turn"));
 
@@ -223,65 +403,64 @@ describe("extractMemories", () => {
   const dialogue: Anthropic.MessageParam[] = [
     { role: "user", content: "I prefer tabs, remember that" },
   ];
+  const respondWith = (items: unknown[]) =>
+    fakeClient(fakeMessage([textBlock(JSON.stringify(items))], "end_turn"));
 
-  it("writes extracted memories and narrows invalid types", async () => {
-    const client = fakeClient(
-      fakeMessage(
-        [
-          textBlock(
-            JSON.stringify([
-              {
-                name: "user-tabs",
-                type: "banana",
-                description: "prefers tabs",
-                body: "Use tabs.",
-              },
-            ]),
-          ),
-        ],
-        "end_turn",
-      ),
-    );
+  it("写入 persistent 候选并返回条数", async () => {
+    const client = respondWith([candidate()]);
 
-    await extractMemories(tmp, dialogue, { ...baseDeps(), client });
+    const stored = await extractMemories(tmp, dialogue, {
+      ...baseDeps(),
+      client,
+    });
 
+    expect(stored).toBe(1);
     expect(memoryFilenames(tmp)).toEqual(["user-tabs.md"]);
-    const [file] = listMemoryFiles(tmp);
-    expect(file.type).toBe("user"); // 非法 type 收窄回 "user"
+    expect(listMemoryFiles(tmp)[0].type).toBe("user");
     expect(readMemoryIndex(tmp)).toContain("user-tabs.md");
   });
 
-  it("skips items missing description or body", async () => {
-    const client = fakeClient(
-      fakeMessage(
-        [
-          textBlock(
-            JSON.stringify([
-              { name: "valid", type: "project", description: "d", body: "b" },
-              { name: "no-body", type: "project", description: "d" },
-            ]),
-          ),
-        ],
-        "end_turn",
-      ),
-    );
+  it("跳过 current_task、非法 type 和缺字段的候选", async () => {
+    const client = respondWith([
+      candidate({ name: "valid", type: "project" }),
+      candidate({ name: "temp-rule", scope: "current_task" }),
+      candidate({ name: "bad-type", type: "banana" }),
+      candidate({ name: "no-body", body: "" }),
+    ]);
 
-    await extractMemories(tmp, dialogue, { ...baseDeps(), client });
+    const stored = await extractMemories(tmp, dialogue, {
+      ...baseDeps(),
+      client,
+    });
 
+    expect(stored).toBe(1);
     expect(memoryFilenames(tmp)).toEqual(["valid.md"]);
   });
 
-  it("swallows client errors without writing", async () => {
+  it("跳过与已有记忆重复的候选", async () => {
+    writeMemoryFile(tmp, "user-tabs", "user", "prefers tabs", "Use tabs.");
+    const client = respondWith([candidate({ description: "different words" })]);
+
+    const stored = await extractMemories(tmp, dialogue, {
+      ...baseDeps(),
+      client,
+    });
+
+    expect(stored).toBe(0);
+    expect(memoryFilenames(tmp)).toEqual(["user-tabs.md"]);
+  });
+
+  it("client 出错时不写盘，返回 0", async () => {
     const client = fakeClient(); // 无预设响应 → create 抛错
 
     await expect(
       extractMemories(tmp, dialogue, { ...baseDeps(), client }),
-    ).resolves.toBeUndefined();
+    ).resolves.toBe(0);
 
     expect(memoryFilenames(tmp)).toEqual([]);
   });
 
-  it("skips the API call entirely for an empty dialogue", async () => {
+  it("对话为空时完全不调 API", async () => {
     const client = fakeClient();
 
     await extractMemories(tmp, [{ role: "user", content: "   " }], {
@@ -302,7 +481,7 @@ describe("consolidateMemories", () => {
     }
   };
 
-  it("does nothing below the threshold", async () => {
+  it("未到阈值什么都不做", async () => {
     seedFiles(2);
     const client = fakeClient();
 
@@ -312,7 +491,7 @@ describe("consolidateMemories", () => {
     expect(memoryFilenames(tmp)).toHaveLength(2);
   });
 
-  it("replaces old files with the consolidated result at the threshold", async () => {
+  it("到阈值后用整合结果替换旧文件", async () => {
     seedFiles(10);
     const client = fakeClient(
       fakeMessage(
@@ -332,13 +511,14 @@ describe("consolidateMemories", () => {
       ),
     );
 
-    await consolidateMemories(tmp, { ...baseDeps(), client });
+    const count = await consolidateMemories(tmp, { ...baseDeps(), client });
 
+    expect(count).toBe(1);
     expect(memoryFilenames(tmp)).toEqual(["merged.md"]);
-    expect(readMemoryIndex(tmp)).toBe("- [merged](merged.md) — all in one");
+    expect(readMemoryIndex(tmp)).toBe("- [merged](merged.md) - all in one");
   });
 
-  it("keeps old files intact when the client call fails", async () => {
+  it("client 调用失败时旧文件原封不动", async () => {
     seedFiles(10);
     const client = fakeClient();
 
@@ -347,7 +527,7 @@ describe("consolidateMemories", () => {
     expect(memoryFilenames(tmp)).toHaveLength(10);
   });
 
-  it("keeps old files intact when the response has no JSON array", async () => {
+  it("回复里没有 JSON 数组时旧文件原封不动", async () => {
     seedFiles(10);
     const client = fakeClient(
       fakeMessage([textBlock("cannot consolidate")], "end_turn"),
@@ -355,6 +535,33 @@ describe("consolidateMemories", () => {
 
     await consolidateMemories(tmp, { ...baseDeps(), client });
 
+    expect(memoryFilenames(tmp)).toHaveLength(10);
+  });
+
+  it("整合结果全部非法或 slug 撞车时不删旧文件", async () => {
+    seedFiles(10);
+    const dup = {
+      type: "project",
+      description: "d",
+      body: "b",
+    };
+    const client = fakeClient(
+      fakeMessage(
+        [
+          textBlock(
+            JSON.stringify([
+              { ...dup, name: "Merged One" },
+              { ...dup, name: "merged-one" },
+            ]),
+          ),
+        ],
+        "end_turn",
+      ),
+    );
+
+    const count = await consolidateMemories(tmp, { ...baseDeps(), client });
+
+    expect(count).toBe(0);
     expect(memoryFilenames(tmp)).toHaveLength(10);
   });
 });
@@ -369,7 +576,7 @@ describe("agentLoop", () => {
     sessionDir: tmp,
   });
 
-  it("executes a plain tool call, then extraction finds nothing new", async () => {
+  it("执行普通工具调用，随后提取不到新记忆", async () => {
     const client = fakeClient(
       fakeMessage(
         [toolUseBlock("tu_1", "bash", { command: "echo hi" })],
@@ -391,10 +598,10 @@ describe("agentLoop", () => {
     expect(memoryFilenames(tmp)).toEqual([]); // 未写入任何记忆
   });
 
-  it("dispatches task to a subagent and keeps only its summary", async () => {
+  it("分发 task 给子 agent，只保留它的总结", async () => {
     const client = fakeClient(
       fakeMessage(
-        [toolUseBlock("tu_1", "task", { description: "sub work" })],
+        [toolUseBlock("tu_1", "task", { prompt: "sub work" })],
         "tool_use",
       ),
       fakeMessage([textBlock("sub result")], "end_turn"),
