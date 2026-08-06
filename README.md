@@ -1,41 +1,41 @@
-English · [中文](./README.zh-CN.md)
+<h4 align="right"><strong>中文</strong> | <a href="./README.en.md">English</a></h4>
 
 # Learn Claude Code (TypeScript)
 
 > Harness Engineering for Real Agents.
 
-A **TypeScript port** of [shareAI-lab/learn-claude-code](https://github.com/shareAI-lab/learn-claude-code) (originally Python). It rebuilds Claude Code's internals, one step at a time.
+[shareAI-lab/learn-claude-code](https://github.com/shareAI-lab/learn-claude-code)（原版为 Python）的 **TypeScript 移植版**。它一步一步重建 Claude Code 的内部实现。
 
-## Quick Start
+## 快速开始
 
 ```sh
-make setup      # install deps, create .env from .env.example.upstream
-# then put your ANTHROPIC_API_KEY in .env (MODEL_ID / ANTHROPIC_BASE_URL are optional)
-make smoke      # one API call to check the setup
-make s01        # run session 1 (interactive); make help lists s01–s20
-make s01 debug  # debug any session from s01 through s20 on port 9229
+make setup      # 安装依赖，并从 .env.example.upstream 生成 .env
+# 然后把 ANTHROPIC_API_KEY 填进 .env（MODEL_ID / ANTHROPIC_BASE_URL 可选）
+make smoke      # 发一次 API 调用，检查环境是否配好
+make s01        # 运行第 1 课（交互式）；make help 会列出 s01–s20
+make s01 debug  # 在 9229 端口调试 s01–s20 中的任意一课
 ```
 
-For a debug run, attach VS Code with the
-`Attach session (make sXX debug)` launch configuration.
+调试时，请使用 VS Code 的
+`Attach session (make sXX debug)` 启动配置进行连接。
 
-## Highlights
+## 亮点
 
-### Architecture 🏗️
+### 架构
 
-- **pnpm** manages dependencies at the repo root. LLM calls go through the official **`@anthropic-ai/sdk`**.
-- Shared helpers live in `lib/`.
-- `bin/sync-upstream.sh` (via `make sync`) pulls fresh Python reference sources from upstream. Your TS ports stay untouched, so `git diff` shows exactly what to port next.
+- 依赖由 **pnpm** 在仓库根目录统一管理。LLM 调用走官方的 **`@anthropic-ai/sdk`**。
+- 公共辅助代码放在 `lib/`。
+- `bin/sync-upstream.sh`（通过 `make sync` 调用）从上游拉取最新的 Python 参考源码。你的 TS 移植代码不会被改动，所以 `git diff` 能准确显示下一步要移植什么。
 
-### Observability 👀
+### 可观测性
 
-- Each run writes a timestamped pair of files under the session's `sXX/.log/`. Runs never overwrite each other.
-- `*.json` — the raw API request/response stream, pretty-printed.
-- `*.log` — a human-readable transcript. It has config / user / assistant / tool-result sections, and per-call token usage.
-- Cost: prices load once at startup from the LiteLLM price list (async).
+- 每次运行都会在该课的 `sXX/.log/` 下写入一对带时间戳的文件。多次运行不会互相覆盖。
+- `*.json` —— 原始的 API 请求/响应流，已格式化。
+- `*.log` —— 给人看的对话记录。包含 config / user / assistant / tool-result 各段落，以及每次调用的 token 用量。
+- 成本：价格在启动时从 LiteLLM 价格表异步加载一次。
 
-### Testability 🧪
+### 可测试性
 
-- **Vitest** (`make test`) — fast, free, and needs no credentials. It never calls the real Claude API.
-- **Dependency injection**, not module mocking. `agentLoop(messages, { client, logger })` takes fakes in tests, and the real code at runtime.
-- An `import.meta.main` guard sits on the entry point. So importing `main.ts` from a test never starts the REPL or writes log files.
+- **Vitest**（`make test`）—— 快、免费、不需要任何凭证。它从不调用真实的 Claude API。
+- 用 **Dependency injection**，而不是 mock 模块。`agentLoop(messages, { client, logger })` 在测试里接收假对象，在运行时接收真实实现。
+- 入口文件上有 `import.meta.main` 守卫。所以测试中 import `main.ts` 不会启动 REPL，也不会写日志文件。
