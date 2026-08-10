@@ -1,11 +1,13 @@
 /**
- * s12_task_system/main.test.ts
+ * s10_task_system/main.test.ts
  *
- * s12 的新增点是任务图：createTask/save/load 往返、canStart 的依赖判定、
- * claimTask(pending -> in_progress)、completeTask 完成并汇报下游解除阻塞。
- * 每个用例用临时 .tasks 目录隔离（目录作为参数显式传入）。agentLoop 只验证
- * 任务工具已并入 dispatch 并能端到端跑通。s12 接管了 prompt 组装（「Available
- * tools」要含任务工具），单列一个用例覆盖；context 推导的其余部分沿用 s10。
+ * s10 的新增点是任务系统，测试只聚焦它：
+ *   - TaskStore 的持久化往返、ID 校验、subject / 依赖的合法性检查
+ *   - canStart 的依赖判定（未完成、缺失都算阻塞）
+ *   - claimTask（pending -> in_progress）、completeTask（owner 校验 + 汇报解除阻塞）
+ *   - runCreateTask / runListTasks 的回报文本
+ *   - 任务工具已并入 tools 与 dispatch，agentLoop 端到端跑通一次 create_task
+ * 每个用例用临时 .tasks 目录隔离。工具层与 hook 层已在 s02-s04 覆盖，这里不再重复。
  */
 import * as fs from "node:fs";
 import type Anthropic from "@anthropic-ai/sdk";
@@ -18,136 +20,184 @@ import {
   textBlock,
   toolUseBlock,
 } from "../lib/testing";
-import type { Context } from "../s10_system_prompt/main";
+import { createHooks } from "../s04_hooks/main";
 import {
   agentLoop,
   canStart,
   claimTask,
   completeTask,
-  createTask,
-  getSystemPrompt,
-  listTasks,
-  loadTask,
-  resetPromptCache,
+  getTask,
   runCreateTask,
-  runGetTask,
   runListTasks,
-  updateContext,
+  TaskStore,
+  tools,
 } from "./main";
 
-const ctx = (): Context => ({
-  enabled_tools: ["bash", "read_file", "write_file"],
-  workspace: "/repo",
-  memories: "",
-});
-
 let dir = "";
+let tasks: TaskStore;
 beforeEach(() => {
   dir = makeTempDir(import.meta.dirname);
+  tasks = new TaskStore(dir);
 });
 afterEach(() => {
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
 // ── 持久化往返 ────────────────────────────────────────────
-describe("createTask / loadTask", () => {
+describe("TaskStore", () => {
   it("persists a pending task with no owner", () => {
-    const task = createTask(dir, "write docs", "add README", []);
+    const task = tasks.create("write docs", "add README");
+    expect(task.id).toMatch(/^task_[0-9a-f]{8}$/);
     expect(task.status).toBe("pending");
     expect(task.owner).toBeNull();
 
-    const loaded = loadTask(dir, task.id);
+    const loaded = tasks.load(task.id);
     expect(loaded.subject).toBe("write docs");
     expect(loaded.description).toBe("add README");
+  });
+
+  it("lists tasks and reports an empty store before anything is created", () => {
+    expect(tasks.list()).toEqual([]);
+    tasks.create("alpha");
+    tasks.create("beta");
+    expect(
+      tasks
+        .list()
+        .map((t) => t.subject)
+        .sort(),
+    ).toEqual(["alpha", "beta"]);
+  });
+
+  it("rejects an empty subject", () => {
+    expect(() => tasks.create("   ")).toThrow("cannot be empty");
+  });
+
+  it("rejects a dependency that does not exist", () => {
+    expect(() => tasks.create("needs ghost", "", ["task_deadbeef"])).toThrow(
+      "Dependency not found",
+    );
+  });
+
+  it("deduplicates blockedBy", () => {
+    const dep = tasks.create("dep");
+    const task = tasks.create("needs dep", "", [dep.id, dep.id]);
+    expect(task.blockedBy).toEqual([dep.id]);
+  });
+
+  it("rejects an ID that is not task_ + 8 hex chars", () => {
+    expect(() => tasks.load("task_missing")).toThrow("Invalid task ID");
+    expect(() => tasks.load("../escape")).toThrow("Invalid task ID");
   });
 });
 
 // ── canStart：依赖判定 ─────────────────────────────────────
 describe("canStart", () => {
   it("is startable when there are no dependencies", () => {
-    const task = createTask(dir, "standalone");
-    expect(canStart(dir, task.id)).toBe(true);
+    const task = tasks.create("standalone");
+    expect(canStart(tasks, task.id)).toBe(true);
   });
 
   it("is blocked while a dependency is not completed", () => {
-    const dep = createTask(dir, "dep");
-    const task = createTask(dir, "needs dep", "", [dep.id]);
-    expect(canStart(dir, task.id)).toBe(false);
+    const dep = tasks.create("dep");
+    const task = tasks.create("needs dep", "", [dep.id]);
+    expect(canStart(tasks, task.id)).toBe(false);
   });
 
   it("becomes startable once the dependency completes", () => {
-    const dep = createTask(dir, "dep");
-    const task = createTask(dir, "needs dep", "", [dep.id]);
-    claimTask(dir, dep.id, noopLogger);
-    completeTask(dir, dep.id, noopLogger);
-    expect(canStart(dir, task.id)).toBe(true);
+    const dep = tasks.create("dep");
+    const task = tasks.create("needs dep", "", [dep.id]);
+    claimTask(tasks, dep.id, noopLogger);
+    completeTask(tasks, dep.id, noopLogger);
+    expect(canStart(tasks, task.id)).toBe(true);
   });
 
-  it("treats a missing dependency as blocking", () => {
-    const task = createTask(dir, "needs ghost", "", ["task_missing"]);
-    expect(canStart(dir, task.id)).toBe(false);
+  it("treats a dependency whose file is gone as blocking", () => {
+    const dep = tasks.create("dep");
+    const task = tasks.create("needs dep", "", [dep.id]);
+    fs.rmSync(`${dir}/${dep.id}.json`);
+    expect(canStart(tasks, task.id)).toBe(false);
   });
 });
 
 // ── claimTask ─────────────────────────────────────────────
 describe("claimTask", () => {
   it("moves a pending task to in_progress and sets the owner", () => {
-    const task = createTask(dir, "do it");
-    const msg = claimTask(dir, task.id, noopLogger, "worker-1");
+    const task = tasks.create("do it");
+    const msg = claimTask(tasks, task.id, noopLogger, "worker-1");
     expect(msg).toContain("Claimed");
-    const loaded = loadTask(dir, task.id);
+    const loaded = tasks.load(task.id);
     expect(loaded.status).toBe("in_progress");
     expect(loaded.owner).toBe("worker-1");
   });
 
   it("refuses to claim a task that is not pending", () => {
-    const task = createTask(dir, "do it");
-    claimTask(dir, task.id, noopLogger);
-    const msg = claimTask(dir, task.id, noopLogger);
-    expect(msg).toContain("cannot claim");
+    const task = tasks.create("do it");
+    claimTask(tasks, task.id, noopLogger);
+    expect(claimTask(tasks, task.id, noopLogger)).toContain("cannot claim");
   });
 
   it("reports the blockers when dependencies are unmet", () => {
-    const dep = createTask(dir, "dep");
-    const task = createTask(dir, "needs dep", "", [dep.id]);
-    const msg = claimTask(dir, task.id, noopLogger);
+    const dep = tasks.create("dep");
+    const task = tasks.create("needs dep", "", [dep.id]);
+    const msg = claimTask(tasks, task.id, noopLogger);
     expect(msg).toContain("Blocked by");
     expect(msg).toContain(dep.id);
-    expect(loadTask(dir, task.id).status).toBe("pending");
+    expect(tasks.load(task.id).status).toBe("pending");
   });
 });
 
 // ── completeTask ──────────────────────────────────────────
 describe("completeTask", () => {
   it("completes an in-progress task", () => {
-    const task = createTask(dir, "do it");
-    claimTask(dir, task.id, noopLogger);
-    const msg = completeTask(dir, task.id, noopLogger);
-    expect(msg).toContain("Completed");
-    expect(loadTask(dir, task.id).status).toBe("completed");
+    const task = tasks.create("do it");
+    claimTask(tasks, task.id, noopLogger);
+    expect(completeTask(tasks, task.id, noopLogger)).toContain("Completed");
+    expect(tasks.load(task.id).status).toBe("completed");
   });
 
   it("refuses to complete a task that is not in_progress", () => {
-    const task = createTask(dir, "do it");
-    const msg = completeTask(dir, task.id, noopLogger);
-    expect(msg).toContain("cannot complete");
+    const task = tasks.create("do it");
+    expect(completeTask(tasks, task.id, noopLogger)).toContain(
+      "cannot complete",
+    );
+  });
+
+  it("refuses to complete a task claimed by someone else", () => {
+    const task = tasks.create("do it");
+    claimTask(tasks, task.id, noopLogger, "worker-1");
+    const msg = completeTask(tasks, task.id, noopLogger, "worker-2");
+    expect(msg).toContain("owned by worker-1");
+    expect(tasks.load(task.id).status).toBe("in_progress");
   });
 
   it("reports downstream tasks unblocked by completion", () => {
-    const dep = createTask(dir, "dep");
-    createTask(dir, "downstream", "", [dep.id]);
-    claimTask(dir, dep.id, noopLogger);
-    const msg = completeTask(dir, dep.id, noopLogger);
+    const dep = tasks.create("dep");
+    tasks.create("downstream", "", [dep.id]);
+    claimTask(tasks, dep.id, noopLogger);
+    const msg = completeTask(tasks, dep.id, noopLogger);
     expect(msg).toContain("Unblocked");
     expect(msg).toContain("downstream");
   });
+
+  it("does not re-report tasks that were already unblocked", () => {
+    const first = tasks.create("first");
+    const second = tasks.create("second");
+    tasks.create("downstream", "", [first.id]);
+    claimTask(tasks, first.id, noopLogger);
+    completeTask(tasks, first.id, noopLogger);
+    // downstream 在 first 完成时就已就绪，完成 second 不该再汇报一次。
+    claimTask(tasks, second.id, noopLogger);
+    expect(completeTask(tasks, second.id, noopLogger)).not.toContain(
+      "Unblocked",
+    );
+  });
 });
 
-// ── runCreateTask ─────────────────────────────────────────
-describe("runCreateTask", () => {
+// ── 工具 handler 的回报文本 ────────────────────────────────
+describe("runCreateTask / runListTasks / getTask", () => {
   it("creates a task and reports its id and subject", () => {
     const msg = runCreateTask(
-      dir,
+      tasks,
       "write docs",
       "add README",
       undefined,
@@ -155,59 +205,51 @@ describe("runCreateTask", () => {
     );
     expect(msg).toContain("Created");
     expect(msg).toContain("write docs");
-    expect(listTasks(dir)).toHaveLength(1);
+    expect(tasks.list()).toHaveLength(1);
   });
 
   it("reports blockedBy dependencies in the message", () => {
-    const dep = createTask(dir, "dep");
-    const msg = runCreateTask(dir, "needs dep", "", [dep.id], noopLogger);
+    const dep = tasks.create("dep");
+    const msg = runCreateTask(tasks, "needs dep", "", [dep.id], noopLogger);
     expect(msg).toContain("blockedBy");
     expect(msg).toContain(dep.id);
-    const created = listTasks(dir).find((t) => t.subject === "needs dep");
-    expect(created?.blockedBy).toEqual([dep.id]);
-  });
-});
-
-// ── runGetTask ────────────────────────────────────────────
-describe("runGetTask", () => {
-  it("returns the task JSON for an existing task", () => {
-    const task = createTask(dir, "inspect me");
-    const out = runGetTask(dir, task.id);
-    expect(out).toContain(task.id);
-    expect(out).toContain("inspect me");
   });
 
-  it("reports an error for a missing task", () => {
-    expect(runGetTask(dir, "task_missing")).toContain("not found");
-  });
-});
-
-// ── runListTasks ──────────────────────────────────────────
-describe("runListTasks", () => {
   it("prompts to create tasks when none exist", () => {
-    expect(runListTasks(dir)).toContain("No tasks");
+    expect(runListTasks(tasks)).toContain("No tasks");
   });
 
-  it("renders each task with a status icon", () => {
-    createTask(dir, "alpha");
-    const out = runListTasks(dir);
+  it("renders each task with a status marker", () => {
+    tasks.create("alpha");
+    const out = runListTasks(tasks);
     expect(out).toContain("alpha");
     expect(out).toContain("[pending]");
-    expect(out).toContain("○");
+    expect(out).toContain("[ ]");
+  });
+
+  it("returns the full task JSON", () => {
+    const task = tasks.create("inspect me", "with details");
+    const out = getTask(tasks, task.id);
+    expect(out).toContain(task.id);
+    expect(out).toContain("with details");
   });
 });
 
-// ── system prompt 反映合并后的工具集 ──────────────────────
-describe("getSystemPrompt / updateContext", () => {
-  it("lists the merged task tools in Available tools, not just the base five", () => {
-    resetPromptCache();
-    const context = updateContext("nonexistent/MEMORY.md");
-    const prompt = getSystemPrompt(context);
-    expect(prompt).toContain("Available tools:");
-    expect(prompt).toContain("create_task");
-    expect(prompt).toContain("complete_task");
-    // 基础工具仍在。
-    expect(prompt).toContain("bash");
+// ── 工具集：基础五工具 + 五个任务工具 ──────────────────────
+describe("tools", () => {
+  it("merges the task tools onto the five base tools", () => {
+    expect(tools.map((t) => t.name)).toEqual([
+      "bash",
+      "read_file",
+      "write_file",
+      "edit_file",
+      "glob",
+      "create_task",
+      "list_tasks",
+      "get_task",
+      "claim_task",
+      "complete_task",
+    ]);
   });
 });
 
@@ -225,17 +267,40 @@ describe("agentLoop", () => {
       { role: "user", content: "make a task" },
     ];
 
-    const result = await agentLoop(messages, ctx(), {
+    const result = await agentLoop(messages, {
       client,
       logger: noopLogger,
-      memoryIndex: "nonexistent/MEMORY.md",
-      tasksDir: dir,
+      hooks: createHooks(noopLogger),
+      tasks,
     });
 
     expect(result).toBe("created");
-    // 工具确实落盘了一个任务，且回传的 tool_result 报告了创建。
-    expect(listTasks(dir)).toHaveLength(1);
+    // 工具确实写了一个任务文件，且回传的 tool_result 报告了创建。
+    expect(tasks.list()).toHaveLength(1);
     const toolResults = messages[2].content as Anthropic.ToolResultBlockParam[];
     expect(toolResults[0].content).toContain("Created");
+  });
+
+  it("turns a bad task ID into an error tool_result instead of throwing", async () => {
+    const client = fakeClient(
+      fakeMessage(
+        [toolUseBlock("tu_1", "get_task", { task_id: "nope" })],
+        "tool_use",
+      ),
+      fakeMessage([textBlock("no such task")], "end_turn"),
+    );
+    const messages: Anthropic.MessageParam[] = [
+      { role: "user", content: "show me task nope" },
+    ];
+
+    await agentLoop(messages, {
+      client,
+      logger: noopLogger,
+      hooks: createHooks(noopLogger),
+      tasks,
+    });
+
+    const toolResults = messages[2].content as Anthropic.ToolResultBlockParam[];
+    expect(toolResults[0].content).toContain("Invalid task ID");
   });
 });
