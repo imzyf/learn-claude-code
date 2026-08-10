@@ -1,16 +1,18 @@
 /**
- * s14_cron_scheduler/main.test.ts
+ * s12_cron_scheduler/main.test.ts
  *
- * s14 的新增点是 cron 调度器层，测试只聚焦这一层：
- *   - runCronTick 匹配语义：字段匹配（*、步长、逗号、区间）与 DOM/DOW 的 OR（原 cronMatches）
- *   - scheduleJob / cancelJob：注册/移除、非法表达式拒绝、durable 落盘
- *   - saveDurableJobs / loadDurableJobs：往返，且跳过非法任务
- *   - runCronTick：命中入队、同分钟去重、一次性触发后移除、周期任务保留
- *   - tools 叠加后仍带 cron 工具，且 s13 的 bash（run_in_background）/ s12 任务工具仍在
- *   - agentLoop：消费 cron 队列注入 [Scheduled]；schedule_cron 端到端注册一条任务
- * 任务系统 / 后台任务 / prompt 组装已在 s12 / s13 / s10 覆盖，这里不再重复。
+ * s12 的新增点是 cron 调度器层，测试只聚焦这一层：
+ *   - runCronTick 匹配语义：字段匹配（*、步长、逗号、区间）与 DOM/DOW 的 OR
+ *   - scheduleJob / cancelJob：注册/移除、非法表达式与空 prompt 拒绝、durable 落盘
+ *   - saveDurableJobs / loadDurableJobs：往返，跳过非法任务，pendingDelivery 重新入队
+ *   - runCronTick：命中入队、同分钟去重、未销账前不重复入队
+ *   - acknowledgeCronJobs / restoreCronJobs：一次性任务销账后移除、失败后回队列
+ *   - tools 叠加后仍带 cron 工具，s02 的基础工具仍在
+ *   - agentLoop：消费 cron 队列注入 [Scheduled]、失败撤回、成功销账；
+ *     schedule_cron 端到端注册一条任务
+ * 工具层与 hook 层已在 s02 / s03 / s04 覆盖，这里不再重复。
  *
- * 日期锚点（确定性）：2026-01-01 是周四 → 2026-03-01 周日、03-03 周二、03-04 周三。
+ * 日期锚点（确定性）：2026-01-01 是周四 -> 2026-03-01 周日、03-03 周二、03-04 周三。
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -24,27 +26,23 @@ import {
   textBlock,
   toolUseBlock,
 } from "../lib/testing";
-import type { Context } from "../s10_system_prompt/main";
-import { BackgroundState } from "../s11_background_tasks/main";
+import { createHooks } from "../s04_hooks/main";
 import {
+  acknowledgeCronJobs,
   agentLoop,
   type CronJob,
   CronState,
   cancelJob,
   consumeCronQueue,
+  type Deps,
   hasCronQueue,
   loadDurableJobs,
+  restoreCronJobs,
   runCronTick,
   scheduleJob,
   TOOL_SCHEMAS,
   tools,
 } from "./main";
-
-const ctx = (): Context => ({
-  enabled_tools: ["bash"],
-  workspace: "/repo",
-  memories: "",
-});
 
 let dir = "";
 beforeEach(() => {
@@ -55,12 +53,22 @@ afterEach(() => {
 });
 const durable = () => path.join(dir, ".scheduled_tasks.json");
 
+// agentLoop 的 deps：hook 注册表留空，测试只关心 cron 这一层。
+const deps = (client: Deps["client"], cron: CronState): Deps => ({
+  client,
+  logger: noopLogger,
+  hooks: createHooks(noopLogger),
+  cron,
+});
+
 const makeJob = (over: Partial<CronJob> = {}): CronJob => ({
   id: "cron_test",
   cron: "0 9 * * *",
   prompt: "standup",
   recurring: true,
   durable: false,
+  pendingDelivery: false,
+  lastFired: null,
   ...over,
 });
 
@@ -135,6 +143,13 @@ describe("scheduleJob / cancelJob", () => {
     expect(state.scheduledJobs.size).toBe(0);
   });
 
+  it("rejects an empty prompt", () => {
+    const state = new CronState(durable());
+    const err = scheduleJob(state, "0 9 * * *", "  ", true, false, noopLogger);
+    expect(err).toBe("Prompt cannot be empty");
+    expect(state.scheduledJobs.size).toBe(0);
+  });
+
   it("cancels a job and reports missing ones", () => {
     const state = new CronState(durable());
     const job = scheduleJob(
@@ -162,6 +177,29 @@ describe("loadDurableJobs", () => {
     loadDurableJobs(state, noopLogger);
     expect(state.scheduledJobs.has("cron_a")).toBe(true);
     expect(state.scheduledJobs.has("cron_b")).toBe(false);
+  });
+
+  it("re-queues jobs that were still pending delivery", () => {
+    const pending = makeJob({
+      id: "cron_p",
+      durable: true,
+      pendingDelivery: true,
+    });
+    fs.writeFileSync(durable(), JSON.stringify([pending]));
+
+    const state = new CronState(durable());
+    loadDurableJobs(state, noopLogger);
+    expect(state.cronQueue.map((j) => j.id)).toEqual(["cron_p"]);
+  });
+
+  it("skips jobs with a bad ID or an empty prompt", () => {
+    const badId = makeJob({ id: "job_a", durable: true });
+    const noPrompt = makeJob({ id: "cron_b", prompt: "  ", durable: true });
+    fs.writeFileSync(durable(), JSON.stringify([badId, noPrompt]));
+
+    const state = new CronState(durable());
+    loadDurableJobs(state, noopLogger);
+    expect(state.scheduledJobs.size).toBe(0);
   });
 
   it("is a no-op when the durable file is absent", () => {
@@ -194,39 +232,96 @@ describe("runCronTick", () => {
     expect(hasCronQueue(state)).toBe(false);
   });
 
-  it("removes a one-shot job after firing but keeps recurring ones", () => {
+  it("keeps a one-shot job registered until it is acknowledged", () => {
     const state = new CronState(durable());
-    state.scheduledJobs.set("once", makeJob({ id: "once", recurring: false }));
-    state.scheduledJobs.set("loop", makeJob({ id: "loop", recurring: true }));
+    state.scheduledJobs.set(
+      "cron_once",
+      makeJob({ id: "cron_once", recurring: false }),
+    );
+    state.scheduledJobs.set(
+      "cron_loop",
+      makeJob({ id: "cron_loop", recurring: true }),
+    );
 
     runCronTick(state, at9(), noopLogger);
-    expect(state.scheduledJobs.has("once")).toBe(false);
-    expect(state.scheduledJobs.has("loop")).toBe(true);
+    expect(state.scheduledJobs.has("cron_once")).toBe(true);
     expect(consumeCronQueue(state)).toHaveLength(2);
+  });
+
+  it("does not re-queue a job that is still pending delivery", () => {
+    const state = new CronState(durable());
+    state.scheduledJobs.set("cron_1", makeJob({ id: "cron_1" }));
+
+    runCronTick(state, at9(), noopLogger);
+    expect(consumeCronQueue(state)).toHaveLength(1);
+    // 下一分钟又命中，但上一条还没销账 → 不重复入队。
+    runCronTick(state, new Date(2026, 2, 2, 9, 0), noopLogger);
+    expect(hasCronQueue(state)).toBe(false);
   });
 });
 
-// ── 工具叠加：cron 工具 + s13/s12 的工具仍在 ─────────────────
-describe("tools override", () => {
-  it("adds cron tools on top of s13 and s12 tools", () => {
+// ── 至少一次交付：销账 / 回滚 ────────────────────────────────
+describe("acknowledgeCronJobs / restoreCronJobs", () => {
+  const at9 = () => new Date(2026, 2, 1, 9, 0);
+
+  it("drops one-shot jobs and clears pendingDelivery on recurring ones", () => {
+    const state = new CronState(durable());
+    state.scheduledJobs.set(
+      "cron_once",
+      makeJob({ id: "cron_once", recurring: false }),
+    );
+    state.scheduledJobs.set(
+      "cron_loop",
+      makeJob({ id: "cron_loop", recurring: true }),
+    );
+    runCronTick(state, at9(), noopLogger);
+    const fired = consumeCronQueue(state);
+
+    acknowledgeCronJobs(state, fired);
+    expect(state.scheduledJobs.has("cron_once")).toBe(false);
+    expect(state.scheduledJobs.get("cron_loop")?.pendingDelivery).toBe(false);
+  });
+
+  it("puts delivered jobs back on the queue when restoring", () => {
+    const state = new CronState(durable());
+    state.scheduledJobs.set("cron_1", makeJob({ id: "cron_1" }));
+    runCronTick(state, at9(), noopLogger);
+    const fired = consumeCronQueue(state);
+
+    restoreCronJobs(state, fired);
+    expect(state.cronQueue.map((j) => j.id)).toEqual(["cron_1"]);
+    expect(state.scheduledJobs.get("cron_1")?.pendingDelivery).toBe(true);
+  });
+
+  it("ignores jobs cancelled while they were in flight", () => {
+    const state = new CronState(durable());
+    state.scheduledJobs.set("cron_1", makeJob({ id: "cron_1" }));
+    runCronTick(state, at9(), noopLogger);
+    const fired = consumeCronQueue(state);
+    cancelJob(state, "cron_1", noopLogger);
+
+    acknowledgeCronJobs(state, fired);
+    restoreCronJobs(state, fired);
+    expect(state.scheduledJobs.size).toBe(0);
+    expect(hasCronQueue(state)).toBe(false);
+  });
+});
+
+// ── 工具叠加：cron 工具 + s02 的基础工具仍在 ─────────────────
+describe("tools", () => {
+  it("adds cron tools on top of the s02 base tools", () => {
     const names = tools.map((t) => t.name);
     expect(names).toContain("schedule_cron");
     expect(names).toContain("list_crons");
     expect(names).toContain("cancel_cron");
-    expect(names).toContain("bash"); // s13
-    expect(names).toContain("create_task"); // s12
+    expect(names).toContain("bash"); // s02
+    expect(names).toContain("read_file"); // s02
   });
 
   it("schedule_cron schema parses required fields", () => {
     expect(
       TOOL_SCHEMAS.schedule_cron?.parse({ cron: "0 9 * * *", prompt: "x" }),
     ).toMatchObject({ cron: "0 9 * * *", prompt: "x" });
-  });
-
-  it("keeps the s13 bash run_in_background flag", () => {
-    expect(
-      TOOL_SCHEMAS.bash?.parse({ command: "ls", run_in_background: true }),
-    ).toEqual({ command: "ls", run_in_background: true });
   });
 });
 
@@ -238,14 +333,7 @@ describe("agentLoop", () => {
     const client = fakeClient(fakeMessage([textBlock("handled")], "end_turn"));
     const messages: Anthropic.MessageParam[] = [];
 
-    const result = await agentLoop(messages, ctx(), {
-      client,
-      logger: noopLogger,
-      memoryIndex: "nonexistent/MEMORY.md",
-      tasksDir: dir,
-      background: new BackgroundState(),
-      cron,
-    });
+    const result = await agentLoop(messages, deps(client, cron));
 
     expect(result).toBe("handled");
     expect(messages[0]).toEqual({
@@ -253,6 +341,36 @@ describe("agentLoop", () => {
       content: "[Scheduled] do the thing",
     });
     expect(hasCronQueue(cron)).toBe(false);
+  });
+
+  it("rolls the injection back and re-queues on a model error", async () => {
+    const cron = new CronState(durable());
+    const job = makeJob({ id: "cron_x", pendingDelivery: true });
+    cron.scheduledJobs.set(job.id, job);
+    cron.cronQueue.push(job);
+    // 没有预置响应的 fakeClient 会直接抛错。
+    const client = fakeClient();
+    const messages: Anthropic.MessageParam[] = [
+      { role: "user", content: "hi" },
+    ];
+
+    const result = await agentLoop(messages, deps(client, cron));
+
+    expect(result).toContain("[Error]");
+    expect(messages).toHaveLength(1); // 注入的 [Scheduled] 已撤回
+    expect(cron.cronQueue.map((j) => j.id)).toEqual(["cron_x"]);
+  });
+
+  it("acknowledges delivered jobs after the model responds", async () => {
+    const cron = new CronState(durable());
+    const once = makeJob({ id: "cron_once", recurring: false });
+    cron.scheduledJobs.set(once.id, once);
+    cron.cronQueue.push(once);
+    const client = fakeClient(fakeMessage([textBlock("done")], "end_turn"));
+
+    await agentLoop([], deps(client, cron));
+
+    expect(cron.scheduledJobs.has("cron_once")).toBe(false);
   });
 
   it("registers a job through a schedule_cron tool call", async () => {
@@ -273,14 +391,7 @@ describe("agentLoop", () => {
       { role: "user", content: "schedule standup" },
     ];
 
-    const result = await agentLoop(messages, ctx(), {
-      client,
-      logger: noopLogger,
-      memoryIndex: "nonexistent/MEMORY.md",
-      tasksDir: dir,
-      background: new BackgroundState(),
-      cron,
-    });
+    const result = await agentLoop(messages, deps(client, cron));
 
     expect(result).toBe("scheduled it");
     expect(cron.scheduledJobs.size).toBe(1);

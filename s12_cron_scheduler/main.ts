@@ -1,33 +1,48 @@
 /**
- * s14_cron_scheduler/main.ts - Cron 调度器
+ * s12_cron_scheduler/main.ts - Cron 调度器
  *
- * 独立的定时器 + 队列处理器。
+ * 按本地时间启动一轮 Agent Loop：定时器负责判断时间，队列负责解耦，
+ * 队列处理器等 agent 空闲后再投递。
  *
- * 相比 s13 的变化：
- *   工具层、任务系统、后台任务、prompt 组装继续直接复用，不再内联：
- *     基础工具 handler 复用 s03，任务系统（makeTaskHandlers）复用 s12，
- *     后台任务（BackgroundState / shouldRunBackground / startBackgroundTask /
- *     collectBackgroundResults）与带 run_in_background 的 tools / TOOL_SCHEMAS
- *     复用 s13，getSystemPrompt / Context 复用 s12 / s10，MEMORY_INDEX 复用 s09。
- *     s11 的错误恢复在此照旧省略。
- *   本文件只新增 cron 调度器这一层：
- *   + CronJob 类型（id / cron / prompt / recurring / durable）
- *   + CronState：scheduledJobs / cronQueue / lastFiredAt，由 session 持有、跨轮复用
+ *     +--------------------+   09:00   +-----------------------+
+ *     | 0 9 * * *          | --------> | [Scheduled] run tests |
+ *     | prompt: run tests  |           +-----------+-----------+
+ *     +--------------------+                       |
+ *        scheduledJobs              cronQueue      | agent 空闲
+ *                                                  v
+ *                                          +-------------+
+ *                                          | Agent Loop  |
+ *                                          +-------------+
+ *
+ * 相比 s04 的变化：
+ *   工具层与 hook 层直接复用，不再内联：tools / TOOL_SCHEMAS 复用 s02，
+ *   TOOL_HANDLERS 复用 s03，hook 系统（loadHooks / HookSystem / Deps）复用 s04。
+ *   这里不带 s10 的任务系统和 s11 的后台任务：本章传递的是一条待执行的 prompt，
+ *   不是某个后台命令的执行结果。
+ *   本文件只新增 cron 调度这一层：
+ *   + CronJob 类型（id / cron / prompt / recurring / durable / pendingDelivery /
+ *     lastFired）：pendingDelivery 表示已到期但模型还没接收，lastFired 防止同一
+ *     分钟重复入队，两者都随 durable 任务落盘
+ *   + CronState：scheduledJobs / cronQueue，由 session 持有、跨轮复用
  *   + cronFor：croner 模式的构造+缓存单一入口，匹配与校验都走它
  *     （DOM/DOW 的 OR 语义、步长/区间/校验都由库负责，不再手写字段匹配；
  *      匹配内联进 runCronTick，校验靠构造抛错，均无需单独函数）
  *   + scheduleJob / cancelJob：注册/移除 cron 任务（带校验）
- *   + runCronTick：单次扫描，把匹配的任务推进 cronQueue（定时器每秒调用）
+ *   + runCronTick：单次扫描，把到期任务推进 cronQueue（定时器每秒调用）
  *   + consumeCronQueue / hasCronQueue：agentLoop 与队列处理器读取触发结果
+ *   + acknowledgeCronJobs / restoreCronJobs：至少一次交付的两端
  *   + makeCronHandlers + 3 个新工具：schedule_cron / list_crons / cancel_cron
- *   + updateContext = makeUpdateContext(tools)：enabled_tools 补上 3 个 cron 工具
- *   + agentLoop 在 s13 的基础上，循环开头多一步「消费 cron 队列 -> 注入 messages」
+ *   + agentLoop 在 s04 的基础上，进入循环前多一步「消费 cron 队列 -> 注入 messages」
  *
  * 四个层次：
- *   1. 调度器：1s 定时器检查时间 -> 触发匹配的任务进 cronQueue
+ *   1. 调度器：1s 定时器检查时间 -> 到期任务进 cronQueue
  *   2. 队列：cronQueue 把调度器和 agent 循环解耦
  *   3. 队列处理器：有排队任务且 agent 空闲时唤醒 agent
  *   4. 消费者：agentLoop 消费排队任务，把它们注入 messages
+ *
+ * 交付语义为至少一次：任务先标记 pendingDelivery 落盘再进队列，模型成功接收后
+ * 才销账（一次性任务此时删除，周期任务清 pendingDelivery）；模型调用失败则把注入
+ * 的消息从会话里撤回、任务放回队列。进程若在接收后、销账落盘前退出，重启会重复交付。
  *
  * TS 特有说明：
  *   - Python 的守护线程 -> setInterval(...).unref() 定时器；REPL 关闭时进程可正常退出。
@@ -35,17 +50,21 @@
  *     无需真锁）：用户输入阻塞等待它释放，队列处理器在它被占用时直接跳过
  *     （相当于 acquire(blocking=False)）。cron 状态的读写都在同一事件循环线程，
  *     调度器 tick 与 consumeCronQueue 天然互斥，也不需要 cron_lock。
+ *   - Python 靠「不在主线程」判断定时回合、拒绝交互式批准；这里给定时回合单独装一套
+ *     hook（confirm 直接拒绝），避免它和主终端抢 stdin。
  *   - cron 匹配/校验由 croner 库负责（new Cron(expr).match(date)）；无回调构造
  *     只解析、不启动定时器，模式实例按表达式缓存复用。轮询架构与 code.py 保持一致。
  *   - 提示符走 lib/terminal 的 createPrompt：等输入期间的异步输出先擦掉提示符行，
  *     输出完再连同已输入的内容重画到底部。
  *   - CronState 的 durablePath 必填：入口用 createCronState(import.meta.dirname)
- *     落到各自的 session 目录，测试传临时路径做隔离（对齐 s12 的 tasksDir）。
+ *     落到各自的 session 目录，测试传临时路径做隔离。
  *
- * Usage:
- *     pnpm dev s14_cron_scheduler/main.ts
+ * 基于 s04（hooks）构建。Usage:
+ *
+ *     pnpm dev s12_cron_scheduler/main.ts
  */
 
+import { randomBytes } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as readline from "node:readline/promises";
@@ -56,44 +75,35 @@ import { createLogger, type SessionLogger } from "../lib/logger";
 import { createClient, MODEL_ID } from "../lib/model";
 import { createPrompt, print, printError } from "../lib/terminal";
 import { printProse, textOf, zodTool } from "../lib/tools";
-import { errMsg, type Handlers } from "../s02_tool_use/main";
-// 来自 s05：重新组装过的基础 dispatch 表（文件工具带 safePath）。
-import { BASE_HANDLERS as S05_BASE_HANDLERS } from "../s05_todo_write/main";
-// 来自 s09：记忆索引路径。
-import { MEMORY_INDEX } from "../s09_memory/main";
-// 来自 s10：只借 Context 类型。
-import type { Context } from "../s10_system_prompt/main";
-import { sleep } from "../s11_error_recovery/main";
-// 来自 s12：任务工具工厂、prompt 组装，以及 memory/workspace 的 context 推导。
+// 来自 s02：tool 定义（tools）与 schema 表（TOOL_SCHEMAS）+ errMsg + Handlers。
 import {
-  getSystemPrompt,
-  makeTaskHandlers,
-  makeUpdateContext,
-  tasksDirFor,
-} from "../s10_task_system/main";
-// 来自 s13：后台任务层 + 带 run_in_background 的 bash（tools / TOOL_SCHEMAS 已是
-// 「基础 + 任务 + bash 覆盖」的合并）。s14 在其上再叠加 cron 工具；
-// Deps（client + logger + memoryIndex + background + tasksDir）同样以 s13 为底。
+  errMsg,
+  type Handlers,
+  TOOL_SCHEMAS as S02_TOOL_SCHEMAS,
+  tools as s02Tools,
+} from "../s02_tool_use/main";
+// 来自 s03：dispatch 表（TOOL_HANDLERS）+ 权限确认抽象（Confirm / makeConfirm）。
 import {
-  BackgroundState,
-  collectBackgroundResults,
-  TOOL_SCHEMAS as S13_TOOL_SCHEMAS,
-  type Deps as S13Deps,
-  tools as s13Tools,
-  shouldRunBackground,
-  startBackgroundTask,
-} from "../s11_background_tasks/main";
+  type Confirm,
+  makeConfirm,
+  TOOL_HANDLERS,
+} from "../s03_permission/main";
+// 来自 s04：hook 系统（装配 + 触发）与 Deps（client + logger + hooks）。
+import { loadHooks, type Deps as S04Deps } from "../s04_hooks/main";
 
-// deps 与 s13 一致，另加跨轮的 cron 状态。
-export type Deps = S13Deps & {
-  cron: CronState;
-};
+const WORKDIR = process.cwd();
+const SYSTEM =
+  `You are a coding agent at ${WORKDIR}. Use tools to solve tasks. ` +
+  `Use schedule_cron for work that should start at a future local time.`;
+
+// deps 与 s04 一致，另加 cron：调度状态由 session 持有并跨轮传入。
+export type Deps = S04Deps & { cron: CronState };
 
 // ═══════════════════════════════════════════════════════════
-//  s14 新增：Cron 调度器
+//  s12 新增：cron 任务与调度状态
 // ═══════════════════════════════════════════════════════════
 
-// 持久化文件名（对齐 s12 的 .tasks/）；具体目录由 createCronState 决定。
+// 持久化文件名；具体目录由 createCronState 决定。
 export const DURABLE_FILE = ".scheduled_tasks.json";
 
 export type CronJob = {
@@ -102,6 +112,8 @@ export type CronJob = {
   prompt: string; // 触发时注入的消息
   recurring: boolean; // true = 周期，false = 一次性
   durable: boolean; // true = 持久化到磁盘
+  pendingDelivery: boolean; // 已到期、模型还没接收
+  lastFired: string | null; // "YYYY-MM-DD HH:MM"，同分钟去重
 };
 
 // cron 生命周期状态：由 session 持有、跨轮复用（对齐 code.py 的模块全局）。
@@ -109,10 +121,8 @@ export type CronJob = {
 export class CronState {
   // 已注册的任务，按 job.id 索引。
   scheduledJobs = new Map<string, CronJob>();
-  // 已触发、等待投递给 agent 的任务。
+  // 已触发、等待投递给 agent 的任务（与 scheduledJobs 里的是同一批对象）。
   cronQueue: CronJob[] = [];
-  // job.id -> "YYYY-MM-DD HH:MM"，防止同一分钟内重复触发。
-  lastFiredAt = new Map<string, string>();
   constructor(public durablePath: string) {}
 }
 
@@ -121,22 +131,39 @@ export function createCronState(sessionDir: string): CronState {
   return new CronState(path.join(sessionDir, DURABLE_FILE));
 }
 
+// croner 每个模式解析一次即可复用；match 是纯计算、不启定时器，可安全缓存。
+const patternCache = new Map<string, Cron>();
+// cronFor：构造 + 匹配 + 校验的单一入口，解析结果按表达式缓存复用。
+function cronFor(expr: string): Cron {
+  let cron = patternCache.get(expr);
+  if (!cron) {
+    cron = new Cron(expr);
+    patternCache.set(expr, cron);
+  }
+  return cron;
+}
+
 // 启动时从磁盘加载 durable 任务；损坏或非法的任务跳过。
+// 上次退出时还挂着 pendingDelivery 的任务重新进队列，等 agent 空闲后再投递一次。
 export function loadDurableJobs(state: CronState, logger: SessionLogger): void {
   if (!fs.existsSync(state.durablePath)) return;
   try {
-    const jobs = JSON.parse(
-      fs.readFileSync(state.durablePath, "utf8"),
-    ) as CronJob[];
+    const jobs = JSON.parse(fs.readFileSync(state.durablePath, "utf8"));
+    if (!Array.isArray(jobs)) throw new Error("expected a JSON array");
     let loaded = 0;
-    for (const job of jobs) {
+    for (const job of jobs as CronJob[]) {
       try {
+        if (!job?.id?.startsWith("cron_")) throw new Error("invalid job ID");
+        if (!job.prompt?.trim()) throw new Error("prompt cannot be empty");
         cronFor(job.cron); // 构造抛错即非法，跳过
       } catch (e) {
         printError(e, "  [cron] skipping invalid job");
         continue;
       }
+      job.pendingDelivery = job.pendingDelivery ?? false;
+      job.lastFired = job.lastFired ?? null;
       state.scheduledJobs.set(job.id, job);
+      if (job.pendingDelivery) state.cronQueue.push(job);
       loaded += 1;
     }
     if (loaded)
@@ -146,8 +173,22 @@ export function loadDurableJobs(state: CronState, logger: SessionLogger): void {
   }
 }
 
+// 把 durable 任务持久化到磁盘：先写临时文件再 rename，
+// 避免写到一半崩溃时留下半个 JSON。
+export function saveDurableJobs(state: CronState): void {
+  const durable = [...state.scheduledJobs.values()].filter((j) => j.durable);
+  const tmp = `${state.durablePath}.${process.pid}.tmp`;
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(durable, null, 2));
+    fs.renameSync(tmp, state.durablePath);
+  } finally {
+    fs.rmSync(tmp, { force: true });
+  }
+}
+
+// ── Layer 1：调度器 ───────────────────────────────────────
+
 // 拉起 1s 定时器（守护线程的 TS 版），unref 让 REPL 关闭时进程可退出。
-// onFire 在有任务触发时回调（入口层用它擦提示符 + 打印触发日志）。
 export function startCronScheduler(
   state: CronState,
   logger: SessionLogger,
@@ -159,9 +200,10 @@ export function startCronScheduler(
   print("  [cron scheduler] timer started", "magenta");
   return timer;
 }
-// 单次扫描：把匹配当前时间的任务推进 cronQueue，一次性任务触发后即移除。
-// 返回本次新触发的任务，交给调用方决定如何展示（触发日志由入口层打印，
-// 让本层与终端/readline 解耦）。单个任务出错就地捕获，避免一个坏任务拖垮调度器。
+
+// 单次扫描：把到期任务推进 cronQueue。一次性任务在这里保留注册，
+// 等模型确认接收后才由 acknowledgeCronJobs 删除。
+// 单个任务出错就地捕获，避免一个坏任务拖垮调度器。
 export function runCronTick(
   state: CronState,
   now: Date,
@@ -179,46 +221,44 @@ export function runCronTick(
   atMinute.setSeconds(0, 0);
   for (const job of [...state.scheduledJobs.values()]) {
     try {
-      if (cronFor(job.cron).match(atMinute)) {
-        if (state.lastFiredAt.get(job.id) !== minuteMarker) {
-          state.cronQueue.push(job);
-          state.lastFiredAt.set(job.id, minuteMarker);
-          logger.console(
-            `  [cron push queue] ${job.id} → ${job.prompt.slice(0, 40)}`,
-            "magenta",
-          );
-        }
-        if (!job.recurring) {
-          // 一次性任务触发后即注销；durable 的顺手落盘。
-          state.scheduledJobs.delete(job.id);
-          if (job.durable) saveDurableJobs(state);
-        }
-      }
+      // 还没投递出去的任务不重复入队；同一分钟内也只入队一次。
+      if (job.pendingDelivery || job.lastFired === minuteMarker) continue;
+      if (!cronFor(job.cron).match(atMinute)) continue;
+      enqueueDueJob(state, job, minuteMarker);
+      logger.console(
+        `  [cron push queue] ${job.id} -> ${job.prompt.slice(0, 40)}`,
+        "magenta",
+      );
     } catch (e) {
       printError(e, `  [cron error] ${job.id}`);
     }
   }
 }
 
-// croner 每个模式解析一次即可复用；match 是纯计算、不启定时器，可安全缓存。
-const patternCache = new Map<string, Cron>();
-// cronFor：构造 + 匹配 + 校验的单一入口，解析结果按表达式缓存复用。
-function cronFor(expr: string): Cron {
-  let cron = patternCache.get(expr);
-  if (!cron) {
-    cron = new Cron(expr);
-    patternCache.set(expr, cron);
+// 先把 pendingDelivery / lastFired 落盘，再把任务放进队列：
+// 落盘失败就回滚字段并抛出，不让只存在于内存里的状态暴露给队列处理器。
+function enqueueDueJob(
+  state: CronState,
+  job: CronJob,
+  minuteMarker: string,
+): void {
+  const previous = { pending: job.pendingDelivery, lastFired: job.lastFired };
+  job.pendingDelivery = true;
+  job.lastFired = minuteMarker;
+  try {
+    if (job.durable) saveDurableJobs(state);
+  } catch (e) {
+    job.pendingDelivery = previous.pending;
+    job.lastFired = previous.lastFired;
+    throw e;
   }
-  return cron;
+  state.cronQueue.push(job);
 }
 
-// 把 durable 任务持久化到磁盘。
-export function saveDurableJobs(state: CronState): void {
-  const durable = [...state.scheduledJobs.values()].filter((j) => j.durable);
-  fs.writeFileSync(state.durablePath, JSON.stringify(durable, null, 2));
-}
+// ── Layer 2：队列 ────────────────────────────────────────
 
 // 取出已触发的任务（agentLoop 调用），清空队列。
+// 任务此时仍带 pendingDelivery，要等 acknowledgeCronJobs 才销账。
 export function consumeCronQueue(state: CronState): CronJob[] {
   const fired = [...state.cronQueue];
   state.cronQueue.length = 0;
@@ -230,8 +270,51 @@ export function hasCronQueue(state: CronState): boolean {
   return state.cronQueue.length > 0;
 }
 
+// 模型已成功接收注入的消息：一次性任务注销，周期任务清 pendingDelivery 等下次匹配。
+// 落盘失败时把内存状态和队列一起回滚，宁可重复交付也不丢任务。
+export function acknowledgeCronJobs(state: CronState, jobs: CronJob[]): void {
+  const changed: { job: CronJob; pending: boolean }[] = [];
+  const removed: CronJob[] = [];
+  for (const delivered of jobs) {
+    const current = state.scheduledJobs.get(delivered.id);
+    if (!current) continue; // 交付期间被 cancel_cron 取消
+    changed.push({ job: current, pending: current.pendingDelivery });
+    if (current.recurring) {
+      current.pendingDelivery = false;
+    } else {
+      removed.push(current);
+      state.scheduledJobs.delete(current.id);
+    }
+  }
+  try {
+    if (changed.some(({ job }) => job.durable)) saveDurableJobs(state);
+  } catch (e) {
+    for (const job of removed) state.scheduledJobs.set(job.id, job);
+    for (const { job, pending } of changed) job.pendingDelivery = pending;
+    restoreCronJobs(
+      state,
+      changed.map(({ job }) => job),
+    );
+    throw e;
+  }
+}
+
+// 模型调用失败：把已经取出的任务放回队列，下一轮重新投递。
+export function restoreCronJobs(state: CronState, jobs: CronJob[]): void {
+  const queued = new Set(state.cronQueue.map((job) => job.id));
+  for (const delivered of jobs) {
+    const current = state.scheduledJobs.get(delivered.id);
+    if (!current) continue;
+    current.pendingDelivery = true;
+    if (!queued.has(current.id)) {
+      state.cronQueue.push(current);
+      queued.add(current.id);
+    }
+  }
+}
+
 // 多行展示 CronState（Map 无法直接 JSON.stringify，手写摘要）：列出每个已注册
-// 任务的 id / 表达式 / 周期性 / 持久化 / prompt / 上次触发，再附带待投递队列。
+// 任务的 id / 表达式 / 标志 / 上次触发 / prompt，再附带待投递队列。
 export function cronStateSummary(state: CronState): string {
   const lines: string[] = [
     `  ${state.scheduledJobs.size} job(s), queue=${state.cronQueue.length}`,
@@ -239,18 +322,93 @@ export function cronStateSummary(state: CronState): string {
   for (const job of state.scheduledJobs.values()) {
     const flags = [job.recurring ? "recurring" : "once"];
     if (job.durable) flags.push("durable");
-    const last = state.lastFiredAt.get(job.id) ?? "never";
+    if (job.pendingDelivery) flags.push("pending");
     lines.push(
-      `    ${job.id} '${job.cron}' [${flags.join(",")}] last=${last} → ${job.prompt.slice(0, 40)}`,
+      `    ${job.id} '${job.cron}' [${flags.join(",")}] ` +
+        `last=${job.lastFired ?? "never"} -> ${job.prompt.slice(0, 40)}`,
     );
   }
   if (state.cronQueue.length) {
     lines.push("  queued:");
     for (const job of state.cronQueue) {
-      lines.push(`    ${job.id} → ${job.prompt.slice(0, 40)}`);
+      lines.push(`    ${job.id} -> ${job.prompt.slice(0, 40)}`);
     }
   }
   return lines.join("\n");
+}
+
+// ── 注册 / 取消 ──────────────────────────────────────────
+
+// 随机 job ID，撞到已有 ID 就重取（对齐 code.py 的 secrets.token_hex(4)）。
+function newCronId(state: CronState): string {
+  for (let i = 0; i < 100; i += 1) {
+    const id = `cron_${randomBytes(4).toString("hex")}`;
+    if (!state.scheduledJobs.has(id)) return id;
+  }
+  throw new Error("Could not allocate a cron job ID");
+}
+
+// 注册一个 cron 任务，返回 CronJob 或错误字符串。
+export function scheduleJob(
+  state: CronState,
+  cron: string,
+  prompt: string,
+  recurring: boolean,
+  durable: boolean,
+  logger: SessionLogger,
+): CronJob | string {
+  try {
+    cronFor(cron); // 构造抛错即非法，把错误信息回传给调用方
+  } catch (e) {
+    return errMsg(e);
+  }
+  if (!prompt.trim()) return "Prompt cannot be empty";
+
+  const job: CronJob = {
+    id: newCronId(state),
+    cron,
+    prompt,
+    recurring,
+    durable,
+    pendingDelivery: false,
+    lastFired: null,
+  };
+  state.scheduledJobs.set(job.id, job);
+  try {
+    if (durable) saveDurableJobs(state);
+  } catch (e) {
+    // 落盘失败就撤销注册，让内存与磁盘保持一致。
+    state.scheduledJobs.delete(job.id);
+    return errMsg(e);
+  }
+  logger.console(
+    `  [cron register] ${job.id} '${cron}' -> ${prompt.slice(0, 40)}`,
+    "magenta",
+  );
+  return job;
+}
+
+// 移除一个 cron 任务，连同它排在队列里、还没投递的那一份。
+export function cancelJob(
+  state: CronState,
+  jobId: string,
+  logger: SessionLogger,
+): string {
+  const job = state.scheduledJobs.get(jobId);
+  if (!job) return `Job ${jobId} not found`;
+
+  const previousQueue = [...state.cronQueue];
+  state.scheduledJobs.delete(jobId);
+  state.cronQueue = state.cronQueue.filter((queued) => queued.id !== jobId);
+  try {
+    if (job.durable) saveDurableJobs(state);
+  } catch (e) {
+    state.scheduledJobs.set(jobId, job);
+    state.cronQueue = previousQueue;
+    return errMsg(e);
+  }
+  logger.console(`  [cron cancel] ${jobId}`, "red");
+  return `Cancelled ${jobId}`;
 }
 
 // ── cron 工具 handler ─────────────────────────────────────
@@ -266,36 +424,7 @@ export function runScheduleCron(
 ): string {
   const result = scheduleJob(state, cron, prompt, recurring, durable, logger);
   if (typeof result === "string") return `Error: ${result}`;
-  return `Scheduled ${result.id}: '${cron}' → ${prompt}`;
-}
-// 注册一个 cron 任务，返回 CronJob 或错误字符串。
-export function scheduleJob(
-  state: CronState,
-  cron: string,
-  prompt: string,
-  recurring: boolean,
-  durable: boolean,
-  logger: SessionLogger,
-): CronJob | string {
-  try {
-    cronFor(cron); // 构造抛错即非法，把错误信息回传给调用方
-  } catch (e) {
-    return errMsg(e);
-  }
-  const job: CronJob = {
-    id: `cron_${String(Math.floor(Math.random() * 1_000_000)).padStart(6, "0")}`,
-    cron,
-    prompt,
-    recurring,
-    durable,
-  };
-  state.scheduledJobs.set(job.id, job);
-  if (durable) saveDurableJobs(state);
-  logger.console(
-    `  [cron register] ${job.id} '${cron}' → ${prompt.slice(0, 40)}`,
-    "magenta",
-  );
-  return job;
+  return `Scheduled ${result.id}: '${cron}' -> ${prompt}`;
 }
 
 // list_crons 工具入口：把已注册任务渲染成多行列表。
@@ -306,7 +435,7 @@ export function runListCrons(state: CronState): string {
     .map((j) => {
       const tag = j.recurring ? "recurring" : "one-shot";
       const dur = j.durable ? "durable" : "session";
-      return `  ${j.id}: '${j.cron}' → ${j.prompt.slice(0, 40)} [${tag}, ${dur}]`;
+      return `  ${j.id}: '${j.cron}' -> ${j.prompt.slice(0, 40)} [${tag}, ${dur}]`;
     })
     .join("\n");
 }
@@ -319,21 +448,8 @@ export function runCancelCron(
 ): string {
   return cancelJob(state, jobId, logger);
 }
-// 移除一个 cron 任务。
-export function cancelJob(
-  state: CronState,
-  jobId: string,
-  logger: SessionLogger,
-): string {
-  const job = state.scheduledJobs.get(jobId);
-  if (!job) return `Job ${jobId} not found`;
-  state.scheduledJobs.delete(jobId);
-  if (job.durable) saveDurableJobs(state);
-  logger.console(`  [cron cancel] ${jobId}`, "red");
-  return `Cancelled ${jobId}`;
-}
 
-// cron handler 需要 cron 状态 + logger，用工厂闭包捕获，再与基础/任务 handler 合并。
+// cron handler 需要 cron 状态 + logger，用工厂闭包捕获，再与 s03 的基础 handler 合并。
 export function makeCronHandlers(
   state: CronState,
   logger: SessionLogger,
@@ -354,7 +470,7 @@ export function makeCronHandlers(
 }
 
 // ═══════════════════════════════════════════════════════════
-//  s14 新增：cron 工具定义，叠加到 s13 的工具集之上
+//  s12 新增：cron 工具定义，叠加到 s02 的工具集之上
 // ═══════════════════════════════════════════════════════════
 
 const scheduleCronSchema = z.object({
@@ -369,69 +485,88 @@ const cancelCronSchema = z.object({ job_id: z.string() });
 const cronTools: Anthropic.Tool[] = [
   zodTool(
     "schedule_cron",
-    "Schedule a cron job. cron is 5-field: min hour dom month dow.",
+    "Schedule a prompt with a 5-field cron expression: min hour dom month dow.",
     scheduleCronSchema,
   ),
   zodTool("list_crons", "List all registered cron jobs.", listCronsSchema),
   zodTool("cancel_cron", "Cancel a cron job by ID.", cancelCronSchema),
 ];
 
-// tools 以 s13（基础 + 任务 + bash 覆盖）为底，追加 3 个 cron 工具。
-export const tools: Anthropic.Tool[] = [...s13Tools, ...cronTools];
+// tools 以 s02 的五个基础工具为底，追加 3 个 cron 工具。
+export const tools: Anthropic.Tool[] = [...s02Tools, ...cronTools];
 
-// schema 表同理：以 s13 为底，追加 cron schema。
+// schema 表同理：以 s02 为底，追加 cron schema。
 export const TOOL_SCHEMAS: Partial<Record<string, z.ZodObject>> = {
-  ...S13_TOOL_SCHEMAS,
+  ...S02_TOOL_SCHEMAS,
   schedule_cron: scheduleCronSchema,
   list_crons: listCronsSchema,
   cancel_cron: cancelCronSchema,
 };
 
-// 用 s14 的完整工具集绑定 s12 的 context 工厂，
-// 这样 getSystemPrompt 组装出的「Available tools」也会带上 cron 工具。
-export const updateContext = makeUpdateContext(tools);
+// ═══════════════════════════════════════════════════════════
+//  工具执行 —— 和 s04 一样走 PreToolUse / PostToolUse
+// ═══════════════════════════════════════════════════════════
 
-// ═══════════════════════════════════════════════════════════
-//  agentLoop —— 精简版，聚焦 cron 调度（省略 s11 的错误恢复）
-// ═══════════════════════════════════════════════════════════
-// startCronScheduler 产出工作；入口的队列处理器（queueProcessor 定时器）在有排队
-// 任务且 agent 空闲时唤醒本循环；agentLoop 在循环开头消费 cron 队列并注入 messages。
-export async function agentLoop(
-  messages: Anthropic.MessageParam[],
-  context: Context,
+export async function executeTool(
+  block: Anthropic.ToolUseBlock,
   deps: Deps,
 ): Promise<string> {
-  const { client, logger, memoryIndex, tasksDir, background, cron } = deps;
-  let system = getSystemPrompt(context);
-  // 基础工具（前台 bash / 文件工具）+ 任务工具 + cron 工具。
+  const { logger, hooks, cron } = deps;
+  const blocked = await hooks.trigger("PreToolUse", block);
+  if (blocked) return blocked;
+
+  // 基础工具（s03 的 dispatch 表）+ 3 个 cron 工具。
   const handlers: Handlers = {
-    ...S05_BASE_HANDLERS,
-    ...makeTaskHandlers(logger, tasksDir),
+    ...TOOL_HANDLERS,
     ...makeCronHandlers(cron, logger),
   };
+  const handler = handlers[block.name];
+  const schema = TOOL_SCHEMAS[block.name];
+  let output: string;
+  if (!handler || !schema) {
+    output = `Unknown: ${block.name}`;
+  } else {
+    try {
+      output = handler(schema.parse(block.input));
+    } catch (e) {
+      output = `Error: ${errMsg(e)}`;
+    }
+  }
+  logger.toolResult(block.name, output);
+
+  await hooks.trigger("PostToolUse", block, output);
+  return output;
+}
+
+// ═══════════════════════════════════════════════════════════
+//  agentLoop —— 和 s04 结构相同，只在开局多一步 cron 注入
+// ═══════════════════════════════════════════════════════════
+// 调度器产出工作；入口的队列处理器在有排队任务且 agent 空闲时唤醒本循环。
+export async function agentLoop(
+  messages: Anthropic.MessageParam[],
+  deps: Deps,
+): Promise<string> {
+  const { client, logger, hooks, cron } = deps;
+
+  // Layer 4：消费已触发的 cron 任务，作为 user 消息注入（每轮开头一次）。
+  // scheduledStart 记住注入位置，模型调用失败时按它撤回。
+  const fired = consumeCronQueue(cron);
+  const scheduledStart = messages.length;
+  for (const job of fired) {
+    messages.push({ role: "user", content: `[Scheduled] ${job.prompt}` });
+    logger.console(`  [inject cron] ${job.prompt.slice(0, 50)}`, "magenta");
+  }
+  let waitingForAck = fired;
 
   while (true) {
-    logger.section(
-      "SYSTEM PROMPT",
-      `enabled_tools: ${JSON.stringify(Object.keys(handlers))}` +
-        `\nworkspace: ${context.workspace}` +
-        `\n\nBackgroundState:\n${JSON.stringify(background)}` +
-        `\n\nCronState:\n${cronStateSummary(cron)}`,
-    );
-
-    // Layer 4：消费已触发的 cron 任务，作为 user 消息注入。
-    const fired = consumeCronQueue(cron);
-    for (const job of fired) {
-      messages.push({ role: "user", content: `[Scheduled] ${job.prompt}` });
-      logger.console(`  [inject cron] ${job.prompt.slice(0, 50)}`, "magenta");
-    }
-
+    logger.section("CRON STATE", cronStateSummary(cron));
     logger.request(messages, true);
+
     let response: Anthropic.Message;
     try {
       response = await client.messages.create({
         model: MODEL_ID,
-        system,
+        system: SYSTEM,
         messages,
         tools,
         max_tokens: 8000,
@@ -440,76 +575,51 @@ export async function agentLoop(
       logger.responseError(e);
       const name = e instanceof Error ? e.name : "Error";
       const errText = `[Error] ${name}: ${errMsg(e)}`;
+      if (waitingForAck.length) {
+        // 注入的 [Scheduled] 消息没被模型接收：撤回它们，任务放回队列重投。
+        messages.length = scheduledStart;
+        restoreCronJobs(cron, waitingForAck);
+        return errText;
+      }
       messages.push({ role: "assistant", content: errText });
       return errText;
     }
     logger.response(response);
-
     messages.push({ role: "assistant", content: response.content });
+
+    if (waitingForAck.length) {
+      // 模型已经接收，销账；销账失败只记日志，任务会被重复投递而不是丢掉。
+      try {
+        acknowledgeCronJobs(cron, waitingForAck);
+      } catch (e) {
+        printError(e, "  [cron] acknowledgement failed");
+      }
+      waitingForAck = [];
+    }
+
     if (response.stop_reason !== "tool_use") {
+      const force = await hooks.trigger("Stop", messages);
+      if (force) {
+        messages.push({ role: "user", content: force });
+        continue;
+      }
       return textOf(response);
     }
 
     const results: Anthropic.ToolResultBlockParam[] = [];
     for (const block of response.content) {
-      printProse(block);
       if (block.type !== "tool_use") {
+        printProse(block);
         continue;
       }
-      const schema = TOOL_SCHEMAS[block.name];
-      const input = schema ? schema.parse(block.input) : (block.input as any);
-
-      if (shouldRunBackground(block.name, input)) {
-        const backgroundId = startBackgroundTask(
-          background,
-          handlers,
-          block.name,
-          block.id,
-          input,
-          logger,
-        );
-        results.push({
-          type: "tool_result",
-          tool_use_id: block.id,
-          content:
-            `[Background task ${backgroundId} started] ` +
-            `Command: ${input.command ?? ""}. ` +
-            `Result will be available when complete.`,
-        });
-      } else {
-        const handler = handlers[block.name];
-        const output =
-          handler && schema ? handler(input) : `Unknown: ${block.name}`;
-        logger.toolResult(block.name, output);
-        results.push({
-          type: "tool_result",
-          tool_use_id: block.id,
-          content: output,
-        });
-      }
+      results.push({
+        type: "tool_result",
+        tool_use_id: block.id,
+        content: await executeTool(block, deps),
+      });
     }
 
-    const backgroundNotifications = collectBackgroundResults(
-      background,
-      logger,
-    );
-    const content: Anthropic.ContentBlockParam[] = [
-      ...results,
-      ...backgroundNotifications.map((n) => ({
-        type: "text" as const,
-        text: n,
-      })),
-    ];
-    messages.push({ role: "user", content });
-    if (backgroundNotifications.length) {
-      logger.section(
-        "INJECTED BACKGROUND NOTIFICATIONS",
-        backgroundNotifications.join("\n\n"),
-      );
-    }
-
-    context = updateContext(memoryIndex);
-    system = getSystemPrompt(context);
+    messages.push({ role: "user", content: results });
   }
 }
 
@@ -517,9 +627,9 @@ export async function agentLoop(
 if (import.meta.main) {
   const client = createClient();
   const logger = createLogger(import.meta.dirname);
-  logger.config({ model: MODEL_ID, tools });
+  logger.config({ model: MODEL_ID, system: SYSTEM, tools });
 
-  print("s14: Cron Scheduler — 独立定时器 + 队列处理器", "cyan");
+  print("s12: Cron Scheduler - 独立定时器 + 队列处理器", "cyan");
   print("输入问题，回车发送。输入 q 退出。\n", "green");
 
   const rl = readline.createInterface({
@@ -530,48 +640,59 @@ if (import.meta.main) {
     rl.close();
     process.exit(0);
   });
-  // 等输入期间，队列处理器 / cron / 后台的输出都从提示符上方流过，不再顶掉它。
-  const prompt = createPrompt(rl, "s14 >> ");
+  // 等输入期间，队列处理器 / cron 的输出都从提示符上方流过，不再顶掉它。
+  const prompt = createPrompt(rl, "s12 >> ");
+
+  const hooks = loadHooks(logger, makeConfirm(rl, logger));
+  // 定时回合不能占用主终端问 y/N，需要确认的工具调用一律拒绝
+  //（对应 code.py 里「不在主线程就拒绝交互式批准」）。
+  const denyInteractive: Confirm = async (call, warning) => {
+    logger.console(
+      `  [permission] scheduled turn cannot ask: ${warning} ` +
+        `(${call.name})`,
+      "yellow",
+    );
+    return false;
+  };
+  const scheduledHooks = loadHooks(logger, denyInteractive);
 
   const history: Anthropic.MessageParam[] = [];
-  // 后台状态与 cron 状态各一份，跨轮复用。
-  const background = new BackgroundState();
+  // cron 状态一个 session 一份，跨轮复用。
   const cron = createCronState(import.meta.dirname);
-  const tasksDir = tasksDirFor(import.meta.dirname);
-  let context = updateContext();
 
-  // 启动时加载持久化任务。
+  // 启动时加载持久化任务，再拉起 1s 定时器（Layer 1）。
   loadDurableJobs(cron, logger);
-  // 拉起 1s 定时器。
   startCronScheduler(cron, logger);
 
   // agentBusy：单线程事件循环里 Python agent_lock 的等价物。
   let agentBusy = false;
-  async function runAgentTurnLocked(userQuery?: string): Promise<void> {
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  async function runAgentTurn(
+    turnHooks: typeof hooks,
+    userQuery?: string,
+  ): Promise<void> {
     if (userQuery !== undefined) {
+      await turnHooks.trigger("UserPromptSubmit", userQuery);
       history.push({ role: "user", content: userQuery });
     }
-
-    const finalText = await agentLoop(history, context, {
+    const finalText = await agentLoop(history, {
       client,
       logger,
-      memoryIndex: MEMORY_INDEX,
-      background,
+      hooks: turnHooks,
       cron,
-      tasksDir,
     });
-    context = updateContext();
     print(finalText, "green");
     print();
   }
 
-  // 队列处理器：cron 触发的任务在 agent 空闲时自动投递（200ms 轮询）。
+  // Layer 3：队列处理器。它不判断时间，只看队列和 agent 是否空闲（200ms 轮询）。
   const queueProcessor = setInterval(async () => {
     if (!hasCronQueue(cron) || agentBusy) return;
     agentBusy = true;
     try {
       print("  [queue processor] delivering scheduled work", "magenta");
-      await runAgentTurnLocked();
+      await runAgentTurn(scheduledHooks);
     } catch (e) {
       printError(e);
     } finally {
@@ -597,7 +718,7 @@ if (import.meta.main) {
     agentBusy = true;
     try {
       logger.userInput(query);
-      await runAgentTurnLocked(query);
+      await runAgentTurn(hooks, query);
     } catch (e) {
       printError(e);
     } finally {
