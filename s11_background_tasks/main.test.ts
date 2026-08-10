@@ -1,44 +1,37 @@
 /**
- * s13_background_tasks/main.test.ts
+ * s11_background_tasks/main.test.ts
  *
- * s13 的新增点是后台任务层，测试只聚焦这一层：
- *   - isSlowOperation / shouldRunBackground 的判定（纯函数）
- *   - runBashAsync 的输出与非零退出时的输出保留
- *   - startBackgroundTask 派发 + collectBackgroundResults 收集通知的生命周期
- *   - bash 工具覆盖后仍带 run_in_background，且 s12 的任务工具仍在
+ * s11 的新增点是后台执行这一层，测试只聚焦它：
+ *   - shouldRunBackground 只认显式的 run_in_background（纯函数）
+ *   - runBashAsync / formatBashResult 的输出与退出码
+ *   - BackgroundManager 派发 -> 完成 -> collect 通知的生命周期（含 failed）
+ *   - injectBackgroundResults 并进末尾 user 消息 / 单开一条消息
+ *   - bash 工具覆盖后仍带 run_in_background，其余四个工具不变
  *   - agentLoop 端到端派发一次后台 bash，回传占位符
- * 任务系统 / prompt 组装 / context 推导已在 s12 / s10 覆盖，这里不再重复。
+ * 工具层与 hook 层已在 s02-s04 覆盖，这里不再重复。
  */
-import * as fs from "node:fs";
 import type Anthropic from "@anthropic-ai/sdk";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
   fakeClient,
   fakeMessage,
-  makeTempDir,
   noopLogger,
   textBlock,
   toolUseBlock,
 } from "../lib/testing";
-import type { Context } from "../s10_system_prompt/main";
-import { sleep } from "../s11_error_recovery/main";
+import { createHooks } from "../s04_hooks/main";
 import {
   agentLoop,
-  BackgroundState,
-  collectBackgroundResults,
-  isSlowOperation,
+  BackgroundManager,
+  formatBashResult,
+  injectBackgroundResults,
   runBashAsync,
   shouldRunBackground,
-  startBackgroundTask,
   TOOL_SCHEMAS,
   tools,
 } from "./main";
 
-const ctx = (): Context => ({
-  enabled_tools: ["bash", "read_file", "write_file"],
-  workspace: "/repo",
-  memories: "",
-});
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 // 轮询等待后台 worker 完成（游离 Promise，无法直接 await）。
 async function waitFor(pred: () => boolean, timeoutMs = 3000): Promise<void> {
@@ -49,135 +42,195 @@ async function waitFor(pred: () => boolean, timeoutMs = 3000): Promise<void> {
   }
 }
 
-let dir = "";
-beforeEach(() => {
-  dir = makeTempDir(import.meta.dirname);
-});
-afterEach(() => {
-  fs.rmSync(dir, { recursive: true, force: true });
-});
-
-// ── isSlowOperation：启发式判定 ────────────────────────────
-describe("isSlowOperation", () => {
-  it("flags slow bash commands by keyword", () => {
-    expect(isSlowOperation("bash", { command: "npm install" })).toBe(true);
-    expect(isSlowOperation("bash", { command: "pytest tests/" })).toBe(true);
-    expect(isSlowOperation("bash", { command: "make build" })).toBe(true);
-  });
-
-  it("leaves fast bash commands in the foreground", () => {
-    expect(isSlowOperation("bash", { command: "ls -la" })).toBe(false);
-    expect(isSlowOperation("bash", { command: "echo hi" })).toBe(false);
-  });
-
-  it("never backgrounds non-bash tools", () => {
-    expect(isSlowOperation("read_file", { command: "make" })).toBe(false);
-  });
-});
-
-// ── shouldRunBackground：显式请求优先 ──────────────────────
+// ── shouldRunBackground：只认显式请求 ──────────────────────
 describe("shouldRunBackground", () => {
-  it("honors an explicit run_in_background flag over the heuristic", () => {
+  it("backgrounds bash when the flag is explicitly true", () => {
     expect(
       shouldRunBackground("bash", { command: "ls", run_in_background: true }),
     ).toBe(true);
   });
 
-  it("falls back to the heuristic when the flag is absent", () => {
-    expect(shouldRunBackground("bash", { command: "npm run build" })).toBe(
-      true,
-    );
-    expect(shouldRunBackground("bash", { command: "ls" })).toBe(false);
+  it("keeps bash in the foreground without the flag", () => {
+    expect(shouldRunBackground("bash", { command: "npm install" })).toBe(false);
+    expect(
+      shouldRunBackground("bash", { command: "ls", run_in_background: false }),
+    ).toBe(false);
+  });
+
+  it("never backgrounds non-bash tools", () => {
+    expect(
+      shouldRunBackground("read_file", { path: "a", run_in_background: true }),
+    ).toBe(false);
   });
 });
 
-// ── runBashAsync ──────────────────────────────────────────
+// ── runBashAsync / formatBashResult ───────────────────────
 describe("runBashAsync", () => {
-  it("returns trimmed stdout", async () => {
-    expect(await runBashAsync("echo hello", noopLogger)).toBe("hello");
+  it("returns trimmed stdout with exit code 0", async () => {
+    expect(await runBashAsync("echo hello")).toEqual({
+      output: "hello",
+      exitCode: 0,
+    });
   });
 
   it("preserves captured output on a non-zero exit", async () => {
-    expect(await runBashAsync("echo boom && exit 1", noopLogger)).toContain(
-      "boom",
-    );
+    const { output, exitCode } = await runBashAsync("echo boom && exit 3");
+    expect(output).toContain("boom");
+    expect(exitCode).toBe(3);
   });
 
   it("reports empty output as a placeholder", async () => {
-    expect(await runBashAsync("true", noopLogger)).toBe("(no output)");
+    expect((await runBashAsync("true")).output).toBe("(no output)");
+  });
+});
+
+describe("formatBashResult", () => {
+  it("returns the output as is on success or timeout", () => {
+    expect(formatBashResult("ok", 0)).toBe("ok");
+    expect(formatBashResult("Error: Timeout (120s)", null)).toBe(
+      "Error: Timeout (120s)",
+    );
+  });
+
+  it("prefixes the exit status on failure", () => {
+    expect(formatBashResult("boom", 3)).toBe(
+      "Error: command exited with status 3\nboom",
+    );
   });
 });
 
 // ── 后台生命周期：派发 -> 完成 -> 收集通知 ─────────────────
-describe("startBackgroundTask / collectBackgroundResults", () => {
+describe("BackgroundManager", () => {
   it("dispatches a bash task and collects it once complete", async () => {
-    const state = new BackgroundState();
-    const backgroundId = startBackgroundTask(
-      state,
-      {},
-      "bash",
-      "tu_1",
-      { command: "echo done-bg" },
+    const background = new BackgroundManager();
+    const taskId = background.start(
+      toolUseBlock("tu_1", "bash", {
+        command: "echo done-bg",
+        run_in_background: true,
+      }),
       noopLogger,
     );
-    expect(backgroundId).toBe("background_0001");
-    expect(state.tasks[backgroundId].status).toBe("running");
+    expect(taskId).toBe("bg_0001");
+    expect(background.tasks[taskId].status).toBe("running");
 
-    await waitFor(() => state.tasks[backgroundId]?.status === "completed");
-    const notes = collectBackgroundResults(state, noopLogger);
+    await waitFor(() => background.tasks[taskId]?.status === "completed");
+    const notes = background.collect(noopLogger);
     expect(notes).toHaveLength(1);
-    expect(notes[0]).toContain("<task_id>background_0001</task_id>");
+    expect(notes[0]).toContain("<task_id>bg_0001</task_id>");
     expect(notes[0]).toContain("<status>completed</status>");
     expect(notes[0]).toContain("echo done-bg");
     expect(notes[0]).toContain("done-bg");
-    // 收集后从 state 中清除。
-    expect(state.tasks[backgroundId]).toBeUndefined();
-    expect(state.results[backgroundId]).toBeUndefined();
+    // 收集后从登记簿中清除。
+    expect(background.tasks[taskId]).toBeUndefined();
+    expect(background.results[taskId]).toBeUndefined();
   });
 
-  it("routes a non-bash tool through its handler", async () => {
-    const state = new BackgroundState();
-    const handlers = { list_tasks: () => "task list output" };
-    const backgroundId = startBackgroundTask(
-      state,
-      handlers,
-      "list_tasks",
-      "tu_2",
-      {},
+  it("marks a non-zero exit as failed", async () => {
+    const background = new BackgroundManager();
+    const taskId = background.start(
+      toolUseBlock("tu_1", "bash", { command: "exit 1" }),
       noopLogger,
     );
-    await waitFor(() => state.tasks[backgroundId]?.status === "completed");
-    expect(state.results[backgroundId]).toBe("task list output");
+    await waitFor(() => background.tasks[taskId]?.status !== "running");
+    expect(background.tasks[taskId].status).toBe("failed");
+    expect(background.collect(noopLogger)[0]).toContain(
+      "<status>failed</status>",
+    );
+  });
+
+  it("rejects non-bash tools and empty commands", () => {
+    const background = new BackgroundManager();
+    expect(() =>
+      background.start(
+        toolUseBlock("tu_1", "read_file", { path: "a" }),
+        noopLogger,
+      ),
+    ).toThrow("Only Bash commands");
+    expect(() =>
+      background.start(
+        toolUseBlock("tu_2", "bash", { command: "  " }),
+        noopLogger,
+      ),
+    ).toThrow("cannot be empty");
   });
 
   it("does not collect tasks that are still running", () => {
-    const state = new BackgroundState();
-    state.tasks.background_0001 = {
-      toolCallId: "tu_1",
-      command: "sleep 9",
-      status: "running",
-    };
-    expect(collectBackgroundResults(state, noopLogger)).toHaveLength(0);
-    expect(state.tasks.background_0001).toBeDefined();
+    const background = new BackgroundManager();
+    background.start(
+      toolUseBlock("tu_1", "bash", { command: "sleep 9" }),
+      noopLogger,
+    );
+    expect(background.collect(noopLogger)).toHaveLength(0);
+    expect(background.tasks.bg_0001).toBeDefined();
   });
 });
 
-// ── 工具覆盖：bash 加了 run_in_background，任务工具仍在 ─────
+// ── 通知注入 ──────────────────────────────────────────────
+describe("injectBackgroundResults", () => {
+  it("merges notifications into a trailing user message", async () => {
+    const background = new BackgroundManager();
+    background.start(
+      toolUseBlock("tu_1", "bash", { command: "echo merged" }),
+      noopLogger,
+    );
+    await waitFor(() => background.tasks.bg_0001?.status === "completed");
+
+    const messages: Anthropic.MessageParam[] = [
+      { role: "user", content: "hi" },
+    ];
+    expect(injectBackgroundResults(messages, background, noopLogger)).toBe(1);
+    expect(messages).toHaveLength(1);
+    const content = messages[0].content as Anthropic.ContentBlockParam[];
+    expect(content).toHaveLength(2);
+    expect(content[0]).toEqual({ type: "text", text: "hi" });
+    expect((content[1] as Anthropic.TextBlockParam).text).toContain(
+      "<task_id>bg_0001</task_id>",
+    );
+  });
+
+  it("appends a new user message after an assistant turn", async () => {
+    const background = new BackgroundManager();
+    background.start(
+      toolUseBlock("tu_1", "bash", { command: "echo appended" }),
+      noopLogger,
+    );
+    await waitFor(() => background.tasks.bg_0001?.status === "completed");
+
+    const messages: Anthropic.MessageParam[] = [
+      { role: "assistant", content: "working on it" },
+    ];
+    expect(injectBackgroundResults(messages, background, noopLogger)).toBe(1);
+    expect(messages).toHaveLength(2);
+    expect(messages[1].role).toBe("user");
+  });
+
+  it("is a no-op when nothing has completed", () => {
+    const messages: Anthropic.MessageParam[] = [
+      { role: "user", content: "hi" },
+    ];
+    expect(
+      injectBackgroundResults(messages, new BackgroundManager(), noopLogger),
+    ).toBe(0);
+    expect(messages[0].content).toBe("hi");
+  });
+});
+
+// ── 工具覆盖：bash 加了 run_in_background ──────────────────
 describe("tools override", () => {
   it("bash schema accepts run_in_background", () => {
     expect(
       TOOL_SCHEMAS.bash?.parse({ command: "ls", run_in_background: true }),
-    ).toEqual({
-      command: "ls",
-      run_in_background: true,
-    });
+    ).toEqual({ command: "ls", run_in_background: true });
   });
 
-  it("keeps the base and task tools from s12", () => {
-    const names = tools.map((t) => t.name);
-    expect(names).toContain("bash");
-    expect(names).toContain("create_task");
-    expect(names).toContain("complete_task");
+  it("keeps the five base tools", () => {
+    expect(tools.map((t) => t.name)).toEqual([
+      "bash",
+      "read_file",
+      "write_file",
+      "edit_file",
+      "glob",
+    ]);
   });
 });
 
@@ -200,19 +253,16 @@ describe("agentLoop", () => {
       { role: "user", content: "run it in the background" },
     ];
 
-    const result = await agentLoop(messages, ctx(), {
+    const result = await agentLoop(messages, {
       client,
       logger: noopLogger,
-      memoryIndex: "nonexistent/MEMORY.md",
-      tasksDir: dir,
-      background: new BackgroundState(),
+      hooks: createHooks(noopLogger),
+      background: new BackgroundManager(),
     });
 
     expect(result).toBe("kicked off");
     const toolResults = messages[2].content as Anthropic.ContentBlockParam[];
     const first = toolResults[0] as Anthropic.ToolResultBlockParam;
-    expect(first.content).toContain(
-      "[Background task background_0001 started]",
-    );
+    expect(first.content).toContain("[Background task bg_0001 started]");
   });
 });
