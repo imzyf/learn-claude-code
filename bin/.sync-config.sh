@@ -22,9 +22,9 @@ SYNC_DIRS=(
   s12_cron_scheduler
   s13_agent_teams
   s14_mcp_plugin
-  # s15_integrated_harness
-  # s16_workflow_runtime
-  # s17_goal_loop
+  s15_integrated_harness
+  s16_workflow_runtime
+  s17_goal_loop
   skills
 )
 

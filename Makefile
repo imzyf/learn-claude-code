@@ -1,7 +1,7 @@
 .PHONY: help setup sync sync-force smoke test typecheck lint lint-check open \
 	debug \
 	s01 s02 s03 s04 s05 s06 s07 s08 s09 s10 \
-	s11 s12 s13 s14 s15 s16 s17 s18 s19 s20
+	s11 s12 s13 s14 s15 s16 s17
 
 help: ## Show this help
 	@awk 'BEGIN {FS = ":.*?## "} \
@@ -49,9 +49,9 @@ sync-force: ## Sync from upstream, ignoring the clone cache
 ##@ Sessions
 
 # `debug` is a command-line modifier, so `make s01 debug` through
-# `make s20 debug` start the selected session with Node's inspector.
+# `make s17 debug` start the selected session with Node's inspector.
 SESSIONS = s01 s02 s03 s04 s05 s06 s07 s08 s09 s10 \
-	s11 s12 s13 s14 s15 s16 s17 s18 s19 s20
+	s11 s12 s13 s14 s15 s16 s17
 ACTIVE_SESSION = $(firstword $(filter $(SESSIONS),$(MAKECMDGOALS)))
 
 SESSION_RUNNER = pnpm dev
@@ -76,7 +76,7 @@ endef
 
 debug: ## Debug modifier; use with `make s01 debug` through `make s20 debug`
 	@if [ -z "$(ACTIVE_SESSION)" ]; then \
-		echo "Usage: make <s01..s20> debug"; \
+		echo "Usage: make <s01..s17> debug"; \
 	fi
 
 s01: ## Run s01 agent loop
@@ -106,35 +106,26 @@ s08: ## Run s08 context compaction
 s09: ## Run s09 memory
 	$(call RUN_SESSION,s09_memory/main.ts)
 
-s10: ## Run s10 system prompt
-	$(call RUN_SESSION,s10_system_prompt/main.ts)
+s10: ## Run s10 task system
+	$(call RUN_SESSION,s10_task_system/main.ts)
 
-s11: ## Run s11 error recovery
-	$(call RUN_SESSION,s11_error_recovery/main.ts)
+s11: ## Run s11 background tasks
+	$(call RUN_SESSION,s11_background_tasks/main.ts)
 
-s12: ## Run s12 task system
-	$(call RUN_SESSION,s12_task_system/main.ts)
+s12: ## Run s12 cron scheduler
+	$(call RUN_SESSION,s12_cron_scheduler/main.ts)
 
-s13: ## Run s13 background tasks
-	$(call RUN_SESSION,s13_background_tasks/main.ts)
+s13: ## Run s13 agent teams
+	$(call RUN_SESSION,s13_agent_teams/main.ts)
 
-s14: ## Run s14 cron scheduler
-	$(call RUN_SESSION,s14_cron_scheduler/main.ts)
+s14: ## Run s14 mcp plugin
+	$(call RUN_SESSION,s14_mcp_plugin/main.ts)
 
-s15: ## Run s15 agent teams
-	$(call RUN_SESSION,s15_agent_teams/main.ts)
+s15: ## Run s15 integrated harness
+	$(call RUN_SESSION,s15_integrated_harness/main.ts)
 
-s16: ## Run s16 team protocols
-	$(call RUN_SESSION,s16_team_protocols/main.ts)
+s16: ## Run s16 workflow runtime
+	$(call RUN_SESSION,s16_workflow_runtime/main.ts)
 
-s17: ## Run s17 autonomous agents
-	$(call RUN_SESSION,s17_autonomous_agents/main.ts)
-
-s18: ## Run s18 worktree isolation
-	$(call RUN_SESSION,s18_worktree_isolation/main.ts)
-
-s19: ## Run s19 MCP plugin
-	$(call RUN_SESSION,s19_mcp_plugin/main.ts)
-
-s20: ## Run s20 comprehensive
-	$(call RUN_SESSION,s20_comprehensive/main.ts)
+s17: ## Run s17 goal loop
+	$(call RUN_SESSION,s17_goal_loop/main.ts)

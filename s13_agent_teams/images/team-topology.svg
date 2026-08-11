@@ -26,7 +26,7 @@
   <rect x="260" y="58" width="200" height="68" rx="8" fill="#ecfeff" stroke="#0891b2" stroke-width="2"/>
   <text x="360" y="82" fill="#0e7490" font-size="13" font-weight="700" text-anchor="middle">Lead Agent</text>
   <text x="360" y="100" fill="#0e7490" font-size="10" text-anchor="middle">主循环 + spawn + inbox 处理</text>
-  <text x="360" y="116" fill="#0e7490" font-size="10" text-anchor="middle">check_inbox 接收队友消息</text>
+  <text x="360" y="116" fill="#0e7490" font-size="10" text-anchor="middle">运行时自动投递团队事件</text>
 
   <!-- Message Bus: x=80..640, y=150..176 (26px tall) -->
   <rect x="80" y="150" width="560" height="26" rx="13" fill="#fef3c7" stroke="#d97706" stroke-width="1.5"/>
