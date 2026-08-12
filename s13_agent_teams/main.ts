@@ -878,7 +878,8 @@ export function makeWorkspaceHandlers(resolveCwd: CwdResolver): Handlers {
 }
 
 // Lead 侧：有 assignment 用 assignment 的目录，否则仓库目录。
-function leadCwdResolver(team: TeamState): CwdResolver {
+// s15 的 Lead 也用这一份，导出复用而不是各写一遍。
+export function leadCwdResolver(team: TeamState): CwdResolver {
   return () => {
     try {
       return { cwd: assignmentCwd(team, "agent") };
