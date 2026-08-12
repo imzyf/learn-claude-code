@@ -5,7 +5,7 @@ import { z } from "zod";
 import { textOf, zodTool } from "./tools";
 
 describe("zodTool", () => {
-  it("converts a zod schema into a Claude tool definition", () => {
+  it("将 zod schema 转换为 Claude 工具定义", () => {
     const tool = zodTool(
       "bash",
       "Run a shell command.",
@@ -21,7 +21,7 @@ describe("zodTool", () => {
 });
 
 describe("textOf", () => {
-  it("joins all text blocks and ignores other block types", () => {
+  it("拼接所有文本块并忽略其他块类型", () => {
     const response = {
       content: [
         { type: "text", text: "Hello, " },
@@ -33,7 +33,7 @@ describe("textOf", () => {
     expect(textOf(response)).toBe("Hello, world");
   });
 
-  it("returns empty string when there is no text block", () => {
+  it("没有文本块时返回空字符串", () => {
     const response = { content: [] } as unknown as Anthropic.Message;
     expect(textOf(response)).toBe("[no text in response]");
   });

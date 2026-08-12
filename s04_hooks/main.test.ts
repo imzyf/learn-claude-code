@@ -32,14 +32,14 @@ const refuse: Confirm = async () => false;
 
 // ── registry: hooks.register / hooks.trigger ──────────────
 describe("hooks.trigger", () => {
-  it("returns null when every hook returns null", async () => {
+  it("所有 hook 都返回 null 时返回 null", async () => {
     const hooks = createHooks(noopLogger);
     hooks.register("PreToolUse", () => null);
     hooks.register("PreToolUse", () => null);
     expect(await hooks.trigger("PreToolUse", {})).toBeNull();
   });
 
-  it("returns the first non-null result and stops there", async () => {
+  it("返回第一个非 null 结果并停止", async () => {
     const hooks = createHooks(noopLogger);
     const first = vi.fn(() => null);
     const blocking = vi.fn(() => "blocked");
@@ -54,7 +54,7 @@ describe("hooks.trigger", () => {
     expect(after).not.toHaveBeenCalled(); // short-circuited
   });
 
-  it("awaits async hooks", async () => {
+  it("等待异步 hook 完成", async () => {
     const hooks = createHooks(noopLogger);
     hooks.register("PreToolUse", async () => "async-block");
     expect(await hooks.trigger("PreToolUse", {})).toBe("async-block");
@@ -65,7 +65,7 @@ describe("hooks.trigger", () => {
 describe("makePermissionHook", () => {
   const bash = (command: string) => toolUseBlock("t", "bash", { command });
 
-  it("blocks deny-list commands without asking", async () => {
+  it("无需询问便拦截拒绝列表中的命令", async () => {
     const confirm = vi.fn(grant);
     const hook = makePermissionHook(confirm);
     expect(await hook(noopLogger, bash("sudo ls"))).toBe(
@@ -74,19 +74,19 @@ describe("makePermissionHook", () => {
     expect(confirm).not.toHaveBeenCalled();
   });
 
-  it("asks on destructive commands and allows when confirmed", async () => {
+  it("遇到破坏性命令时询问并在确认后允许", async () => {
     const hook = makePermissionHook(grant);
     expect(await hook(noopLogger, bash("rm foo"))).toBeNull();
   });
 
-  it("asks on destructive commands and denies when refused", async () => {
+  it("遇到破坏性命令时询问并在拒绝后拦截", async () => {
     const hook = makePermissionHook(refuse);
     expect(await hook(noopLogger, bash("rm foo"))).toBe(
       "Permission denied by user",
     );
   });
 
-  it("asks before writing outside the workspace", async () => {
+  it("写入工作区外部前先询问", async () => {
     const hook = makePermissionHook(refuse);
     const call = toolUseBlock("t", "write_file", {
       path: "../escape.txt",
@@ -95,13 +95,13 @@ describe("makePermissionHook", () => {
     expect(await hook(noopLogger, call)).toBe("Permission denied by user");
   });
 
-  it("asks before reading outside the workspace", async () => {
+  it("读取工作区外部内容前先询问", async () => {
     const hook = makePermissionHook(refuse);
     const call = toolUseBlock("t", "read_file", { path: "/etc/passwd" });
     expect(await hook(noopLogger, call)).toBe("Permission denied by user");
   });
 
-  it("does not ask for a safe command", async () => {
+  it("安全命令无需询问", async () => {
     const confirm = vi.fn(grant);
     const hook = makePermissionHook(confirm);
     expect(await hook(noopLogger, bash("echo hi"))).toBeNull();
@@ -113,27 +113,27 @@ describe("makePermissionHook", () => {
 describe("pure hooks return null (non-blocking)", () => {
   const call = toolUseBlock("t", "bash", { command: "echo hi" });
 
-  it("logHook", () => {
+  it("执行日志 hook", () => {
     expect(logHook(noopLogger, call)).toBeNull();
   });
 
-  it("largeOutputHook", () => {
+  it("执行大输出 hook", () => {
     expect(largeOutputHook(noopLogger, call, "small")).toBeNull();
     expect(largeOutputHook(noopLogger, call, "x".repeat(200_000))).toBeNull();
   });
 
-  it("contextInjectHook", () => {
+  it("执行上下文注入 hook", () => {
     expect(contextInjectHook(noopLogger, "hello")).toBeNull();
   });
 
-  it("summaryHook", () => {
+  it("执行摘要 hook", () => {
     expect(summaryHook(noopLogger, [])).toBeNull();
   });
 });
 
 // ── agentLoop: hooks wired into the loop ──────────────────
 describe("agentLoop", () => {
-  it("blocks a tool call when a PreToolUse hook returns a message", async () => {
+  it("PreToolUse hook 返回消息时拦截工具调用", async () => {
     const hooks = createHooks(noopLogger);
     hooks.register("PreToolUse", makePermissionHook(grant));
     const client = fakeClient(
@@ -158,7 +158,7 @@ describe("agentLoop", () => {
     expect(toolResults[0].content).toBe("Permission denied by deny list");
   });
 
-  it("runs PostToolUse after a tool executes", async () => {
+  it("工具执行后运行 PostToolUse", async () => {
     const hooks = createHooks(noopLogger);
     const post = vi.fn(() => null);
     hooks.register("PostToolUse", post);
@@ -185,7 +185,7 @@ describe("agentLoop", () => {
     expect(toolResults[0].content).toBe("hi");
   });
 
-  it("lets a Stop hook force another round", async () => {
+  it("允许 Stop hook 强制再执行一轮", async () => {
     const hooks = createHooks(noopLogger);
     let fired = false;
     hooks.register("Stop", () => {

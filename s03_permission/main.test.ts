@@ -38,19 +38,19 @@ const refuse: Confirm = async () => false;
 
 // ── Gate 1: checkDenyList ─────────────────────────────────
 describe("checkDenyList", () => {
-  it("blocks commands on the deny list", () => {
+  it("拦截拒绝列表中的命令", () => {
     expect(checkDenyList("sudo rm x")).toMatch(/deny list/);
     expect(checkDenyList("rm -rf / now")).toMatch(/deny list/);
   });
 
-  it("returns null for a safe command", () => {
+  it("安全命令返回 null", () => {
     expect(checkDenyList("echo hi")).toBeNull();
   });
 });
 
 // ── Gate 2: checkRules ────────────────────────────────────
 describe("checkRules", () => {
-  it("flags every file tool reaching outside the workspace", () => {
+  it("标记所有访问工作区外部的文件工具", () => {
     expect(checkRules("write_file", { path: "../escape.txt" })).toBe(
       "Access outside workspace",
     );
@@ -62,12 +62,12 @@ describe("checkRules", () => {
     );
   });
 
-  it("allows file tools inside the workspace", () => {
+  it("允许工作区内的文件工具", () => {
     expect(checkRules("write_file", { path: "sub/ok.txt" })).toBeNull();
     expect(checkRules("read_file", { path: "sub/ok.txt" })).toBeNull();
   });
 
-  it("flags potentially destructive bash commands", () => {
+  it("标记可能具有破坏性的 bash 命令", () => {
     expect(checkRules("bash", { command: "rm foo" })).toBe(
       "Potentially destructive command",
     );
@@ -76,11 +76,11 @@ describe("checkRules", () => {
     );
   });
 
-  it("returns null for a safe bash command", () => {
+  it("安全的 bash 命令返回 null", () => {
     expect(checkRules("bash", { command: "echo hi" })).toBeNull();
   });
 
-  it("returns null for tools with no matching rule", () => {
+  it("没有匹配规则的工具返回 null", () => {
     expect(checkRules("glob", { pattern: "**/*.ts" })).toBeNull();
   });
 });
@@ -89,13 +89,13 @@ describe("checkRules", () => {
 describe("checkPermission", () => {
   const bash = (command: string) => toolUseBlock("t", "bash", { command });
 
-  it("denies deny-list commands without asking the user", async () => {
+  it("无需询问用户便拒绝列表中的命令", async () => {
     const ask = vi.fn(grant);
     expect(await checkPermission(bash("sudo ls"), ask, noopLogger)).toBe(false);
     expect(ask).not.toHaveBeenCalled();
   });
 
-  it("asks the user when a rule matches, and honors allow", async () => {
+  it("规则匹配时询问用户并遵循允许决定", async () => {
     const ask = vi.fn(grant);
     expect(await checkPermission(bash("rm foo"), ask, noopLogger)).toBe(true);
     expect(ask).toHaveBeenCalledWith(
@@ -104,19 +104,19 @@ describe("checkPermission", () => {
     );
   });
 
-  it("asks the user when a rule matches, and honors deny", async () => {
+  it("规则匹配时询问用户并遵循拒绝决定", async () => {
     const ask = vi.fn(refuse);
     expect(await checkPermission(bash("rm foo"), ask, noopLogger)).toBe(false);
     expect(ask).toHaveBeenCalledOnce();
   });
 
-  it("allows a safe command without asking", async () => {
+  it("无需询问便允许安全命令", async () => {
     const ask = vi.fn(grant);
     expect(await checkPermission(bash("echo hi"), ask, noopLogger)).toBe(true);
     expect(ask).not.toHaveBeenCalled();
   });
 
-  it("logs a deny-list block as a denied permission", async () => {
+  it("将拒绝列表拦截记录为权限拒绝", async () => {
     const logger = { ...noopLogger, section: vi.fn() };
     await checkPermission(bash("sudo ls"), vi.fn(grant), logger);
     expect(logger.section).toHaveBeenCalledWith(
@@ -129,13 +129,13 @@ describe("checkPermission", () => {
 
   // 规则匹配时的放行/拦截日志由 confirm 自己负责（见 makeConfirm），
   // 注入 fake confirm 的 checkPermission 不再记这条。
-  it("does not log the rule path itself (confirm owns that log)", async () => {
+  it("不记录规则路径本身（该日志由 confirm 负责）", async () => {
     const logger = { ...noopLogger, section: vi.fn() };
     await checkPermission(bash("rm foo"), vi.fn(refuse), logger);
     expect(logger.section).not.toHaveBeenCalled();
   });
 
-  it("does not log when no gate fires", async () => {
+  it("没有触发权限门禁时不记录日志", async () => {
     const logger = { ...noopLogger, section: vi.fn() };
     await checkPermission(bash("echo hi"), vi.fn(grant), logger);
     expect(logger.section).not.toHaveBeenCalled();
@@ -148,7 +148,7 @@ describe("makeConfirm", () => {
   const fakeRl = (answer: string) =>
     ({ question: async () => answer }) as unknown as readline.Interface;
 
-  it("returns true and logs allow when the user says yes", async () => {
+  it("用户同意时返回 true 并记录允许日志", async () => {
     const logger = { ...noopLogger, section: vi.fn() };
     const confirm = makeConfirm(fakeRl("y"), logger);
     expect(await confirm(call, "danger")).toBe(true);
@@ -158,7 +158,7 @@ describe("makeConfirm", () => {
     );
   });
 
-  it("returns false and logs deny when the user says no", async () => {
+  it("用户拒绝时返回 false 并记录拒绝日志", async () => {
     const logger = { ...noopLogger, section: vi.fn() };
     const confirm = makeConfirm(fakeRl("n"), logger);
     expect(await confirm(call, "danger")).toBe(false);
@@ -171,7 +171,7 @@ describe("makeConfirm", () => {
 
 // ── agentLoop: permission wired into the loop ─────────────
 describe("agentLoop", () => {
-  it("denies a deny-list tool call without executing it", async () => {
+  it("拒绝执行拒绝列表中的工具调用", async () => {
     const ask = vi.fn(grant);
     const client = fakeClient(
       fakeMessage(
@@ -196,7 +196,7 @@ describe("agentLoop", () => {
     expect(toolResults[0].content).toBe("Permission denied by rule or user.");
   });
 
-  it("denies a rule-matched call when the user says no", async () => {
+  it("用户拒绝时不执行匹配规则的调用", async () => {
     const ask = vi.fn(refuse);
     const client = fakeClient(
       fakeMessage(
@@ -223,7 +223,7 @@ describe("agentLoop", () => {
     expect(fs.existsSync(path.join(process.cwd(), "escape.txt"))).toBe(false);
   });
 
-  it("executes a safe tool without asking", async () => {
+  it("无需询问便执行安全工具", async () => {
     const ask = vi.fn(grant);
     const client = fakeClient(
       fakeMessage(
@@ -248,7 +248,7 @@ describe("agentLoop", () => {
     expect(toolResults[0].content).toBe("hi");
   });
 
-  it("executes a rule-matched call after the user allows it", async () => {
+  it("用户允许后执行匹配规则的调用", async () => {
     fs.writeFileSync(path.join(tmp, "perm.txt"), "x");
     const ask = vi.fn(grant);
     const client = fakeClient(

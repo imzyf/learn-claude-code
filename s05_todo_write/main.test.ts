@@ -40,26 +40,26 @@ const todo = (
 
 // ── normalizeTodos ────────────────────────────────────────
 describe("normalizeTodos", () => {
-  it("accepts an array of todos", () => {
+  it("接受 todo 数组", () => {
     const { todos, error } = normalizeTodos([todo("a", "pending")]);
     expect(error).toBeUndefined();
     expect(todos).toEqual([todo("a", "pending")]);
   });
 
-  it("unwraps a JSON array string", () => {
+  it("解包 JSON 数组字符串", () => {
     const { todos } = normalizeTodos(JSON.stringify([todo("b", "completed")]));
     expect(todos).toEqual([todo("b", "completed")]);
   });
 
-  it("rejects a non-JSON string", () => {
+  it("拒绝非 JSON 字符串", () => {
     expect(normalizeTodos("not json").error).toMatch(/JSON array string/);
   });
 
-  it("rejects items with the wrong shape", () => {
+  it("拒绝结构错误的条目", () => {
     expect(normalizeTodos([{ content: "x" }]).error).toMatch(/content, status/);
   });
 
-  it("rejects an invalid status value", () => {
+  it("拒绝无效的状态值", () => {
     expect(
       normalizeTodos([{ content: "x", status: "done" }]).error,
     ).toBeDefined();
@@ -68,7 +68,7 @@ describe("normalizeTodos", () => {
 
 // ── runTodoWrite ──────────────────────────────────────────
 describe("runTodoWrite", () => {
-  it("renders the stored list with a progress line", () => {
+  it("渲染存储的列表及进度行", () => {
     expect(
       runTodoWrite(
         [todo("a", "completed"), todo("b", "in_progress")],
@@ -77,17 +77,17 @@ describe("runTodoWrite", () => {
     ).toBe("[x] a\n[>] b\n\n(1/2 completed)");
   });
 
-  it("returns the error for invalid input", () => {
+  it("输入无效时返回错误", () => {
     expect(runTodoWrite("bad", noopLogger)).toMatch(/JSON array string/);
   });
 
-  it("rejects blank content", () => {
+  it("拒绝空白内容", () => {
     expect(runTodoWrite([todo("   ", "pending")], noopLogger)).toBe(
       "Error: todos[0] requires content",
     );
   });
 
-  it("rejects two todos in_progress at once", () => {
+  it("拒绝同时存在两个 in_progress 状态的 todo", () => {
     expect(
       runTodoWrite(
         [todo("a", "in_progress"), todo("b", "in_progress")],
@@ -96,7 +96,7 @@ describe("runTodoWrite", () => {
     ).toBe("Error: Only one todo can be in_progress at a time");
   });
 
-  it("rejects more than 20 todos", () => {
+  it("拒绝超过 20 个 todo", () => {
     const many = Array.from({ length: 21 }, (_, i) => todo(`t${i}`, "pending"));
     expect(runTodoWrite(many, noopLogger)).toBe("Error: Max 20 todos allowed");
   });
@@ -104,7 +104,7 @@ describe("runTodoWrite", () => {
 
 // ── permissionHook ────────────────────────────────────────
 describe("permissionHook", () => {
-  it("denies deny-list bash commands", () => {
+  it("拒绝列表中的 bash 命令", () => {
     expect(
       permissionHook(
         noopLogger,
@@ -113,7 +113,7 @@ describe("permissionHook", () => {
     ).toBe("Blocked: 'sudo' is on the deny list");
   });
 
-  it("allows safe commands", () => {
+  it("允许安全命令", () => {
     expect(
       permissionHook(
         noopLogger,
@@ -128,7 +128,7 @@ describe("agentLoop", () => {
   const bashRound = (cmd: string) =>
     fakeMessage([toolUseBlock("tu", "bash", { command: cmd })], "tool_use");
 
-  it("executes a tool and returns final text", async () => {
+  it("执行工具并返回最终文本", async () => {
     const hooks = createHooks(noopLogger);
     registerDefaultHooks(hooks);
     const client = fakeClient(
@@ -150,7 +150,7 @@ describe("agentLoop", () => {
     expect(toolResults[0].content).toBe("hi");
   });
 
-  it("blocks deny-list commands via the permission hook", async () => {
+  it("通过权限 hook 拦截拒绝列表中的命令", async () => {
     const hooks = createHooks(noopLogger);
     registerDefaultHooks(hooks);
     const client = fakeClient(
@@ -167,7 +167,7 @@ describe("agentLoop", () => {
     expect(toolResults[0].content).toBe("Blocked: 'sudo' is on the deny list");
   });
 
-  it("injects a <reminder> after 3 tool rounds without todo_write", async () => {
+  it("连续 3 轮工具调用未使用 todo_write 后注入 <reminder>", async () => {
     const hooks = createHooks(noopLogger);
     const client = fakeClient(
       bashRound("echo 1"),
@@ -188,7 +188,7 @@ describe("agentLoop", () => {
     expect(reminded).toBe(true);
   });
 
-  it("does not nag when todo_write resets the counter", async () => {
+  it("todo_write 重置计数器后不再提醒", async () => {
     const hooks = createHooks(noopLogger);
     const client = fakeClient(
       bashRound("echo 1"),
@@ -216,7 +216,7 @@ describe("agentLoop", () => {
     expect(reminded).toBe(false);
   });
 
-  it("lets a Stop hook force another round", async () => {
+  it("允许 Stop hook 强制再执行一轮", async () => {
     const hooks = createHooks(noopLogger);
     let fired = false;
     const client = fakeClient(

@@ -58,11 +58,20 @@ skills/
 class SkillLoader:
     def scan(self):
         self.skills.clear()
+        skills_root = self.skills_dir.resolve()
         for manifest in sorted(self.skills_dir.glob("*/SKILL.md")):
+            if (not manifest.is_file()
+                    or not manifest.resolve().is_relative_to(skills_root)):
+                continue
             content = manifest.read_text()
             metadata, body = self.parse_frontmatter(content)
-            name = str(metadata.get("name") or manifest.parent.name).strip()
-            description = metadata.get("description") or body.splitlines()[0]
+            raw_name = metadata.get("name")
+            name = raw_name.strip() if isinstance(raw_name, str) else ""
+            name = name or manifest.parent.name
+            raw_description = metadata.get("description")
+            description = (raw_description.strip()
+                           if isinstance(raw_description, str) else "")
+            description = description or body.split("\n", 1)[0]
             description = " ".join(str(description).lstrip("# ").split())
             self.skills[name] = {
                 "name": name,

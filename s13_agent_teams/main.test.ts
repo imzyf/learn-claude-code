@@ -84,7 +84,7 @@ const waitFor = async (cond: () => boolean, ms = 2000): Promise<void> => {
 
 // ── MessageBus ────────────────────────────────────────────
 describe("MessageBus", () => {
-  it("round-trips a message and consumes it on read", () => {
+  it("消息可往返传递并在读取时被消费", () => {
     const bus = new MessageBus(dir);
     bus.send("lead", "alice", "hello");
     expect(bus.peek("alice")).toBe(true);
@@ -102,7 +102,7 @@ describe("MessageBus", () => {
     expect(bus.peek("alice")).toBe(false);
   });
 
-  it("keeps order and carries protocol metadata", () => {
+  it("保持顺序并携带协议元数据", () => {
     const bus = new MessageBus(dir);
     bus.send("a", "lead", "one");
     bus.send("b", "lead", "two", "shutdown_response", {
@@ -117,7 +117,7 @@ describe("MessageBus", () => {
     });
   });
 
-  it("peek is non-destructive and an absent inbox reads empty", () => {
+  it("peek 不会消费消息且收件箱不存在时读取结果为空", () => {
     const bus = new MessageBus(dir);
     expect(bus.peek("nobody")).toBe(false);
     expect(bus.readInbox("nobody")).toEqual([]);
@@ -128,7 +128,7 @@ describe("MessageBus", () => {
     expect(bus.readInbox("lead")).toHaveLength(1);
   });
 
-  it("waitForMessages wakes on send and returns empty on timeout", async () => {
+  it("waitForMessages 在发送消息时唤醒并在超时后返回空结果", async () => {
     const bus = new MessageBus(dir);
     const waiting = bus.waitForMessages("alice", 2000);
     bus.send("lead", "alice", "wake up");
@@ -140,7 +140,7 @@ describe("MessageBus", () => {
 
 // ── 认领与完成 ─────────────────────────────────────────────
 describe("claimTask / completeTask", () => {
-  it("binds one assignment per owner and refuses a second claim", () => {
+  it("每位负责人只绑定一个任务并拒绝再次认领", () => {
     const team = newTeam();
     const first = team.tasks.create("config");
     const second = team.tasks.create("auth");
@@ -154,7 +154,7 @@ describe("claimTask / completeTask", () => {
     expect(claimTask(team, second.id, "bob", noopLogger)).toContain("Claimed");
   });
 
-  it("refuses a claim on an owned or blocked task", () => {
+  it("拒绝认领已有负责人或被阻塞的任务", () => {
     const team = newTeam();
     const base = team.tasks.create("schema");
     const dependent = team.tasks.create("api", "", [base.id]);
@@ -168,7 +168,7 @@ describe("claimTask / completeTask", () => {
     );
   });
 
-  it("completes only for the owner and reports unblocked work", () => {
+  it("仅允许负责人完成任务并报告解除阻塞的工作", () => {
     const team = newTeam();
     const base = team.tasks.create("schema");
     team.tasks.create("api", "", [base.id]);
@@ -184,7 +184,7 @@ describe("claimTask / completeTask", () => {
     expect(team.assignments.get("alice")).toMatchObject({ taskId: base.id });
   });
 
-  it("refuses to complete while a plan is still gated", () => {
+  it("计划仍受门禁限制时拒绝完成任务", () => {
     const team = newTeam();
     const task = team.tasks.create("auth");
     claimTask(team, task.id, "alice", noopLogger);
@@ -202,7 +202,7 @@ describe("claimTask / completeTask", () => {
 
 // ── assignment 的工作目录 ──────────────────────────────────
 describe("assignmentCwd / worktree binding", () => {
-  it("falls back to the repository directory without an assignment", () => {
+  it("没有分配任务时回退到仓库目录", () => {
     const team = newTeam();
     expect(assignmentCwd(team, "agent")).toBe(process.cwd());
 
@@ -211,7 +211,7 @@ describe("assignmentCwd / worktree binding", () => {
     expect(assignmentCwd(team, "agent")).toBe(process.cwd());
   });
 
-  it("fails closed when a worktree binding is not registered with Git", () => {
+  it("worktree 绑定未在 Git 中注册时以拒绝方式失败", () => {
     const team = newTeam();
     const bound: TeamTask = {
       ...team.tasks.create("auth"),
@@ -230,7 +230,7 @@ describe("assignmentCwd / worktree binding", () => {
     expect(scanUnclaimedTasks(team)).toHaveLength(0);
   });
 
-  it("validates worktree names and refuses binding a claimed task", () => {
+  it("校验 worktree 名称并拒绝绑定已认领的任务", () => {
     const team = newTeam();
     expect(validateWorktreeName("auth-refactor")).toBeNull();
     expect(validateWorktreeName("../escape")).toContain("must be 1-64");
@@ -246,7 +246,7 @@ describe("assignmentCwd / worktree binding", () => {
 
 // ── 任务发现 ───────────────────────────────────────────────
 describe("scanUnclaimedTasks / claimNextTask", () => {
-  it("only offers ready, unowned tasks", () => {
+  it("只提供已就绪且没有负责人的任务", () => {
     const team = newTeam();
     const base = team.tasks.create("schema");
     team.tasks.create("api", "", [base.id]);
@@ -256,12 +256,13 @@ describe("scanUnclaimedTasks / claimNextTask", () => {
     expect(scanUnclaimedTasks(team).map((t) => t.id)).toEqual([free.id]);
   });
 
-  it("claims the first available task and nothing more", () => {
+  it("只认领第一个可用任务", () => {
     const team = newTeam();
-    const first = team.tasks.create("docs");
+    team.tasks.create("docs");
     team.tasks.create("tests");
+    const firstAvailable = scanUnclaimedTasks(team)[0];
 
-    expect(claimNextTask(team, "bob", noopLogger)?.id).toBe(first.id);
+    expect(claimNextTask(team, "bob", noopLogger)?.id).toBe(firstAvailable.id);
     // 已有 assignment 的队友不再认领第二项。
     expect(claimNextTask(team, "bob", noopLogger)).toBeNull();
   });
@@ -269,7 +270,7 @@ describe("scanUnclaimedTasks / claimNextTask", () => {
 
 // ── 协议 ───────────────────────────────────────────────────
 describe("team protocols", () => {
-  it("matches a shutdown response back to its request", () => {
+  it("将关闭响应匹配回对应请求", () => {
     const team = newTeam();
     team.activeTeammates.set("alice", "working");
     const handlers = makeTeamHandlers(team, fakeClient(), noopLogger);
@@ -292,7 +293,7 @@ describe("team protocols", () => {
     expect(team.pendingRequests.get(requestId)?.status).toBe("approved");
   });
 
-  it("approves a plan and opens the gate for the submitting teammate", () => {
+  it("批准计划并为提交计划的队友解除门禁", () => {
     const team = newTeam();
     team.activeTeammates.set("alice", "working");
     const task = team.tasks.create("auth");
@@ -313,7 +314,7 @@ describe("team protocols", () => {
     expect(team.gateOf("alice")).toBe("approved");
   });
 
-  it("ignores a plan response that belongs to an earlier assignment", () => {
+  it("忽略属于先前任务分配的计划响应", () => {
     const team = newTeam();
     team.activeTeammates.set("alice", "working");
     const task = team.tasks.create("auth");
@@ -352,7 +353,7 @@ describe("runTeammateTool", () => {
   const block = (name: string, input: unknown) =>
     toolUseBlock("tu_1", name, input);
 
-  it("blocks modifying tools until the plan is approved", () => {
+  it("计划获批前拦截修改类工具", () => {
     const team = newTeam();
     team.planGates.set("alice", "required");
     const handlers = { bash: () => "ran", read_file: () => "contents" };
@@ -389,7 +390,7 @@ describe("runTeammateTool", () => {
     ).toBe("ran");
   });
 
-  it("returns a permission error instead of reading the terminal", () => {
+  it("返回权限错误而不是读取终端", () => {
     const team = newTeam();
     const handlers = { bash: () => "ran" };
     expect(
@@ -415,7 +416,7 @@ describe("runTeammateTool", () => {
 
 // ── 队友运行时 ─────────────────────────────────────────────
 describe("spawnTeammateThread", () => {
-  it("rejects duplicate, reserved, and unclaimable spawns", () => {
+  it("拒绝重复、保留名称及无法认领任务的 spawn 请求", () => {
     const team = newTeam();
     team.activeTeammates.set("alice", "working");
     const client = fakeClient();
@@ -435,7 +436,7 @@ describe("spawnTeammateThread", () => {
     expect(team.activeTeammates.has("bob")).toBe(false);
   });
 
-  it("delivers result and idle_notification, then shuts down on request", async () => {
+  it("投递结果和 idle_notification 后按请求关闭", async () => {
     const team = newTeam();
     const client = fakeClient(
       fakeMessage([textBlock("auth refactored")], "end_turn"),
@@ -466,7 +467,7 @@ describe("spawnTeammateThread", () => {
     );
   });
 
-  it("claims a ready task from the shared board while idle", async () => {
+  it("空闲时从共享任务板认领已就绪任务", async () => {
     const team = newTeam();
     const task = team.tasks.create("write docs", "cover the API");
     const client = fakeClient(
@@ -495,7 +496,7 @@ describe("spawnTeammateThread", () => {
     expect(team.tasks.load(task.id).owner).toBeNull();
   });
 
-  it("runs the assigned task through the teammate tool loop", async () => {
+  it("通过队友工具循环运行分配的任务", async () => {
     const team = newTeam();
     const task = team.tasks.create("tests", "add regression tests");
     const client = fakeClient(
@@ -534,7 +535,7 @@ describe("spawnTeammateThread", () => {
 
 // ── Lead 团队 handler ──────────────────────────────────────
 describe("makeTeamHandlers", () => {
-  it("lists teammates and refuses messages to inactive ones", () => {
+  it("列出队友并拒绝向非活跃队友发送消息", () => {
     const team = newTeam();
     team.activeTeammates.set("bob", "idle");
     team.activeTeammates.set("alice", "working");
@@ -553,7 +554,7 @@ describe("makeTeamHandlers", () => {
     });
   });
 
-  it("request_plan closes the gate before any workspace change", () => {
+  it("request_plan 在工作区发生任何更改前关闭门禁", () => {
     const team = newTeam();
     team.activeTeammates.set("alice", "working");
     const handlers = makeTeamHandlers(team, fakeClient(), noopLogger);
@@ -568,7 +569,7 @@ describe("makeTeamHandlers", () => {
 
 // ── 工具集 ─────────────────────────────────────────────────
 describe("tool sets", () => {
-  it("adds team tools on top of the s10 tools", () => {
+  it("在 s10 工具上添加团队工具", () => {
     const names = tools.map((t) => t.name);
     expect(names).toEqual(
       expect.arrayContaining([
@@ -587,7 +588,7 @@ describe("tool sets", () => {
     expect(names).not.toContain("check_inbox");
   });
 
-  it("keeps the teammate tool set narrower than the lead's", () => {
+  it("队友工具集保持为负责人工具集的子集", () => {
     const names = TEAMMATE_TOOLS.map((t) => t.name);
     expect(names).toEqual(
       expect.arrayContaining([
@@ -603,7 +604,7 @@ describe("tool sets", () => {
     expect(names).not.toContain("create_worktree");
   });
 
-  it("schema parses team tool inputs", () => {
+  it("schema 解析团队工具输入", () => {
     expect(
       TOOL_SCHEMAS.spawn_teammate?.parse({
         name: "alice",
@@ -627,7 +628,7 @@ describe("tool sets", () => {
 
 // ── agentLoop ─────────────────────────────────────────────
 describe("agentLoop", () => {
-  it("runs a lead tool call end to end", async () => {
+  it("端到端运行负责人工具调用", async () => {
     const team = newTeam();
     const client = fakeClient(
       fakeMessage(
@@ -651,7 +652,7 @@ describe("agentLoop", () => {
     expect(team.tasks.list().map((t) => t.subject)).toEqual(["config"]);
   });
 
-  it("formats consumed team events for the next turn", () => {
+  it("为下一轮格式化已消费的团队事件", () => {
     const team = newTeam();
     team.bus.send("alice", "lead", "auth done", "result");
     team.bus.send(

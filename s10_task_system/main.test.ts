@@ -45,7 +45,7 @@ afterEach(() => {
 
 // ── 持久化往返 ────────────────────────────────────────────
 describe("TaskStore", () => {
-  it("persists a pending task with no owner", () => {
+  it("持久化没有负责人的待处理任务", () => {
     const task = tasks.create("write docs", "add README");
     expect(task.id).toMatch(/^task_[0-9a-f]{8}$/);
     expect(task.status).toBe("pending");
@@ -56,7 +56,7 @@ describe("TaskStore", () => {
     expect(loaded.description).toBe("add README");
   });
 
-  it("lists tasks and reports an empty store before anything is created", () => {
+  it("列出任务，并在尚未创建任务时报告存储为空", () => {
     expect(tasks.list()).toEqual([]);
     tasks.create("alpha");
     tasks.create("beta");
@@ -68,23 +68,23 @@ describe("TaskStore", () => {
     ).toEqual(["alpha", "beta"]);
   });
 
-  it("rejects an empty subject", () => {
+  it("拒绝空主题", () => {
     expect(() => tasks.create("   ")).toThrow("cannot be empty");
   });
 
-  it("rejects a dependency that does not exist", () => {
+  it("拒绝不存在的依赖项", () => {
     expect(() => tasks.create("needs ghost", "", ["task_deadbeef"])).toThrow(
       "Dependency not found",
     );
   });
 
-  it("deduplicates blockedBy", () => {
+  it("对 blockedBy 去重", () => {
     const dep = tasks.create("dep");
     const task = tasks.create("needs dep", "", [dep.id, dep.id]);
     expect(task.blockedBy).toEqual([dep.id]);
   });
 
-  it("rejects an ID that is not task_ + 8 hex chars", () => {
+  it("拒绝不符合 task_ 加 8 位十六进制字符格式的 ID", () => {
     expect(() => tasks.load("task_missing")).toThrow("Invalid task ID");
     expect(() => tasks.load("../escape")).toThrow("Invalid task ID");
   });
@@ -92,18 +92,18 @@ describe("TaskStore", () => {
 
 // ── canStart：依赖判定 ─────────────────────────────────────
 describe("canStart", () => {
-  it("is startable when there are no dependencies", () => {
+  it("没有依赖项时可以开始", () => {
     const task = tasks.create("standalone");
     expect(canStart(tasks, task.id)).toBe(true);
   });
 
-  it("is blocked while a dependency is not completed", () => {
+  it("依赖项未完成时保持阻塞", () => {
     const dep = tasks.create("dep");
     const task = tasks.create("needs dep", "", [dep.id]);
     expect(canStart(tasks, task.id)).toBe(false);
   });
 
-  it("becomes startable once the dependency completes", () => {
+  it("依赖项完成后可以开始", () => {
     const dep = tasks.create("dep");
     const task = tasks.create("needs dep", "", [dep.id]);
     claimTask(tasks, dep.id, noopLogger);
@@ -111,7 +111,7 @@ describe("canStart", () => {
     expect(canStart(tasks, task.id)).toBe(true);
   });
 
-  it("treats a dependency whose file is gone as blocking", () => {
+  it("依赖文件消失时视为阻塞", () => {
     const dep = tasks.create("dep");
     const task = tasks.create("needs dep", "", [dep.id]);
     fs.rmSync(`${dir}/${dep.id}.json`);
@@ -121,7 +121,7 @@ describe("canStart", () => {
 
 // ── claimTask ─────────────────────────────────────────────
 describe("claimTask", () => {
-  it("moves a pending task to in_progress and sets the owner", () => {
+  it("将待处理任务改为 in_progress 并设置负责人", () => {
     const task = tasks.create("do it");
     const msg = claimTask(tasks, task.id, noopLogger, "worker-1");
     expect(msg).toContain("Claimed");
@@ -130,13 +130,13 @@ describe("claimTask", () => {
     expect(loaded.owner).toBe("worker-1");
   });
 
-  it("refuses to claim a task that is not pending", () => {
+  it("拒绝认领非待处理状态的任务", () => {
     const task = tasks.create("do it");
     claimTask(tasks, task.id, noopLogger);
     expect(claimTask(tasks, task.id, noopLogger)).toContain("cannot claim");
   });
 
-  it("reports the blockers when dependencies are unmet", () => {
+  it("依赖项未满足时报告阻塞项", () => {
     const dep = tasks.create("dep");
     const task = tasks.create("needs dep", "", [dep.id]);
     const msg = claimTask(tasks, task.id, noopLogger);
@@ -148,21 +148,21 @@ describe("claimTask", () => {
 
 // ── completeTask ──────────────────────────────────────────
 describe("completeTask", () => {
-  it("completes an in-progress task", () => {
+  it("完成进行中的任务", () => {
     const task = tasks.create("do it");
     claimTask(tasks, task.id, noopLogger);
     expect(completeTask(tasks, task.id, noopLogger)).toContain("Completed");
     expect(tasks.load(task.id).status).toBe("completed");
   });
 
-  it("refuses to complete a task that is not in_progress", () => {
+  it("拒绝完成非 in_progress 状态的任务", () => {
     const task = tasks.create("do it");
     expect(completeTask(tasks, task.id, noopLogger)).toContain(
       "cannot complete",
     );
   });
 
-  it("refuses to complete a task claimed by someone else", () => {
+  it("拒绝完成由其他人认领的任务", () => {
     const task = tasks.create("do it");
     claimTask(tasks, task.id, noopLogger, "worker-1");
     const msg = completeTask(tasks, task.id, noopLogger, "worker-2");
@@ -170,7 +170,7 @@ describe("completeTask", () => {
     expect(tasks.load(task.id).status).toBe("in_progress");
   });
 
-  it("reports downstream tasks unblocked by completion", () => {
+  it("报告因任务完成而解除阻塞的下游任务", () => {
     const dep = tasks.create("dep");
     tasks.create("downstream", "", [dep.id]);
     claimTask(tasks, dep.id, noopLogger);
@@ -179,7 +179,7 @@ describe("completeTask", () => {
     expect(msg).toContain("downstream");
   });
 
-  it("does not re-report tasks that were already unblocked", () => {
+  it("不重复报告已经解除阻塞的任务", () => {
     const first = tasks.create("first");
     const second = tasks.create("second");
     tasks.create("downstream", "", [first.id]);
@@ -195,7 +195,7 @@ describe("completeTask", () => {
 
 // ── 工具 handler 的回报文本 ────────────────────────────────
 describe("runCreateTask / runListTasks / getTask", () => {
-  it("creates a task and reports its id and subject", () => {
+  it("创建任务并报告其 ID 和主题", () => {
     const msg = runCreateTask(
       tasks,
       "write docs",
@@ -208,18 +208,18 @@ describe("runCreateTask / runListTasks / getTask", () => {
     expect(tasks.list()).toHaveLength(1);
   });
 
-  it("reports blockedBy dependencies in the message", () => {
+  it("在消息中报告 blockedBy 依赖项", () => {
     const dep = tasks.create("dep");
     const msg = runCreateTask(tasks, "needs dep", "", [dep.id], noopLogger);
     expect(msg).toContain("blockedBy");
     expect(msg).toContain(dep.id);
   });
 
-  it("prompts to create tasks when none exist", () => {
+  it("没有任务时提示创建任务", () => {
     expect(runListTasks(tasks)).toContain("No tasks");
   });
 
-  it("renders each task with a status marker", () => {
+  it("渲染每个任务及其状态标记", () => {
     tasks.create("alpha");
     const out = runListTasks(tasks);
     expect(out).toContain("alpha");
@@ -227,7 +227,7 @@ describe("runCreateTask / runListTasks / getTask", () => {
     expect(out).toContain("[ ]");
   });
 
-  it("returns the full task JSON", () => {
+  it("返回完整的任务 JSON", () => {
     const task = tasks.create("inspect me", "with details");
     const out = getTask(tasks, task.id);
     expect(out).toContain(task.id);
@@ -237,7 +237,7 @@ describe("runCreateTask / runListTasks / getTask", () => {
 
 // ── 工具集：基础五工具 + 五个任务工具 ──────────────────────
 describe("tools", () => {
-  it("merges the task tools onto the five base tools", () => {
+  it("在五个基础工具上合并任务工具", () => {
     expect(tools.map((t) => t.name)).toEqual([
       "bash",
       "read_file",
@@ -255,7 +255,7 @@ describe("tools", () => {
 
 // ── agentLoop：任务工具已并入 dispatch ─────────────────────
 describe("agentLoop", () => {
-  it("runs a task tool end to end and returns the final text", async () => {
+  it("端到端运行任务工具并返回最终文本", async () => {
     const client = fakeClient(
       fakeMessage(
         [toolUseBlock("tu_1", "create_task", { subject: "ship it" })],
@@ -281,7 +281,7 @@ describe("agentLoop", () => {
     expect(toolResults[0].content).toContain("Created");
   });
 
-  it("turns a bad task ID into an error tool_result instead of throwing", async () => {
+  it("将无效任务 ID 转为错误 tool_result 而不是抛出异常", async () => {
     const client = fakeClient(
       fakeMessage(
         [toolUseBlock("tu_1", "get_task", { task_id: "nope" })],

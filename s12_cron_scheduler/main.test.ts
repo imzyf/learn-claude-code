@@ -83,13 +83,13 @@ const fires = (cron: string, at: Date): boolean => {
 };
 
 describe("runCronTick 匹配语义", () => {
-  it("matches minute/hour wildcards and exact values", () => {
+  it("匹配分钟和小时的通配符及精确值", () => {
     expect(fires("0 9 * * *", new Date(2026, 2, 1, 9, 0))).toBe(true);
     expect(fires("0 9 * * *", new Date(2026, 2, 1, 9, 1))).toBe(false);
     expect(fires("0 9 * * *", new Date(2026, 2, 1, 10, 0))).toBe(false);
   });
 
-  it("matches step, list, and range fields", () => {
+  it("匹配步长、列表和范围字段", () => {
     expect(fires("*/15 * * * *", new Date(2026, 2, 1, 9, 30))).toBe(true);
     expect(fires("*/15 * * * *", new Date(2026, 2, 1, 9, 31))).toBe(false);
     expect(fires("0,30 9 * * *", new Date(2026, 2, 1, 9, 30))).toBe(true);
@@ -97,11 +97,11 @@ describe("runCronTick 匹配语义", () => {
     expect(fires("0 9-17 * * *", new Date(2026, 2, 1, 18, 0))).toBe(false);
   });
 
-  it("rejects malformed expressions", () => {
+  it("拒绝格式错误的表达式", () => {
     expect(fires("0 9 * *", new Date(2026, 2, 1, 9, 0))).toBe(false);
   });
 
-  it("uses OR when both DOM and DOW are constrained", () => {
+  it("DOM 和 DOW 都受限时使用 OR 逻辑", () => {
     // dom=1, dow=Tuesday(2). 03-01 是周日但 DOM=1 → 命中；03-03 是周二但 DOM≠1 → 命中。
     const cron = "0 9 1 * 2";
     expect(fires(cron, new Date(2026, 2, 1, 9, 0))).toBe(true); // DOM 命中
@@ -109,7 +109,7 @@ describe("runCronTick 匹配语义", () => {
     expect(fires(cron, new Date(2026, 2, 4, 9, 0))).toBe(false); // 都不命中
   });
 
-  it("matches DOM alone or DOW alone when only one is constrained", () => {
+  it("仅有一项受限时单独匹配 DOM 或 DOW", () => {
     expect(fires("0 9 1 * *", new Date(2026, 2, 1, 9, 0))).toBe(true);
     expect(fires("0 9 1 * *", new Date(2026, 2, 3, 9, 0))).toBe(false);
     expect(fires("0 9 * * 0", new Date(2026, 2, 1, 9, 0))).toBe(true); // 周日
@@ -119,7 +119,7 @@ describe("runCronTick 匹配语义", () => {
 
 // ── scheduleJob / cancelJob ───────────────────────────────
 describe("scheduleJob / cancelJob", () => {
-  it("registers a valid job and persists durable ones", () => {
+  it("注册有效任务并持久化耐久任务", () => {
     const state = new CronState(durable());
     const job = scheduleJob(state, "0 9 * * *", "hi", true, true, noopLogger);
     expect(typeof job).not.toBe("string");
@@ -127,7 +127,7 @@ describe("scheduleJob / cancelJob", () => {
     expect(fs.existsSync(durable())).toBe(true);
   });
 
-  it("does not persist session-only jobs", () => {
+  it("不持久化仅限会话的任务", () => {
     const state = new CronState(durable());
     scheduleJob(state, "0 9 * * *", "durable one", true, true, noopLogger);
     scheduleJob(state, "0 10 * * *", "session one", true, false, noopLogger);
@@ -136,21 +136,21 @@ describe("scheduleJob / cancelJob", () => {
     expect(saved[0].prompt).toBe("durable one");
   });
 
-  it("rejects an invalid cron expression", () => {
+  it("拒绝无效的 cron 表达式", () => {
     const state = new CronState(durable());
     const err = scheduleJob(state, "bad", "x", true, false, noopLogger);
     expect(typeof err).toBe("string");
     expect(state.scheduledJobs.size).toBe(0);
   });
 
-  it("rejects an empty prompt", () => {
+  it("拒绝空提示词", () => {
     const state = new CronState(durable());
     const err = scheduleJob(state, "0 9 * * *", "  ", true, false, noopLogger);
     expect(err).toBe("Prompt cannot be empty");
     expect(state.scheduledJobs.size).toBe(0);
   });
 
-  it("cancels a job and reports missing ones", () => {
+  it("取消任务并报告不存在的任务", () => {
     const state = new CronState(durable());
     const job = scheduleJob(
       state,
@@ -168,7 +168,7 @@ describe("scheduleJob / cancelJob", () => {
 
 // ── 持久化往返 ────────────────────────────────────────────
 describe("loadDurableJobs", () => {
-  it("round-trips durable jobs and skips invalid ones", () => {
+  it("耐久任务可往返读写并跳过无效任务", () => {
     const good = makeJob({ id: "cron_a", durable: true });
     const bad = makeJob({ id: "cron_b", cron: "99 9 * * *", durable: true });
     fs.writeFileSync(durable(), JSON.stringify([good, bad]));
@@ -179,7 +179,7 @@ describe("loadDurableJobs", () => {
     expect(state.scheduledJobs.has("cron_b")).toBe(false);
   });
 
-  it("re-queues jobs that were still pending delivery", () => {
+  it("重新入队仍待投递的任务", () => {
     const pending = makeJob({
       id: "cron_p",
       durable: true,
@@ -192,7 +192,7 @@ describe("loadDurableJobs", () => {
     expect(state.cronQueue.map((j) => j.id)).toEqual(["cron_p"]);
   });
 
-  it("skips jobs with a bad ID or an empty prompt", () => {
+  it("跳过 ID 无效或提示词为空的任务", () => {
     const badId = makeJob({ id: "job_a", durable: true });
     const noPrompt = makeJob({ id: "cron_b", prompt: "  ", durable: true });
     fs.writeFileSync(durable(), JSON.stringify([badId, noPrompt]));
@@ -202,7 +202,7 @@ describe("loadDurableJobs", () => {
     expect(state.scheduledJobs.size).toBe(0);
   });
 
-  it("is a no-op when the durable file is absent", () => {
+  it("耐久文件不存在时不执行任何操作", () => {
     const state = new CronState(durable());
     loadDurableJobs(state, noopLogger);
     expect(state.scheduledJobs.size).toBe(0);
@@ -213,7 +213,7 @@ describe("loadDurableJobs", () => {
 describe("runCronTick", () => {
   const at9 = () => new Date(2026, 2, 1, 9, 0);
 
-  it("queues a matching job and dedupes within the same minute", () => {
+  it("将匹配的任务入队并在同一分钟内去重", () => {
     const state = new CronState(durable());
     state.scheduledJobs.set("cron_1", makeJob({ id: "cron_1" }));
 
@@ -225,14 +225,14 @@ describe("runCronTick", () => {
     expect(hasCronQueue(state)).toBe(false);
   });
 
-  it("does not queue a non-matching job", () => {
+  it("不将不匹配的任务入队", () => {
     const state = new CronState(durable());
     state.scheduledJobs.set("cron_1", makeJob({ id: "cron_1" }));
     runCronTick(state, new Date(2026, 2, 1, 10, 0), noopLogger);
     expect(hasCronQueue(state)).toBe(false);
   });
 
-  it("keeps a one-shot job registered until it is acknowledged", () => {
+  it("一次性任务在确认前保持注册状态", () => {
     const state = new CronState(durable());
     state.scheduledJobs.set(
       "cron_once",
@@ -248,7 +248,7 @@ describe("runCronTick", () => {
     expect(consumeCronQueue(state)).toHaveLength(2);
   });
 
-  it("does not re-queue a job that is still pending delivery", () => {
+  it("不重复入队仍待投递的任务", () => {
     const state = new CronState(durable());
     state.scheduledJobs.set("cron_1", makeJob({ id: "cron_1" }));
 
@@ -264,7 +264,7 @@ describe("runCronTick", () => {
 describe("acknowledgeCronJobs / restoreCronJobs", () => {
   const at9 = () => new Date(2026, 2, 1, 9, 0);
 
-  it("drops one-shot jobs and clears pendingDelivery on recurring ones", () => {
+  it("删除一次性任务并清除周期任务的 pendingDelivery", () => {
     const state = new CronState(durable());
     state.scheduledJobs.set(
       "cron_once",
@@ -282,7 +282,7 @@ describe("acknowledgeCronJobs / restoreCronJobs", () => {
     expect(state.scheduledJobs.get("cron_loop")?.pendingDelivery).toBe(false);
   });
 
-  it("puts delivered jobs back on the queue when restoring", () => {
+  it("恢复时将已投递任务放回队列", () => {
     const state = new CronState(durable());
     state.scheduledJobs.set("cron_1", makeJob({ id: "cron_1" }));
     runCronTick(state, at9(), noopLogger);
@@ -293,7 +293,7 @@ describe("acknowledgeCronJobs / restoreCronJobs", () => {
     expect(state.scheduledJobs.get("cron_1")?.pendingDelivery).toBe(true);
   });
 
-  it("ignores jobs cancelled while they were in flight", () => {
+  it("忽略执行期间被取消的任务", () => {
     const state = new CronState(durable());
     state.scheduledJobs.set("cron_1", makeJob({ id: "cron_1" }));
     runCronTick(state, at9(), noopLogger);
@@ -309,7 +309,7 @@ describe("acknowledgeCronJobs / restoreCronJobs", () => {
 
 // ── 工具叠加：cron 工具 + s02 的基础工具仍在 ─────────────────
 describe("tools", () => {
-  it("adds cron tools on top of the s02 base tools", () => {
+  it("在 s02 基础工具上添加 cron 工具", () => {
     const names = tools.map((t) => t.name);
     expect(names).toContain("schedule_cron");
     expect(names).toContain("list_crons");
@@ -318,7 +318,7 @@ describe("tools", () => {
     expect(names).toContain("read_file"); // s02
   });
 
-  it("schedule_cron schema parses required fields", () => {
+  it("schedule_cron schema 解析必填字段", () => {
     expect(
       TOOL_SCHEMAS.schedule_cron?.parse({ cron: "0 9 * * *", prompt: "x" }),
     ).toMatchObject({ cron: "0 9 * * *", prompt: "x" });
@@ -327,7 +327,7 @@ describe("tools", () => {
 
 // ── agentLoop：cron 注入 + schedule_cron 端到端 ─────────────
 describe("agentLoop", () => {
-  it("consumes the cron queue and injects a [Scheduled] message", async () => {
+  it("消费 cron 队列并注入 [Scheduled] 消息", async () => {
     const cron = new CronState(durable());
     cron.cronQueue.push(makeJob({ id: "cron_x", prompt: "do the thing" }));
     const client = fakeClient(fakeMessage([textBlock("handled")], "end_turn"));
@@ -343,7 +343,7 @@ describe("agentLoop", () => {
     expect(hasCronQueue(cron)).toBe(false);
   });
 
-  it("rolls the injection back and re-queues on a model error", async () => {
+  it("模型出错时回滚注入并重新入队", async () => {
     const cron = new CronState(durable());
     const job = makeJob({ id: "cron_x", pendingDelivery: true });
     cron.scheduledJobs.set(job.id, job);
@@ -361,7 +361,7 @@ describe("agentLoop", () => {
     expect(cron.cronQueue.map((j) => j.id)).toEqual(["cron_x"]);
   });
 
-  it("acknowledges delivered jobs after the model responds", async () => {
+  it("模型响应后确认已投递的任务", async () => {
     const cron = new CronState(durable());
     const once = makeJob({ id: "cron_once", recurring: false });
     cron.scheduledJobs.set(once.id, once);
@@ -373,7 +373,7 @@ describe("agentLoop", () => {
     expect(cron.scheduledJobs.has("cron_once")).toBe(false);
   });
 
-  it("registers a job through a schedule_cron tool call", async () => {
+  it("通过 schedule_cron 工具调用注册任务", async () => {
     const cron = new CronState(durable());
     const client = fakeClient(
       fakeMessage(

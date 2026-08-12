@@ -59,6 +59,7 @@ import {
 import {
   buildSystem as buildSkillSystem,
   loadSkills,
+  metaText,
   parseFrontmatter,
   type Deps as S07Deps,
   SKILLS_DIR,
@@ -230,9 +231,11 @@ export function rebuildIndex(dir: string): void {
     const raw = readMemoryFile(dir, filename);
     if (raw === null) continue;
     const { meta, body } = parseFrontmatter(raw);
-    const name = collapse(meta.name ?? path.basename(filename, ".md"));
+    const name = collapse(
+      metaText(meta.name) || path.basename(filename, ".md"),
+    );
     const firstLine = body.split("\n").find((line) => line.trim()) ?? "";
-    const description = collapse(meta.description ?? firstLine);
+    const description = collapse(metaText(meta.description) || firstLine);
     lines.push(`- [${name}](${filename}) - ${description}`);
   }
   fs.writeFileSync(
@@ -278,8 +281,8 @@ export function listMemoryFiles(dir: string): MemoryFile[] {
     const { meta, body } = parseFrontmatter(raw);
     files.push({
       filename,
-      name: meta.name ?? path.basename(filename, ".md"),
-      description: meta.description ?? "",
+      name: metaText(meta.name) || path.basename(filename, ".md"),
+      description: metaText(meta.description),
       // 磁盘上的 type 可能是手写的，非法值按 project 处理，不猜成用户偏好。
       type: toMemoryType(meta.type) ?? "project",
       body: body.trim(),

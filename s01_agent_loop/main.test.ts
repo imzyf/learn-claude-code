@@ -20,13 +20,13 @@ import { agentLoop, isDangerous, runBash } from "./main";
 // ── isDangerous ───────────────────────────────────────────
 // 危险字符串只喂给纯函数，永远不会到达真实 shell。
 describe("isDangerous", () => {
-  it("flags destructive commands", () => {
+  it("标记破坏性命令", () => {
     expect(isDangerous("rm -rf / --no-preserve-root")).toBe(true);
     expect(isDangerous("sudo ls")).toBe(true);
     expect(isDangerous("shutdown now")).toBe(true);
   });
 
-  it("allows harmless commands", () => {
+  it("允许无害命令", () => {
     expect(isDangerous("echo hi")).toBe(false);
     expect(isDangerous("ls -la")).toBe(false);
   });
@@ -34,29 +34,29 @@ describe("isDangerous", () => {
 
 // ── runBash ───────────────────────────────────────────────
 describe("runBash", () => {
-  it("blocks before executing", () => {
+  it("在执行前拦截命令", () => {
     // 用无害的哨兵命令验证拦截路径，不把 rm -rf / 交给真实 shell。
     expect(runBash("sudo ls")).toBe("Error: Dangerous command blocked");
   });
 
-  it("returns stdout of a normal command", () => {
+  it("返回普通命令的标准输出", () => {
     expect(runBash("echo hi")).toBe("hi");
   });
 
-  it("merges stderr into the output", () => {
+  it("将标准错误合并到输出中", () => {
     expect(runBash("echo err 1>&2")).toBe("err");
   });
 
-  it("returns placeholder when there is no output", () => {
+  it("没有输出时返回占位符", () => {
     expect(runBash("true")).toBe("(no output)");
   });
 
-  it("truncates output to 50k characters", () => {
+  it("将输出截断为 5 万个字符", () => {
     const out = runBash(`node -e "process.stdout.write('x'.repeat(60000))"`);
     expect(out).toHaveLength(50_000);
   });
 
-  it("reports timeout when the command runs too long", () => {
+  it("命令运行过久时报告超时", () => {
     expect(runBash("sleep 5", 100)).toMatch(/^Error: Timeout/);
   });
 });
@@ -65,7 +65,7 @@ describe("runBash", () => {
 // 桩对象工厂（fakeMessage / fakeClient 等）在 lib/testing.ts，供各 session 测试复用
 
 describe("agentLoop", () => {
-  it("returns text and stops when the model does not call a tool", async () => {
+  it("模型未调用工具时返回文本并停止", async () => {
     const client = fakeClient(fakeMessage([textBlock("done")], "end_turn"));
     const messages: Anthropic.MessageParam[] = [
       { role: "user", content: "hello" },
@@ -79,7 +79,7 @@ describe("agentLoop", () => {
     expect(messages[1].role).toBe("assistant");
   });
 
-  it("executes a tool call, feeds the result back, then returns final text", async () => {
+  it("执行工具调用并回传结果，然后返回最终文本", async () => {
     const client = fakeClient(
       fakeMessage(
         [toolUseBlock("tu_1", "bash", { command: "echo hello" })],
@@ -110,7 +110,7 @@ describe("agentLoop", () => {
     expect(secondCall).toBe(true);
   });
 
-  it("handles multiple tool calls in one response, in order", async () => {
+  it("按顺序处理单次响应中的多个工具调用", async () => {
     const client = fakeClient(
       fakeMessage(
         [
@@ -134,7 +134,7 @@ describe("agentLoop", () => {
     expect(toolResults.map((r) => r.content)).toEqual(["first", "second"]);
   });
 
-  it("rejects tool input that does not match the schema", async () => {
+  it("拒绝不符合 schema 的工具输入", async () => {
     const client = fakeClient(
       fakeMessage(
         // should be `command`

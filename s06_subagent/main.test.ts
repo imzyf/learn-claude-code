@@ -22,7 +22,7 @@ import { agentLoop, spawnSubagent } from "./main";
 
 // ── permissionHook ────────────────────────────────────────
 describe("permissionHook", () => {
-  it("denies deny-list bash commands", () => {
+  it("拒绝列表中的 bash 命令", () => {
     expect(
       permissionHook(
         noopLogger,
@@ -34,7 +34,7 @@ describe("permissionHook", () => {
 
 // ── spawnSubagent ─────────────────────────────────────────
 describe("spawnSubagent", () => {
-  it("returns the subagent's final text", async () => {
+  it("返回子 agent 的最终文本", async () => {
     const client = fakeClient(fakeMessage([textBlock("answer")], "end_turn"));
 
     const result = await spawnSubagent("do x", {
@@ -47,7 +47,7 @@ describe("spawnSubagent", () => {
     expect(client.messages.create).toHaveBeenCalledOnce();
   });
 
-  it("runs its own tool loop before returning a summary", async () => {
+  it("返回摘要前运行自己的工具循环", async () => {
     const client = fakeClient(
       fakeMessage(
         [toolUseBlock("s1", "bash", { command: "echo hi" })],
@@ -66,7 +66,7 @@ describe("spawnSubagent", () => {
     expect(client.messages.create).toHaveBeenCalledTimes(2);
   });
 
-  it("falls back to a message when it never finishes", async () => {
+  it("始终未完成时回退为提示消息", async () => {
     // 30 个 tool_use 响应，永不 end_turn → 触发安全上限兜底
     const rounds = Array.from({ length: 30 }, (_, i) =>
       fakeMessage(
@@ -90,7 +90,7 @@ describe("spawnSubagent", () => {
 
 // ── agentLoop: task dispatches to a subagent (context isolation) ──
 describe("agentLoop", () => {
-  it("dispatches the task tool to a subagent and keeps only its summary", async () => {
+  it("将 task 工具分发给子 agent 并只保留其摘要", async () => {
     const client = fakeClient(
       fakeMessage(
         [toolUseBlock("tu_1", "task", { prompt: "sub work" })],
@@ -116,7 +116,7 @@ describe("agentLoop", () => {
     expect(toolResults[0].content).toBe("sub result");
   });
 
-  it("executes a plain tool call", async () => {
+  it("执行普通工具调用", async () => {
     const client = fakeClient(
       fakeMessage(
         [toolUseBlock("tu_1", "bash", { command: "echo hi" })],

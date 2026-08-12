@@ -70,26 +70,42 @@ export type Skill = { name: string; description: string; content: string };
 export type SkillRegistry = Record<string, Skill>;
 
 // 解析 SKILL.md 的 frontmatter，返回 { meta, body }。
-// 用下标切出首尾 `---` 之间的 YAML 段，再交给 yaml.parse——块标量、引号、
-// 多行值都由库处理，不自己逐行解析。（按下标切，而非 split("---")，是因为
-// JS 的 split 带 limit 会丢掉剩余部分，会把 body 里后续的 `---` 一起吞掉。）
+// 首行必须整行是 `---`，闭合分隔符也要整行匹配（rstrip 掉 `\r` 兼容 CRLF），
+// 再把中间的 YAML 段交给 yaml.parse——块标量、引号、多行值都由库处理，
+// 不自己逐行解析。按行匹配而非 indexOf("---")，否则 `description: a---b`
+// 这类正文内的 `---` 会被当成闭合分隔符，把 frontmatter 截断在半路。
 export function parseFrontmatter(text: string): {
-  meta: Record<string, string>;
+  meta: Record<string, unknown>;
   body: string;
 } {
-  if (!text.startsWith("---")) return { meta: {}, body: text };
-  const end = text.indexOf("---", 3);
+  const lines = text.split("\n");
+  const isDelimiter = (line: string | undefined) =>
+    line?.replace(/\r$/, "") === "---";
+  if (!isDelimiter(lines[0])) return { meta: {}, body: text };
+  const end = lines.findIndex((line, index) => index > 0 && isDelimiter(line));
   if (end === -1) return { meta: {}, body: text };
-  let meta: Record<string, string> = {};
+  let meta: Record<string, unknown> = {};
   try {
-    const parsed = parseYaml(text.slice(3, end));
-    if (parsed && typeof parsed === "object") {
-      meta = parsed as Record<string, string>;
+    const parsed = parseYaml(lines.slice(1, end).join("\n"));
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      meta = parsed as Record<string, unknown>;
     }
   } catch {
     meta = {}; // frontmatter 不是合法 YAML 时退回空 meta（scanSkills 自有兜底）
   }
-  return { meta, body: text.slice(end + 3).trim() };
+  return {
+    meta,
+    body: lines
+      .slice(end + 1)
+      .join("\n")
+      .trim(),
+  };
+}
+
+// frontmatter 是用户写的 YAML，值不一定是字符串（`name: 123` 解析成 number，
+// `name:` 解析成 null），取值前先收窄成 trim 过的 string，非字符串一律当缺省。
+export function metaText(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
 }
 
 // 扫描 skills/ 目录得到 registry（纯函数：传目录、返回 registry，
@@ -97,6 +113,7 @@ export function parseFrontmatter(text: string): {
 export function scanSkills(dir: string): SkillRegistry {
   const registry: SkillRegistry = {};
   if (!fs.existsSync(dir)) return registry;
+  const root = fs.realpathSync(dir);
   const entries = fs
     .readdirSync(dir, { withFileTypes: true })
     .sort((a, b) => a.name.localeCompare(b.name));
@@ -104,12 +121,20 @@ export function scanSkills(dir: string): SkillRegistry {
     if (!entry.isDirectory()) continue;
     const manifest = path.join(dir, entry.name, "SKILL.md");
     if (!fs.existsSync(manifest)) continue;
+    // 必须是普通文件，且解完符号链接后仍在 skills/ 里：skills/x/SKILL.md 指向
+    // 仓库外（甚至 ~/.ssh/id_rsa）的软链不会被读进目录。
+    if (!fs.statSync(manifest).isFile()) continue;
+    const real = fs.realpathSync(manifest);
+    if (real !== root && !real.startsWith(root + path.sep)) continue;
     const raw = fs.readFileSync(manifest, "utf8");
     const { meta, body } = parseFrontmatter(raw);
-    const name = (meta.name ?? entry.name).trim();
+    // name 缺失、为空串或不是字符串时退回目录名。
+    const name = metaText(meta.name) || entry.name;
     // 描述优先取 frontmatter 的 description，缺省则退回正文首行；两种来源都压成
     // 单行（去掉开头的 # 号、合并空白），目录里每个技能只占一行。
-    const description = collapse(meta.description ?? body.split("\n")[0] ?? "");
+    const description = collapse(
+      metaText(meta.description) || body.split("\n")[0] || "",
+    );
     registry[name] = { name, description, content: raw };
   }
   return registry;

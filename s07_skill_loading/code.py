@@ -57,29 +57,47 @@ class SkillLoader:
 
     @staticmethod
     def parse_frontmatter(text: str) -> tuple[dict, str]:
-        if not text.startswith("---"):
+        lines = text.splitlines(keepends=True)
+        if not lines or lines[0].rstrip("\r\n") != "---":
             return {}, text
-        parts = text.split("---", 2)
-        if len(parts) < 3:
+
+        closing_index = next(
+            (index for index, line in enumerate(lines[1:], start=1)
+             if line.rstrip("\r\n") == "---"),
+            None,
+        )
+        if closing_index is None:
             return {}, text
+
+        frontmatter = "".join(lines[1:closing_index])
+        body = "".join(lines[closing_index + 1:]).strip()
         try:
-            metadata = yaml.safe_load(parts[1]) or {}
+            metadata = yaml.safe_load(frontmatter) or {}
         except yaml.YAMLError:
             metadata = {}
         if not isinstance(metadata, dict):
             metadata = {}
-        return metadata, parts[2].lstrip()
+        return metadata, body
 
     def scan(self):
         self.skills.clear()
         if not self.skills_dir.exists():
             return
 
+        skills_root = self.skills_dir.resolve()
         for manifest in sorted(self.skills_dir.glob("*/SKILL.md")):
+            if (not manifest.is_file()
+                    or not manifest.resolve().is_relative_to(skills_root)):
+                continue
             content = manifest.read_text()
             metadata, body = self.parse_frontmatter(content)
-            name = str(metadata.get("name") or manifest.parent.name).strip()
-            description = metadata.get("description") or body.splitlines()[0]
+            raw_name = metadata.get("name")
+            name = raw_name.strip() if isinstance(raw_name, str) else ""
+            name = name or manifest.parent.name
+            raw_description = metadata.get("description")
+            description = (raw_description.strip()
+                           if isinstance(raw_description, str) else "")
+            description = description or body.split("\n", 1)[0]
             description = " ".join(str(description).lstrip("# ").split())
             self.skills[name] = {
                 "name": name,

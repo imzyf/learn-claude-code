@@ -94,6 +94,19 @@ describe("parseFrontmatter", () => {
     expect(body).toBe("body");
   });
 
+  it("闭合分隔符要整行匹配，正文里的行内 '---' 不算", () => {
+    const { meta, body } = parseFrontmatter(
+      "---\nname: x\ndescription: a---b\n---\nbody",
+    );
+    expect(meta.description).toBe("a---b");
+    expect(body).toBe("body");
+  });
+
+  it("只有开头分隔符、没有闭合时整段算 body", () => {
+    const text = "---\nname: x\nbody without closing";
+    expect(parseFrontmatter(text)).toEqual({ meta: {}, body: text });
+  });
+
   it("frontmatter 不是合法 YAML 时退回空 meta", () => {
     const { meta, body } = parseFrontmatter("---\nkey: [unclosed\n---\nbody");
     expect(meta).toEqual({});
@@ -120,6 +133,11 @@ describe("scanSkills", () => {
       "mcp-builder",
       "---\nname: mcp-builder\ndescription: |\n  Build MCP servers.\n  Second line.\n---\nbody",
     );
+    skill(
+      "blank-meta",
+      '---\nname: "  "\ndescription: ""\n---\n# Blank meta\n',
+    );
+    skill("numeric-meta", "---\nname: 123\ndescription: 456\n---\n# Numeric\n");
     fs.mkdirSync(path.join(dir, "not-a-skill"), { recursive: true }); // no SKILL.md → skipped
     fs.writeFileSync(path.join(dir, "loose.txt"), "ignored"); // top-level file → skipped
   });
@@ -131,8 +149,10 @@ describe("scanSkills", () => {
   it("只收录带 SKILL.md 的目录，其余跳过", () => {
     const reg = scanSkills(dir);
     expect(Object.keys(reg).sort()).toEqual([
+      "blank-meta",
       "code-review",
       "mcp-builder",
+      "numeric-meta",
       "pdf",
     ]);
   });
@@ -153,6 +173,43 @@ describe("scanSkills", () => {
     const reg = scanSkills(dir);
     expect(reg.pdf.name).toBe("pdf"); // key/name from the directory
     expect(reg.pdf.description).toBe("PDF tools"); // description from the heading
+  });
+
+  it("frontmatter 的 name / description 是空串时退回目录名与正文首行", () => {
+    const reg = scanSkills(dir)["blank-meta"];
+    expect(reg.name).toBe("blank-meta");
+    expect(reg.description).toBe("Blank meta");
+  });
+
+  it("frontmatter 的 name / description 不是字符串时同样退回缺省值", () => {
+    const reg = scanSkills(dir)["numeric-meta"];
+    expect(reg.name).toBe("numeric-meta");
+    expect(reg.description).toBe("Numeric");
+  });
+});
+
+// ── scanSkills: 符号链接越界 ──────────────────────────────
+describe("scanSkills 的软链边界", () => {
+  let root = "";
+
+  useTempDir(import.meta.dirname, (d) => {
+    root = path.join(d, "skills");
+    fs.mkdirSync(path.join(root, "inside"), { recursive: true });
+    fs.writeFileSync(
+      path.join(root, "inside", "SKILL.md"),
+      "---\nname: inside\ndescription: Local skill.\n---\nbody",
+    );
+    // skills/ 之外的文件，被 skills/escaped/SKILL.md 软链指过去
+    fs.writeFileSync(path.join(d, "outside.md"), "---\nname: escaped\n---\nx");
+    fs.mkdirSync(path.join(root, "escaped"), { recursive: true });
+    fs.symlinkSync(
+      path.join(d, "outside.md"),
+      path.join(root, "escaped", "SKILL.md"),
+    );
+  });
+
+  it("软链出 skills/ 的 SKILL.md 不会被收录", () => {
+    expect(Object.keys(scanSkills(root))).toEqual(["inside"]);
   });
 });
 

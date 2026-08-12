@@ -44,20 +44,20 @@ async function waitFor(pred: () => boolean, timeoutMs = 3000): Promise<void> {
 
 // ── shouldRunBackground：只认显式请求 ──────────────────────
 describe("shouldRunBackground", () => {
-  it("backgrounds bash when the flag is explicitly true", () => {
+  it("标志显式为 true 时在后台运行 bash", () => {
     expect(
       shouldRunBackground("bash", { command: "ls", run_in_background: true }),
     ).toBe(true);
   });
 
-  it("keeps bash in the foreground without the flag", () => {
+  it("没有标志时保持 bash 在前台运行", () => {
     expect(shouldRunBackground("bash", { command: "npm install" })).toBe(false);
     expect(
       shouldRunBackground("bash", { command: "ls", run_in_background: false }),
     ).toBe(false);
   });
 
-  it("never backgrounds non-bash tools", () => {
+  it("不在后台运行非 bash 工具", () => {
     expect(
       shouldRunBackground("read_file", { path: "a", run_in_background: true }),
     ).toBe(false);
@@ -66,33 +66,33 @@ describe("shouldRunBackground", () => {
 
 // ── runBashAsync / formatBashResult ───────────────────────
 describe("runBashAsync", () => {
-  it("returns trimmed stdout with exit code 0", async () => {
+  it("退出码为 0 时返回去除首尾空白的标准输出", async () => {
     expect(await runBashAsync("echo hello")).toEqual({
       output: "hello",
       exitCode: 0,
     });
   });
 
-  it("preserves captured output on a non-zero exit", async () => {
+  it("非零退出时保留捕获的输出", async () => {
     const { output, exitCode } = await runBashAsync("echo boom && exit 3");
     expect(output).toContain("boom");
     expect(exitCode).toBe(3);
   });
 
-  it("reports empty output as a placeholder", async () => {
+  it("输出为空时报告占位符", async () => {
     expect((await runBashAsync("true")).output).toBe("(no output)");
   });
 });
 
 describe("formatBashResult", () => {
-  it("returns the output as is on success or timeout", () => {
+  it("成功或超时时原样返回输出", () => {
     expect(formatBashResult("ok", 0)).toBe("ok");
     expect(formatBashResult("Error: Timeout (120s)", null)).toBe(
       "Error: Timeout (120s)",
     );
   });
 
-  it("prefixes the exit status on failure", () => {
+  it("失败时在输出前添加退出状态", () => {
     expect(formatBashResult("boom", 3)).toBe(
       "Error: command exited with status 3\nboom",
     );
@@ -101,7 +101,7 @@ describe("formatBashResult", () => {
 
 // ── 后台生命周期：派发 -> 完成 -> 收集通知 ─────────────────
 describe("BackgroundManager", () => {
-  it("dispatches a bash task and collects it once complete", async () => {
+  it("分发 bash 任务并在完成后收集结果", async () => {
     const background = new BackgroundManager();
     const taskId = background.start(
       toolUseBlock("tu_1", "bash", {
@@ -125,7 +125,7 @@ describe("BackgroundManager", () => {
     expect(background.results[taskId]).toBeUndefined();
   });
 
-  it("marks a non-zero exit as failed", async () => {
+  it("将非零退出标记为失败", async () => {
     const background = new BackgroundManager();
     const taskId = background.start(
       toolUseBlock("tu_1", "bash", { command: "exit 1" }),
@@ -138,7 +138,7 @@ describe("BackgroundManager", () => {
     );
   });
 
-  it("rejects non-bash tools and empty commands", () => {
+  it("拒绝非 bash 工具和空命令", () => {
     const background = new BackgroundManager();
     expect(() =>
       background.start(
@@ -154,7 +154,7 @@ describe("BackgroundManager", () => {
     ).toThrow("cannot be empty");
   });
 
-  it("does not collect tasks that are still running", () => {
+  it("不收集仍在运行的任务", () => {
     const background = new BackgroundManager();
     background.start(
       toolUseBlock("tu_1", "bash", { command: "sleep 9" }),
@@ -167,7 +167,7 @@ describe("BackgroundManager", () => {
 
 // ── 通知注入 ──────────────────────────────────────────────
 describe("injectBackgroundResults", () => {
-  it("merges notifications into a trailing user message", async () => {
+  it("将通知合并到末尾的用户消息中", async () => {
     const background = new BackgroundManager();
     background.start(
       toolUseBlock("tu_1", "bash", { command: "echo merged" }),
@@ -188,7 +188,7 @@ describe("injectBackgroundResults", () => {
     );
   });
 
-  it("appends a new user message after an assistant turn", async () => {
+  it("在 assistant 轮次后追加新的用户消息", async () => {
     const background = new BackgroundManager();
     background.start(
       toolUseBlock("tu_1", "bash", { command: "echo appended" }),
@@ -204,7 +204,7 @@ describe("injectBackgroundResults", () => {
     expect(messages[1].role).toBe("user");
   });
 
-  it("is a no-op when nothing has completed", () => {
+  it("没有任务完成时不执行任何操作", () => {
     const messages: Anthropic.MessageParam[] = [
       { role: "user", content: "hi" },
     ];
@@ -217,13 +217,13 @@ describe("injectBackgroundResults", () => {
 
 // ── 工具覆盖：bash 加了 run_in_background ──────────────────
 describe("tools override", () => {
-  it("bash schema accepts run_in_background", () => {
+  it("bash schema 接受 run_in_background", () => {
     expect(
       TOOL_SCHEMAS.bash?.parse({ command: "ls", run_in_background: true }),
     ).toEqual({ command: "ls", run_in_background: true });
   });
 
-  it("keeps the five base tools", () => {
+  it("保留五个基础工具", () => {
     expect(tools.map((t) => t.name)).toEqual([
       "bash",
       "read_file",
@@ -236,7 +236,7 @@ describe("tools override", () => {
 
 // ── agentLoop：后台派发返回占位符 ──────────────────────────
 describe("agentLoop", () => {
-  it("dispatches a background bash call and returns a placeholder tool_result", async () => {
+  it("分发后台 bash 调用并返回占位 tool_result", async () => {
     const client = fakeClient(
       fakeMessage(
         [
