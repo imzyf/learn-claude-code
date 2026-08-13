@@ -186,6 +186,8 @@ export type Deps = {
   memoryDir: string;
   sessionDir: string;
   activeRequest: string;
+  // 宿主可以再挂一层工具：s16 用它把 Workflow 加进工具池，不必改这里的循环。
+  extraPool?: ToolPool;
 };
 
 // ═══════════════════════════════════════════════════════════
@@ -571,6 +573,12 @@ export async function agentLoop(
     let pool: ToolPool;
     try {
       pool = assembleToolPool(mcp, handlers);
+      if (deps.extraPool) {
+        pool = {
+          tools: [...pool.tools, ...deps.extraPool.tools],
+          handlers: { ...pool.handlers, ...deps.extraPool.handlers },
+        };
+      }
     } catch (e) {
       // 组装失败（撞名、超长、schema 非法）和请求失败一样收敛成一条消息。
       const errText = `[Error] ${errMsg(e)}`;

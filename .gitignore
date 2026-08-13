@@ -11,3 +11,4 @@ node_modules/
 .claude/memory.json
 .scheduled_tasks.json
 .mailboxes/
+.runtime/
