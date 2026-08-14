@@ -25,7 +25,7 @@ import {
   toolUseBlock,
 } from "../lib/testing";
 import type { Context } from "../s10_system_prompt/main";
-import { BackgroundState } from "../s13_background_tasks/main";
+import { BackgroundState } from "../s11_background_tasks/main";
 import {
   agentLoop,
   type CronJob,

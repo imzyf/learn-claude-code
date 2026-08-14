@@ -65,14 +65,14 @@ import {
   makeTaskHandlers,
   makeUpdateContext,
   tasksDirFor,
-} from "../s12_task_system/main";
+} from "../s10_task_system/main";
 // 来自 s13：后台任务层。
 import {
   BackgroundState,
   collectBackgroundResults,
   shouldRunBackground,
   startBackgroundTask,
-} from "../s13_background_tasks/main";
+} from "../s11_background_tasks/main";
 // 来自 s14：cron 调度层（tools / TOOL_SCHEMAS 已是「基础 + 任务 + 后台 bash + cron」
 // 的合并）。s15 在其上再叠加团队工具；Deps（client + logger + memoryIndex +
 // background + cron + tasksDir）同样以 s14 为底。
@@ -86,7 +86,7 @@ import {
   type Deps as S14Deps,
   tools as s14Tools,
   startCronScheduler,
-} from "../s14_cron_scheduler/main";
+} from "../s12_cron_scheduler/main";
 
 // deps 与 s14 一致，另加跨轮的团队状态。
 export type Deps = S14Deps & {

@@ -17,11 +17,11 @@ SYNC_DIRS=(
   s07_skill_loading
   s08_context_compact
   s09_memory
-  # s10_task_system
-  # s11_background_tasks
-  # s12_cron_scheduler
-  # s13_agent_teams
-  # s14_mcp_plugin
+  s10_task_system
+  s11_background_tasks
+  s12_cron_scheduler
+  s13_agent_teams
+  s14_mcp_plugin
   # s15_integrated_harness
   # s16_workflow_runtime
   # s17_goal_loop

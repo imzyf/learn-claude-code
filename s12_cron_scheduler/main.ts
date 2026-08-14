@@ -70,7 +70,7 @@ import {
   makeTaskHandlers,
   makeUpdateContext,
   tasksDirFor,
-} from "../s12_task_system/main";
+} from "../s10_task_system/main";
 // 来自 s13：后台任务层 + 带 run_in_background 的 bash（tools / TOOL_SCHEMAS 已是
 // 「基础 + 任务 + bash 覆盖」的合并）。s14 在其上再叠加 cron 工具；
 // Deps（client + logger + memoryIndex + background + tasksDir）同样以 s13 为底。
@@ -82,7 +82,7 @@ import {
   tools as s13Tools,
   shouldRunBackground,
   startBackgroundTask,
-} from "../s13_background_tasks/main";
+} from "../s11_background_tasks/main";
 
 // deps 与 s13 一致，另加跨轮的 cron 状态。
 export type Deps = S13Deps & {
