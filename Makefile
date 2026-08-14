@@ -1,5 +1,5 @@
 .PHONY: help setup sync sync-force smoke test typecheck lint lint-check open \
-	debug \
+	reset debug \
 	s01 s02 s03 s04 s05 s06 s07 s08 s09 s10 \
 	s11 s12 s13 s14 s15 s16 s17
 
@@ -37,6 +37,15 @@ lint: ## Lint and auto-fix with Biome, then remove leftover .tmp/ dirs
 
 lint-check: ## Check lint and formatting without writing (used by CI)
 	pnpm lint
+
+reset: ## Preview untracked files (git clean -n), remove after confirmation
+	@git clean -n -d
+	@read -p "Remove the untracked files/dirs listed above? [y/N] " ans; \
+	if [ "$$ans" = "y" ] || [ "$$ans" = "Y" ]; then \
+		git clean -f -d; \
+	else \
+		echo "Aborted."; \
+	fi
 
 ##@ Sync
 

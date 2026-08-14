@@ -22,9 +22,7 @@ export function zodTool(
 // 根据 stop_reason 对空文本或截断结果补上明确信号，避免调用方拿到空字符串。
 export function textOf(response: Anthropic.Message): string {
   const text = response.content
-    // `b is Anthropic.TextBlock` 是类型谓词：过滤后把联合类型收窄成 TextBlock，
-    // 这样下一步 b.text 才合法。
-    .filter((b): b is Anthropic.TextBlock => b.type === "text")
+    .filter((b) => b.type === "text")
     .map((b) => b.text)
     .join("");
 

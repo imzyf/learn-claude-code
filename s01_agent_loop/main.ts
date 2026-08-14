@@ -109,11 +109,9 @@ export async function agentLoop(
     // 逐个执行 tool call，收集结果
     const results: Anthropic.ToolResultBlockParam[] = [];
     for (const block of response.content) {
-      // 可能是 thinking block，跳过
-      if (block.type !== "tool_use") {
-        printProse(block);
-        continue;
-      }
+      // 一轮响应里 text / thinking / tool_use 可能同时出现
+      printProse(block);
+      if (block.type !== "tool_use") continue;
 
       /*
         block 结构
@@ -127,7 +125,6 @@ export async function agentLoop(
         }
       */
       const input = bashSchema.parse(block.input);
-      print(input.command, "yellow");
 
       // 执行 command，并记录 output 的简短预览
       const output = runBash(input.command);
