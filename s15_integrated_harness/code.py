@@ -1499,11 +1499,12 @@ def spawn_teammate_thread(name: str, role: str, prompt: str,
                          f"{type(exc).__name__}: {exc}", "error")
                 break
             messages.append({"role": "assistant", "content": response.content})
-            if response.stop_reason == "tool_use":
+            tool_calls = [
+                block for block in response.content if block.type == "tool_use"
+            ]
+            if tool_calls:
                 results = []
-                for block in response.content:
-                    if block.type != "tool_use":
-                        continue
+                for block in tool_calls:
                     output = _run_teammate_tool(name, block, sub_handlers)
                     results.append({"type": "tool_result",
                                     "tool_use_id": block.id,
@@ -1902,6 +1903,23 @@ def collect_tool_results(messages: list):
     return found
 
 
+def unseen_tool_result_positions(messages: list) -> set[tuple[int, int]]:
+    """Return results added since the model's most recent response."""
+    last_assistant = next(
+        (index for index in range(len(messages) - 1, -1, -1)
+         if messages[index].get("role") == "assistant"),
+        -1,
+    )
+    return {
+        (message_index, block_index)
+        for message_index in range(last_assistant + 1, len(messages))
+        if messages[message_index].get("role") == "user"
+        and isinstance(messages[message_index].get("content"), list)
+        for block_index, block in enumerate(messages[message_index]["content"])
+        if isinstance(block, dict) and block.get("type") == "tool_result"
+    }
+
+
 def persist_large_output(tool_use_id: str, output: str) -> str:
     if len(output) <= PERSIST_THRESHOLD:
         return output
@@ -1958,9 +1976,9 @@ def snip_compact(messages: list, max_messages: int = 50) -> list:
 
 def micro_compact(messages: list) -> list:
     tool_results = collect_tool_results(messages)
-    if len(tool_results) <= KEEP_RECENT_TOOL_RESULTS:
-        return messages
-    for _, _, block in tool_results[:-KEEP_RECENT_TOOL_RESULTS]:
+    unseen = unseen_tool_result_positions(messages)
+    consumed = [entry for entry in tool_results if entry[:2] not in unseen]
+    for _, _, block in consumed[:-KEEP_RECENT_TOOL_RESULTS]:
         if len(str(block.get("content", ""))) > 120:
             block["content"] = "[Earlier tool result compacted. Re-run if needed.]"
     return messages
@@ -2097,8 +2115,6 @@ def should_run_background(tool_name: str, tool_input: dict) -> bool:
 
 def start_background_task(block, handlers: dict) -> str:
     global _bg_counter
-    _bg_counter += 1
-    bg_id = f"bg_{_bg_counter:04d}"
     command = block.input.get("command", block.name)
     cwd, cwd_error = _agent_cwd()
 
@@ -2115,19 +2131,36 @@ def start_background_task(block, handlers: dict) -> str:
         except Exception as exc:
             result = f"Error: {type(exc).__name__}: {exc}"
             status = "failed"
-        trigger_hooks("PostToolUse", block, result)
+        try:
+            trigger_hooks("PostToolUse", block, result)
+        except Exception as exc:
+            result = (f"Error: PostToolUse hook failed: "
+                      f"{type(exc).__name__}: {exc}\n{result}")
+            status = "failed"
         with background_lock:
-            background_tasks[bg_id]["status"] = status
+            task = background_tasks.get(bg_id)
+            if task is None:
+                return
+            task["status"] = status
             background_results[bg_id] = str(result)
 
     with background_lock:
+        _bg_counter += 1
+        bg_id = f"bg_{_bg_counter:04d}"
         background_tasks[bg_id] = {
             "tool_use_id": block.id,
             "command": command,
             "status": "running",
             "cwd": str(cwd) if cwd else None,
         }
-    threading.Thread(target=worker, daemon=True).start()
+    thread = threading.Thread(target=worker, daemon=True)
+    try:
+        thread.start()
+    except Exception:
+        with background_lock:
+            background_tasks.pop(bg_id, None)
+            background_results.pop(bg_id, None)
+        raise
     print(f"  \033[33m[background] {bg_id}: {str(command)[:60]}\033[0m")
     return bg_id
 
@@ -2136,11 +2169,13 @@ def collect_background_results() -> list[str]:
     with background_lock:
         ready = [bg_id for bg_id, task in background_tasks.items()
                  if task["status"] in {"completed", "failed"}]
+        completed = [
+            (bg_id, background_tasks.pop(bg_id),
+             background_results.pop(bg_id, ""))
+            for bg_id in ready
+        ]
     notifications = []
-    for bg_id in ready:
-        with background_lock:
-            task = background_tasks.pop(bg_id)
-            output = background_results.pop(bg_id, "")
+    for bg_id, task, output in completed:
         summary = output[:200] if len(output) > 200 else output
         notifications.append(
             f"<task_notification>\n"
@@ -2986,9 +3021,13 @@ def agent_loop(messages: list, context: dict, active_request: str):
                 continue
 
             if should_run_background(block.name, block.input):
-                bg_id = start_background_task(block, handlers)
-                output = (f"[Background task {bg_id} started] "
-                          "Result will arrive as a task_notification.")
+                try:
+                    bg_id = start_background_task(block, handlers)
+                    output = (f"[Background task {bg_id} started] "
+                              "Result will arrive as a task_notification.")
+                except Exception as exc:
+                    output = (f"Error: Failed to start background task: "
+                              f"{type(exc).__name__}: {exc}")
                 results.append({"type": "tool_result",
                                 "tool_use_id": block.id,
                                 "content": output})

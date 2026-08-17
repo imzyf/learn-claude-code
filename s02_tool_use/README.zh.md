@@ -21,7 +21,7 @@ s01 的 Agent 只有一个 bash 工具。读文件要 `cat`，写文件要 `echo
 
 ![Tool Dispatch](images/tool-dispatch.svg)
 
-s01 的循环完全保留（LLM 调用、stop_reason 判断、消息追加）。唯一的变动在工具执行那 1 行：`run_bash()` 替换为 `TOOL_HANDLERS[block.name]()` 查表分发。
+s01 的循环完全保留（LLM 调用、`tool_use` block 判断、消息追加）。唯一的变动在工具执行那 1 行：`run_bash()` 替换为 `TOOL_HANDLERS[block.name]()` 查表分发。
 
 给 Agent 加一个工具只需要做两件事：
 
@@ -91,11 +91,10 @@ TOOL_HANDLERS = {
 }
 
 # 循环里只改了一行——从硬编码 run_bash 变成查表：
-for block in response.content:
-    if block.type == "tool_use":
-        handler = TOOL_HANDLERS[block.name]    # 查表
-        output = handler(**block.input)         # 调用
-        results.append(...)
+for block in tool_calls:
+    handler = TOOL_HANDLERS[block.name]    # 查表
+    output = handler(**block.input)         # 调用
+    results.append(...)
 ```
 
 加一个工具 = 在 `TOOLS` 数组加一条 + 在 `TOOL_HANDLERS` 字典加一行。循环不变。
@@ -128,7 +127,7 @@ for block in response.content:
 | 工具数量 | 1 (bash) | 5 (+read, write, edit, glob) |
 | 工具执行 | 硬编码 `run_bash()` | TOOL_HANDLERS 查表分发 |
 | 路径安全 | 无 | safe_path 校验（仅 file tools） |
-| 循环 | `while True` + `stop_reason` | 与 s01 完全一致 |
+| 循环 | `while True` + `tool_use` block | 与 s01 完全一致 |
 
 ---
 

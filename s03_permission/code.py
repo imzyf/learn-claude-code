@@ -197,14 +197,14 @@ def agent_loop(messages: list):
         )
         messages.append({"role": "assistant", "content": response.content})
 
-        if response.stop_reason != "tool_use":
+        tool_calls = [
+            block for block in response.content if block.type == "tool_use"
+        ]
+        if not tool_calls:
             return
 
         results = []
-        for block in response.content:
-            if block.type != "tool_use":
-                continue
-
+        for block in tool_calls:
             print(f"\033[36m> {block.name}\033[0m")
 
             # s03 change: run through permission pipeline before executing

@@ -25,12 +25,12 @@
 
 ![Agent Loop](images/agent-loop.svg)
 
-一个 `while True` 循环，模型调用工具就继续，不调用就停。整个过程只有两个信号：
+一个 `while True` 循环，模型调用工具就继续，不调用就停。循环直接检查响应里的内容块：
 
 | 信号 | 含义 | 循环动作 |
 |------|------|---------|
-| `stop_reason == "tool_use"` | 模型举手说"我要用工具" | 执行 → 结果喂回去 → 继续 |
-| `stop_reason != "tool_use"` | 模型说"我做完了" | 退出循环 |
+| 包含 `tool_use` block | 模型要求调用工具 | 执行 → 结果喂回去 → 继续 |
+| 不包含 `tool_use` block | 模型没有调用工具 | 退出循环 |
 
 ---
 
@@ -57,22 +57,26 @@ response = client.messages.create(
 
 ```python
 messages.append({"role": "assistant", "content": response.content})
-if response.stop_reason != "tool_use":
+tool_calls = [
+    block for block in response.content if block.type == "tool_use"
+]
+if not tool_calls:
     return
 ```
+
+只有实际存在的 `tool_use` block 才会进入执行阶段，因此不会追加空的工具结果消息。
 
 **第 4 步**：执行模型要求的工具，收集结果。
 
 ```python
 results = []
-for block in response.content:
-    if block.type == "tool_use":
-        output = run_bash(block.input["command"])
-        results.append({
-            "type": "tool_result",
-            "tool_use_id": block.id,
-            "content": output,
-        })
+for block in tool_calls:
+    output = run_bash(block.input["command"])
+    results.append({
+        "type": "tool_result",
+        "tool_use_id": block.id,
+        "content": output,
+    })
 ```
 
 **第 5 步**：把工具结果作为新消息追加，回到第 2 步。
@@ -92,22 +96,24 @@ def agent_loop(messages):
         )
         messages.append({"role": "assistant", "content": response.content})
 
-        if response.stop_reason != "tool_use":
+        tool_calls = [
+            block for block in response.content if block.type == "tool_use"
+        ]
+        if not tool_calls:
             return
 
         results = []
-        for block in response.content:
-            if block.type == "tool_use":
-                output = run_bash(block.input["command"])
-                results.append({
-                    "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": output,
-                })
+        for block in tool_calls:
+            output = run_bash(block.input["command"])
+            results.append({
+                "type": "tool_result",
+                "tool_use_id": block.id,
+                "content": output,
+            })
         messages.append({"role": "user", "content": results})
 ```
 
-不到 30 行，这就是最小可运行的 agent harness 内核。它为模型提供持续行动的最小运行框架：模型负责决策（要不要调工具、调哪个），harness 负责执行（调用工具，把结果作为新消息追加）。后面 16 个章节都在这个循环上叠加机制，循环本身始终不变。
+三十多行，这就是最小可运行的 agent harness 内核。它为模型提供持续行动的最小运行框架：模型负责决策（要不要调工具、调哪个），harness 负责执行（调用工具，把结果作为新消息追加）。后面 16 个章节都在这个循环上叠加机制，循环本身始终不变。
 
 ---
 

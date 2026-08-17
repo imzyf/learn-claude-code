@@ -117,12 +117,15 @@ messages = [*messages[:head_end], marker, *messages[tail_start:]]
 
 ## 第三步：micro_compact
 
-`micro_compact` 收集当前历史里的全部 `tool_result`。最近 3 条保持完整，更早且超过 120 个字符的结果会缩短。已经转存的结果保留文件路径，其他结果只留下占位符：
+`micro_compact` 会完整保留最近一次 assistant 响应之后新增的所有 `tool_result`，确保模型至少完整读取每条新结果一次。对于模型已经读取过的结果，它保留最近 3 条，并缩短其余超过 120 个字符的旧结果。已经转存的结果保留文件路径，其他结果只留下占位符：
 
 ![旧结果替换为占位符](images/micro-compact.svg)
 
 ```python
-for block in results[:-self.KEEP_RECENT_RESULTS]:
+unseen = self.unseen_tool_result_positions(messages)
+consumed = [entry for entry in results if entry[:2] not in unseen]
+
+for _, _, block in consumed[:-self.KEEP_RECENT_RESULTS]:
     content = str(block.get("content", ""))
     if len(content) <= 120:
         continue
@@ -255,13 +258,13 @@ def agent_loop(messages, active_request):
 一次响应可以同时包含多个工具调用，例如先写文件再请求压缩。Harness 必须先执行完整批次，并为每个 `tool_use` 追加对应的 `tool_result`，然后再摘要这个已经闭合的回合：
 
 ```python
+tool_calls = [
+    block for block in response.content if block.type == "tool_use"
+]
 results = []
 compact_requested = False
 
-for block in response.content:
-    if block.type != "tool_use":
-        continue
-
+for block in tool_calls:
     if block.name == "compact":
         output = "Compaction requested after this tool batch."
         compact_requested = True
@@ -305,7 +308,7 @@ python s08_context_compact/code.py
 比较它们的一级标题，并总结这些标题的命名规律。
 ```
 
-任务会产生至少 5 条文件读取结果。最近 3 条保持完整，更早且较长的结果会变成 `[Earlier tool result omitted.]`。已经转存的结果会保留保存路径。
+任务会产生至少 5 条文件读取结果。每条新结果在模型首次读取前都会保持完整；后续轮次只保留最近 3 条已读取结果，更早且较长的结果会变成 `[Earlier tool result omitted.]`。已经转存的结果会保留保存路径。
 
 ### 实验二：大结果转存
 

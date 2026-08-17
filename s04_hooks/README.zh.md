@@ -130,7 +130,7 @@ register_hook("PreToolUse", log_hook)
 register_hook("PostToolUse", large_output_hook)
 ```
 
-**Stop** 在循环即将退出时触发（`stop_reason != "tool_use"`）。以下 hook 打印收尾统计：
+**Stop** 在循环即将退出时触发。以下 hook 打印收尾统计：
 
 ```python
 def summary_hook(messages: list) -> str | None:
@@ -147,7 +147,10 @@ register_hook("Stop", summary_hook)
 在 agent_loop 中，退出前触发：
 
 ```python
-if response.stop_reason != "tool_use":
+tool_calls = [
+    block for block in response.content if block.type == "tool_use"
+]
+if not tool_calls:
     force = trigger_hooks("Stop", messages)   # ← 退出之前
     if force:
         # hook returned a message → inject it and continue
@@ -159,10 +162,7 @@ if response.stop_reason != "tool_use":
 **循环里只改了一处**：s03 直接调用 `check_permission(block)`，s04 改为 `trigger_hooks("PreToolUse", block)`：
 
 ```python
-for block in response.content:
-    if block.type != "tool_use":
-        continue
-
+for block in tool_calls:
     # s03: if not check_permission(block): ...
     # s04: hook 替代硬编码
     blocked = trigger_hooks("PreToolUse", block)

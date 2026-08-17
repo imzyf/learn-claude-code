@@ -658,7 +658,10 @@ def agent_loop(messages: list, context: dict | None = None):
                 print(f"  [cron] acknowledgement failed: {error}")
             waiting_for_ack = []
 
-        if response.stop_reason != "tool_use":
+        tool_calls = [
+            block for block in response.content if block.type == "tool_use"
+        ]
+        if not tool_calls:
             force = trigger_hooks("Stop", messages)
             if force:
                 messages.append({"role": "user", "content": force})
@@ -666,9 +669,7 @@ def agent_loop(messages: list, context: dict | None = None):
             return context
 
         results = []
-        for block in response.content:
-            if block.type != "tool_use":
-                continue
+        for block in tool_calls:
             output = execute_tool(block)
             results.append({
                 "type": "tool_result",

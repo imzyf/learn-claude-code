@@ -42,14 +42,16 @@ def run_subagent(prompt: str) -> str:
             messages=messages, tools=SUB_TOOLS, max_tokens=8000,
         )
         messages.append({"role": "assistant", "content": response.content})
-        if response.stop_reason != "tool_use":
+        tool_calls = [
+            block for block in response.content if block.type == "tool_use"
+        ]
+        if not tool_calls:
             return extract_text(response.content) or "(no summary)"
 
         results = []
-        for block in response.content:
-            if block.type == "tool_use":
-                output = execute_tool(block, SUB_HANDLERS)
-                results.append({... "content": output})
+        for block in tool_calls:
+            output = execute_tool(block, SUB_HANDLERS)
+            results.append({... "content": output})
         messages.append({"role": "user", "content": results})
 
     return "Subagent stopped after 30 turns without a final answer."

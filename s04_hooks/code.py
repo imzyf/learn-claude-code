@@ -205,7 +205,10 @@ def agent_loop(messages: list):
         )
         messages.append({"role": "assistant", "content": response.content})
 
-        if response.stop_reason != "tool_use":
+        tool_calls = [
+            block for block in response.content if block.type == "tool_use"
+        ]
+        if not tool_calls:
             force = trigger_hooks("Stop", messages)
             if force:
                 messages.append({"role": "user", "content": force})
@@ -213,10 +216,7 @@ def agent_loop(messages: list):
             return
 
         results = []
-        for block in response.content:
-            if block.type != "tool_use":
-                continue
-
+        for block in tool_calls:
             # s04 change: hook replaces hard-coded check_permission()
             blocked = trigger_hooks("PreToolUse", block)
             if blocked:

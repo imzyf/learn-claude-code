@@ -268,7 +268,10 @@ def run_subagent(prompt: str) -> str:
         )
         messages.append({"role": "assistant", "content": response.content})
 
-        if response.stop_reason != "tool_use":
+        tool_calls = [
+            block for block in response.content if block.type == "tool_use"
+        ]
+        if not tool_calls:
             force = trigger_hooks("Stop", messages)
             if force:
                 messages.append({"role": "user", "content": force})
@@ -277,9 +280,7 @@ def run_subagent(prompt: str) -> str:
             return extract_text(response.content) or "(no summary)"
 
         results = []
-        for block in response.content:
-            if block.type != "tool_use":
-                continue
+        for block in tool_calls:
             output = execute_tool(block, SUB_HANDLERS)
             print(f"  \033[90m[sub] {block.name}: {output[:100]}\033[0m")
             results.append({
@@ -320,7 +321,10 @@ def agent_loop(messages: list):
         )
         messages.append({"role": "assistant", "content": response.content})
 
-        if response.stop_reason != "tool_use":
+        tool_calls = [
+            block for block in response.content if block.type == "tool_use"
+        ]
+        if not tool_calls:
             force = trigger_hooks("Stop", messages)
             if force:
                 messages.append({"role": "user", "content": force})
@@ -328,9 +332,7 @@ def agent_loop(messages: list):
             return
 
         results = []
-        for block in response.content:
-            if block.type != "tool_use":
-                continue
+        for block in tool_calls:
             output = execute_tool(block, TOOL_HANDLERS)
             results.append({
                 "type": "tool_result",

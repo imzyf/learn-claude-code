@@ -85,7 +85,7 @@
   <!-- ===== ③ LLM ===== -->
   <rect x="440" y="132" width="100" height="52" rx="8" fill="#f0f4ff" stroke="#2563eb" stroke-width="1.5"/>
   <text x="490" y="155" fill="#1e3a5f" font-size="14" font-weight="700" text-anchor="middle">LLM</text>
-  <text x="490" y="172" fill="#64748b" font-size="9" text-anchor="middle">stop_reason=tool_use?</text>
+  <text x="490" y="172" fill="#64748b" font-size="9" text-anchor="middle">tool_use block?</text>
 
   <!-- LLM 否 → 返回 -->
   <line x1="490" y1="184" x2="490" y2="278" stroke="#16a34a" stroke-width="2" marker-end="url(#arrow-green)"/>

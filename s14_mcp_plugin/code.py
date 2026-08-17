@@ -487,14 +487,15 @@ def agent_loop(messages: list):
             return
 
         messages.append({"role": "assistant", "content": response.content})
-        if response.stop_reason != "tool_use":
+        tool_calls = [
+            block for block in response.content if block.type == "tool_use"
+        ]
+        if not tool_calls:
             trigger_hooks("Stop", messages)
             return
 
         results = []
-        for block in response.content:
-            if block.type != "tool_use":
-                continue
+        for block in tool_calls:
             print(f"> {block.name}")
             output = execute_tool(block, handlers)
             print(output[:300])

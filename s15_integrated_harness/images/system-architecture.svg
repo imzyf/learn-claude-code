@@ -41,7 +41,7 @@
 
   <rect x="420" y="118" width="110" height="68" rx="7" fill="#fff" stroke="#2563eb" stroke-width="1.4"/>
   <text x="475" y="146" text-anchor="middle" fill="#1e3a5f" font-size="12" font-weight="700">LLM</text>
-  <text x="475" y="164" text-anchor="middle" fill="#64748b" font-size="8.5">stop_reason=tool_use?</text>
+  <text x="475" y="164" text-anchor="middle" fill="#64748b" font-size="8.5">tool_use block?</text>
 
   <line x1="530" y1="152" x2="572" y2="152" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
 

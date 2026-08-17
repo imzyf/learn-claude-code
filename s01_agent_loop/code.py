@@ -4,8 +4,10 @@ s01_agent_loop.py - The Agent Loop
 
 The entire secret of an AI coding agent in one pattern:
 
-    while stop_reason == "tool_use":
+    while True:
         response = LLM(messages, tools)
+        if response contains no tool_use:
+            break
         execute tools
         append results
 
@@ -93,21 +95,23 @@ def agent_loop(messages: list):
         messages.append({"role": "assistant", "content": response.content})
 
         # If the model didn't call a tool, we're done
-        if response.stop_reason != "tool_use":
+        tool_calls = [
+            block for block in response.content if block.type == "tool_use"
+        ]
+        if not tool_calls:
             return
 
         # Execute each tool call, collect results
         results = []
-        for block in response.content:
-            if block.type == "tool_use":
-                print(f"\033[33m$ {block.input['command']}\033[0m")
-                output = run_bash(block.input["command"])
-                print(output[:200])
-                results.append({
-                    "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": output,
-                })
+        for block in tool_calls:
+            print(f"\033[33m$ {block.input['command']}\033[0m")
+            output = run_bash(block.input["command"])
+            print(output[:200])
+            results.append({
+                "type": "tool_result",
+                "tool_use_id": block.id,
+                "content": output,
+            })
 
         # Feed tool results back, loop continues
         messages.append({"role": "user", "content": results})
