@@ -43,7 +43,7 @@ import type Anthropic from "@anthropic-ai/sdk";
 import { createLogger, type SessionLogger } from "../lib/logger";
 import { createClient, MODEL_ID } from "../lib/model";
 import { colorize, print } from "../lib/terminal";
-import { printProse, textOf } from "../lib/tools";
+import { hasToolUse, printProse, textOf } from "../lib/tools";
 import type { Deps as S01Deps } from "../s01_agent_loop/main";
 // tool 定义、schema 表在 s03 没变，直接从 s02 复用。runBash 和三个
 // 文件工具是 s03 自己的版本（见下）；runGlob 自带 WORKDIR 过滤，照常复用。
@@ -308,7 +308,7 @@ export async function agentLoop(
 
     messages.push({ role: "assistant", content: response.content });
 
-    if (response.stop_reason !== "tool_use") {
+    if (!hasToolUse(response)) {
       return textOf(response);
     }
 

@@ -41,7 +41,7 @@ import type Anthropic from "@anthropic-ai/sdk";
 import { createLogger, type SessionLogger } from "../lib/logger";
 import { createClient, MODEL_ID } from "../lib/model";
 import { colorize, print } from "../lib/terminal";
-import { printProse, textOf } from "../lib/tools";
+import { hasToolUse, printProse, textOf } from "../lib/tools";
 import type { Deps as S01Deps } from "../s01_agent_loop/main";
 // 来自 s02：tool 定义（tools）与 schema 表（TOOL_SCHEMAS）——纯数据，原样复用。
 import { TOOL_SCHEMAS as S02_TOOL_SCHEMAS, tools } from "../s02_tool_use/main";
@@ -306,7 +306,7 @@ export async function agentLoop(
     logger.response(response);
     messages.push({ role: "assistant", content: response.content });
 
-    if (response.stop_reason !== "tool_use") {
+    if (!hasToolUse(response)) {
       // 特殊点 1：模型想停，但 Stop hook 的返回值会被当成一条 user 消息，
       // 强制再跑一轮——循环能「自己续命」，不直接退出。
       const force = await hooks.trigger("Stop", messages);

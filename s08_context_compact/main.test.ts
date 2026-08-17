@@ -127,25 +127,28 @@ describe("microCompact", () => {
   it("保留最近几条结果，只压缩更早的长结果", () => {
     const messages: Anthropic.MessageParam[] = [
       ...toolRound("t1", "x".repeat(200)), // old + long → compacted
-      ...toolRound("t2", "recent-1"),
-      ...toolRound("t3", "recent-2"),
-      ...toolRound("t4", "recent-3"),
+      ...toolRound("t2", "seen-1"),
+      ...toolRound("t3", "seen-2"),
+      ...toolRound("t4", "seen-3"),
+      ...toolRound("t5", "unseen"), // 最后一轮模型还没看到
     ];
     microCompact(messages, noopLogger);
     const results = collectToolResults(messages);
     expect(results[0].content).toBe(
       "[Earlier tool result compacted. Re-run if needed.]",
     );
-    expect(results[3].content).toBe("recent-3"); // within KEEP_RECENT
+    expect(results[3].content).toBe("seen-3"); // within KEEP_RECENT
+    expect(results[4].content).toBe("unseen");
   });
 
   it("结果已被 L3 落盘时，占位符保留磁盘路径", () => {
     const persisted = `<persisted-output>\nFull output: ${tmp}/out.txt\nPreview:\n${"x".repeat(200)}\n</persisted-output>`;
     const messages: Anthropic.MessageParam[] = [
       ...toolRound("t1", persisted),
-      ...toolRound("t2", "recent-1"),
-      ...toolRound("t3", "recent-2"),
-      ...toolRound("t4", "recent-3"),
+      ...toolRound("t2", "seen-1"),
+      ...toolRound("t3", "seen-2"),
+      ...toolRound("t4", "seen-3"),
+      ...toolRound("t5", "unseen"),
     ];
     microCompact(messages, noopLogger);
     expect(collectToolResults(messages)[0].content).toBe(
@@ -163,6 +166,9 @@ describe("microCompact", () => {
     const ids = ["p1", "p2", "p3", "p4"];
     const messages: Anthropic.MessageParam[] = [
       ...toolRound("t1", "x".repeat(200)), // old + long → compacted
+      ...toolRound("t2", "seen-1"),
+      ...toolRound("t3", "seen-2"),
+      ...toolRound("t4", "seen-3"),
       ...parallelToolRound(ids, (id) => `${id}-`.padEnd(200, "z")),
     ];
     microCompact(messages, noopLogger);
@@ -170,8 +176,10 @@ describe("microCompact", () => {
     expect(results[0].content).toBe(
       "[Earlier tool result compacted. Re-run if needed.]",
     );
+    // 并行的这一轮结果都在最后一次 assistant 回复之后，一条都不动。
+    const lastRound = results.slice(-ids.length);
     for (const [i, id] of ids.entries())
-      expect(results[i + 1].content).toBe(`${id}-`.padEnd(200, "z"));
+      expect(lastRound[i].content).toBe(`${id}-`.padEnd(200, "z"));
   });
 
   it("全部结果都属于最新一轮时什么都不做", () => {

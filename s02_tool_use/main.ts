@@ -37,7 +37,7 @@ import { z } from "zod";
 import { createLogger } from "../lib/logger";
 import { createClient, MODEL_ID } from "../lib/model";
 import { colorize, print } from "../lib/terminal";
-import { printProse, textOf, zodTool } from "../lib/tools";
+import { hasToolUse, printProse, textOf, zodTool } from "../lib/tools";
 import {
   bashSchema,
   type Deps,
@@ -197,7 +197,7 @@ export async function agentLoop(
     messages.push({ role: "assistant", content: response.content });
 
     // 如果 model 没有调用 tool，就结束
-    if (response.stop_reason !== "tool_use") {
+    if (!hasToolUse(response)) {
       return textOf(response);
     }
 

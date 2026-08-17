@@ -42,6 +42,12 @@ export function textOf(response: Anthropic.Message): string {
   }
 }
 
+// 是否还要再跑一轮工具：看响应里有没有真的 tool_use block。
+// stop_reason 说的是模型为什么停下，max_tokens 截断时也可能带回 tool_use block。
+export function hasToolUse(response: Anthropic.Message): boolean {
+  return response.content.some((block) => block.type === "tool_use");
+}
+
 // 打印助手回复的各类 block：正文 text（green）、thinking 推理独白（blue）、
 // tool_use 工具调用意图 name + input（cyan）。工具的实际执行仍由调用方负责。
 export function printProse(block: Anthropic.ContentBlock): void {

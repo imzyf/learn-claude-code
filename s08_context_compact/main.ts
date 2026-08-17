@@ -59,7 +59,7 @@ import {
 } from "../lib/logger";
 import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
 import { colorize, print } from "../lib/terminal";
-import { printProse, textOf, zodTool } from "../lib/tools";
+import { hasToolUse, printProse, textOf, zodTool } from "../lib/tools";
 import { errMsg } from "../s02_tool_use/main";
 import type { Deps as S04Deps } from "../s04_hooks/main";
 // 来自 s05：hook 装配（loadHooks = createHooks + registerDefaultHooks）+ nag 机制。
@@ -120,7 +120,7 @@ export const SNIP_MAX_MESSAGES = Number(
 );
 // L1 裁剪时保留的头部消息数（尾部保留数 = maxMessages - 头部）。
 const SNIP_KEEP_HEAD = Number(process.env.L1_COMPACT_SNIP_KEEP_HEAD ?? 3);
-// L2 保留最近 N 条工具结果不动（最后一条消息整条不压），只压缩更早的。
+// L2 保留最近 N 条模型已经看过的工具结果不动，只压缩更早的。
 const KEEP_RECENT = Number(process.env.L2_COMPACT_KEEP_RECENT ?? 3);
 // L2 微压缩阈值：单条工具结果短于它就不值得压缩。
 const MICRO_COMPACT_MIN_LENGTH = Number(
@@ -261,16 +261,14 @@ export function microCompact(
   messages: Anthropic.MessageParam[],
   logger: SessionLogger,
 ): Anthropic.MessageParam[] {
-  const toolResults = collectToolResults(messages);
-  // 最新一轮并行结果模型还没看到 —— 整条不压。末尾可能是 reminder 之类不带
-  // tool_result 的消息，要向上找到最近一条真正带结果的消息，取它的块数。
-  const keep = Math.max(KEEP_RECENT, lastRoundSize(messages));
-  if (toolResults.length <= keep) return messages;
+  // 只压模型已经看过的结果 —— 压掉没看过的等于把它没见过的信息直接抹了。
+  const consumed = consumedToolResults(messages);
+  if (consumed.length <= KEEP_RECENT) return messages;
   const before = estimateSize(messages);
 
-  // 最近 keep 条之外的长结果原地换成占位符（短结果不值得动）。
+  // 最近 KEEP_RECENT 条之外的长结果原地换成占位符（短结果不值得动）。
   const replaced: string[] = [];
-  for (const part of toolResults.slice(0, -keep)) {
+  for (const part of consumed.slice(0, -KEEP_RECENT)) {
     if (
       typeof part.content === "string" &&
       part.content.length > MICRO_COMPACT_MIN_LENGTH
@@ -303,13 +301,14 @@ export function microCompact(
 
   return messages;
 }
-// 从末尾向上找到最近一条真正带 tool_result 的消息，返回它的块数（找不到返回 0）。
-export function lastRoundSize(messages: Anthropic.MessageParam[]): number {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const count = collectToolResults([messages[i]]).length;
-    if (count > 0) return count;
-  }
-  return 0;
+// 模型已经看过的 tool_result：最近一条 assistant 消息之前的那些。之后追加的
+// （本轮工具结果、后台通知等）还没进过模型的 context，一条都不动；一次 assistant
+// 回复都没有时全部算没看过。
+export function consumedToolResults(
+  messages: Anthropic.MessageParam[],
+): Anthropic.ToolResultBlockParam[] {
+  const lastAssistant = messages.findLastIndex((m) => m.role === "assistant");
+  return collectToolResults(messages.slice(0, lastAssistant + 1));
 }
 // 按出现顺序收集所有 tool_result 块 —— 返回原对象引用，调用方可原地修改。
 export function collectToolResults(
@@ -646,7 +645,7 @@ export async function agentLoop(
 
     messages.push({ role: "assistant", content: response.content });
 
-    if (response.stop_reason !== "tool_use") {
+    if (!hasToolUse(response)) {
       const force = await hooks.trigger("Stop", messages);
       if (force) {
         messages.push({ role: "user", content: force });

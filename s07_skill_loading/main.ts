@@ -44,7 +44,7 @@ import { z } from "zod";
 import { createLogger, type SessionLogger } from "../lib/logger";
 import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
 import { colorize, print } from "../lib/terminal";
-import { printProse, textOf, zodTool } from "../lib/tools";
+import { hasToolUse, printProse, textOf, zodTool } from "../lib/tools";
 // 来自 s02：基础工具层（bash + 四个文件工具）。
 import {
   tools as baseTools,
@@ -265,7 +265,7 @@ export async function agentLoop(
     logger.response(response);
     messages.push({ role: "assistant", content: response.content });
 
-    if (response.stop_reason !== "tool_use") {
+    if (!hasToolUse(response)) {
       const force = await hooks.trigger("Stop", messages);
       if (force) {
         messages.push({ role: "user", content: force });

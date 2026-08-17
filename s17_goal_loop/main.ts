@@ -44,7 +44,7 @@ import type Anthropic from "@anthropic-ai/sdk";
 import { createLogger, type SessionLogger } from "../lib/logger";
 import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
 import { createPrompt, print, printError, printFinal } from "../lib/terminal";
-import { printProse, textOf } from "../lib/tools";
+import { hasToolUse, printProse, textOf } from "../lib/tools";
 // 来自 s02：五个工具的定义、schema 表与错误转文本。
 import { errMsg, TOOL_SCHEMAS, tools } from "../s02_tool_use/main";
 // 来自 s03：dispatch 表与权限确认抽象。
@@ -583,7 +583,7 @@ export class GoalSession {
         (response.usage?.output_tokens ?? 0);
       this.messages.push({ role: "assistant", content: response.content });
 
-      if (response.stop_reason === "tool_use") {
+      if (hasToolUse(response)) {
         this.messages.push({
           role: "user",
           content: await this.runTools(response),

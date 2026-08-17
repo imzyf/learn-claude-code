@@ -48,7 +48,7 @@ import { z } from "zod";
 import { createLogger, type SessionLogger } from "../lib/logger";
 import { createClient, MODEL_ID } from "../lib/model";
 import { colorize, print } from "../lib/terminal";
-import { printProse, textOf, zodTool } from "../lib/tools";
+import { hasToolUse, printProse, textOf, zodTool } from "../lib/tools";
 // 来自 s02：tool 定义（tools）与 schema 表（TOOL_SCHEMAS）——纯数据，原样复用；
 // 四个文件工具也取 s02 的版本，它们带 safePath（理由见下面的 BASE_HANDLERS）。
 import {
@@ -334,7 +334,7 @@ export async function agentLoop(
     logger.response(response);
     messages.push({ role: "assistant", content: response.content });
 
-    if (response.stop_reason !== "tool_use") {
+    if (!hasToolUse(response)) {
       const force = await hooks.trigger("Stop", messages);
       if (force) {
         messages.push({ role: "user", content: force });

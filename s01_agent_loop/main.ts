@@ -3,8 +3,10 @@
  *
  * AI 编程 agent 的全部秘密就在这一个模式里：
  *
- *     while stop_reason == "tool_use":
+ *     while true:
  *         result = LLM(messages, tools)
+ *         if result 里没有 tool_use block:
+ *             break
  *         execute tools
  *         append results
  *
@@ -35,7 +37,7 @@ import { z } from "zod";
 import { createLogger, type SessionLogger } from "../lib/logger";
 import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
 import { colorize, print } from "../lib/terminal";
-import { printProse, textOf, zodTool } from "../lib/tools";
+import { hasToolUse, printProse, textOf, zodTool } from "../lib/tools";
 
 const SYSTEM = `You are a coding agent at ${process.cwd()}. Use bash to solve tasks. Act, don't explain.`;
 
@@ -100,7 +102,7 @@ export async function agentLoop(
     messages.push({ role: "assistant", content: response.content });
 
     // 如果 model 没有调用 tool，就结束
-    if (response.stop_reason !== "tool_use") {
+    if (!hasToolUse(response)) {
       return textOf(response);
     }
 

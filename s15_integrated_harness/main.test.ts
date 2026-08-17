@@ -42,7 +42,6 @@ import {
   callTool,
   classifyApiError,
   type Deps,
-  hasToolUse,
   MAX_RETRIES,
   makeHarnessHandlers,
   RecoveryState,
@@ -331,15 +330,6 @@ describe("agentLoop", () => {
     );
     expect(String(mainCalls()[0].system)).toContain("Available tools: bash");
     expect(mainCalls()[0].tools).toHaveLength(25);
-  });
-
-  it("hasToolUse 决定是否再跑一轮工具", () => {
-    expect(hasToolUse(fakeMessage([textBlock("hi")], "end_turn"))).toBe(false);
-    expect(
-      hasToolUse(
-        fakeMessage([toolUseBlock("t", "list_tasks", {})], "end_turn"),
-      ),
-    ).toBe(true);
   });
 
   it("PreToolUse hook 拦截时把拦截文案当成 tool_result", async () => {

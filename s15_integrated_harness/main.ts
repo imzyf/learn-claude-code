@@ -41,8 +41,8 @@
  *   - code.py 用守护线程 + 各种锁；这里是单线程事件循环，队友、后台命令、
  *     cron 定时器都是游离的 Promise / unref 定时器，状态迁移在同步函数里跑完，
  *     不需要锁（与 s11 / s12 / s13 的处理一致）。
- *   - 是否继续工具轮看响应里有没有 tool_use block（hasToolUse），
- *     不只看 stop_reason —— max_tokens 的分支要先单独处理。
+ *   - 是否继续工具轮由 lib/tools 的 hasToolUse 判断（看有没有 tool_use block），
+ *     所以 max_tokens 的重试 / 续写分支要排在它前面单独处理。
  *   - 交互式确认只发生在用户轮：cron / 团队事件 / 后台通知唤醒的异步轮用另一套
  *     hook（confirm 直接拒绝），不和主终端抢 stdin（对应 code.py 的「不在主线程
  *     就拒绝交互式批准」）。
@@ -63,7 +63,7 @@ import type { z } from "zod";
 import { createLogger, type SessionLogger } from "../lib/logger";
 import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
 import { createPrompt, print, printError, printFinal } from "../lib/terminal";
-import { printProse, textOf } from "../lib/tools";
+import { hasToolUse, printProse, textOf } from "../lib/tools";
 // 来自 s02：错误转文本（工具异常统一收敛成 tool_result）。
 import { errMsg } from "../s02_tool_use/main";
 // 来自 s03：权限确认抽象（入口注入真实提示，异步轮注入「一律拒绝」）。
@@ -480,12 +480,6 @@ export async function withRetry<T>(
 // ═══════════════════════════════════════════════════════════
 //  agentLoop —— 所有机制汇合的地方
 // ═══════════════════════════════════════════════════════════
-
-// 是否还要再跑一轮工具：看响应里有没有真的 tool_use block，
-// 而不是只信 stop_reason（max_tokens 的分支要单独处理）。
-export function hasToolUse(response: Anthropic.Message): boolean {
-  return response.content.some((block) => block.type === "tool_use");
-}
 
 export async function agentLoop(
   messages: Anthropic.MessageParam[],

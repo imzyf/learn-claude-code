@@ -66,7 +66,7 @@ import { z } from "zod";
 import { createLogger, type SessionLogger } from "../lib/logger";
 import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
 import { createPrompt, print, printFinal } from "../lib/terminal";
-import { printProse, textOf, zodTool } from "../lib/tools";
+import { hasToolUse, printProse, textOf, zodTool } from "../lib/tools";
 // 来自 s02：errMsg + Handlers 类型。
 import { errMsg, type Handlers } from "../s02_tool_use/main";
 // 来自 s03：拒绝名单与规则匹配（队友那侧不问用户，命中规则直接回权限错误）+ makeConfirm。
@@ -1266,7 +1266,7 @@ export class TeammateRuntime {
     this.logger.response(response);
     this.messages.push({ role: "assistant", content: response.content });
 
-    if (response.stop_reason === "tool_use") {
+    if (hasToolUse(response)) {
       const results: Anthropic.ToolResultBlockParam[] = [];
       for (const block of response.content) {
         if (block.type !== "tool_use") continue;
@@ -1746,7 +1746,7 @@ export async function agentLoop(
     logger.response(response);
     messages.push({ role: "assistant", content: response.content });
 
-    if (response.stop_reason !== "tool_use") {
+    if (!hasToolUse(response)) {
       // 轮次结束才归还已完成任务的目录 lease。
       releaseCompletedAssignment(team, "agent");
       await hooks.trigger("Stop", messages);

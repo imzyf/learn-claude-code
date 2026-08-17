@@ -45,7 +45,7 @@ import { stringify as stringifyYaml } from "yaml";
 import { createLogger, type SessionLogger } from "../lib/logger";
 import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
 import { colorize, print } from "../lib/terminal";
-import { printProse, textOf } from "../lib/tools";
+import { hasToolUse, printProse, textOf } from "../lib/tools";
 import { errMsg } from "../s02_tool_use/main";
 import type { Deps as S04Deps } from "../s04_hooks/main";
 // 来自 s05：hook 装配（loadHooks = createHooks + registerDefaultHooks）+ nag 机制。
@@ -805,7 +805,7 @@ export async function agentLoop(
 
     messages.push({ role: "assistant", content: response.content });
 
-    if (response.stop_reason !== "tool_use") {
+    if (!hasToolUse(response)) {
       const force = await hooks.trigger("Stop", messages);
       if (force) {
         messages.push({ role: "user", content: force });
