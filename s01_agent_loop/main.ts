@@ -37,7 +37,7 @@ import { z } from "zod";
 import { createLogger, type SessionLogger } from "../lib/logger";
 import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
 import { colorize, print } from "../lib/terminal";
-import { hasToolUse, printProse, textOf, zodTool } from "../lib/tools";
+import { hasToolUse, preview, printProse, textOf, zodTool } from "../lib/tools";
 
 const SYSTEM = `You are a coding agent at ${process.cwd()}. Use bash to solve tasks. Act, don't explain.`;
 
@@ -128,7 +128,7 @@ export async function agentLoop(
 
       // 执行 command，并记录 output 的简短预览
       const output = runBash(input.command);
-      print(output.slice(0, 200), "gray");
+      print(preview(output), "gray");
       logger.toolResult(input.command, output);
 
       // 用 tool_use_id 把结果配对，让 model 能对应上

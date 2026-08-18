@@ -43,7 +43,7 @@ import type Anthropic from "@anthropic-ai/sdk";
 import { createLogger, type SessionLogger } from "../lib/logger";
 import { createClient, MODEL_ID } from "../lib/model";
 import { colorize, print } from "../lib/terminal";
-import { hasToolUse, printProse, textOf } from "../lib/tools";
+import { hasToolUse, preview, printProse, textOf } from "../lib/tools";
 import type { Deps as S01Deps } from "../s01_agent_loop/main";
 // tool 定义、schema 表在 s03 没变，直接从 s02 复用。runBash 和三个
 // 文件工具是 s03 自己的版本（见下）；runGlob 自带 WORKDIR 过滤，照常复用。
@@ -82,7 +82,11 @@ export function runBash(command: string): string {
 
 export function runRead(p: string, limit?: number): string {
   try {
-    let lines = fs.readFileSync(path.resolve(WORKDIR, p), "utf8").split("\n");
+    // 对齐 Python 的 splitlines()：结尾换行不产生多余空行，CRLF 不残留 \r。
+    let lines = fs
+      .readFileSync(path.resolve(WORKDIR, p), "utf8")
+      .split(/\r?\n/);
+    if (lines.at(-1) === "") lines.pop();
     if (limit && limit < lines.length) {
       lines = [
         ...lines.slice(0, limit),
@@ -200,21 +204,6 @@ export function checkRules(toolName: string, args: unknown): string | null {
   return null;
 }
 
-// 把一次权限决定（放行/拦截）格式化后写进 transcript。
-// 格式化归调用方管，logger 只提供通用的 section()。
-export function logPermission(
-  logger: SessionLogger,
-  toolName: string,
-  args: unknown,
-  reason: string,
-  decision: "allow" | "deny",
-): void {
-  logger.section(
-    "PERMISSION",
-    `${reason}\nTool: ${toolName}(${JSON.stringify(args)})\nDecision: ${decision}`,
-  );
-}
-
 // 关卡 3：用户批准 —— 规则匹配后等待确认。
 // 确认动作通过依赖注入传入（Confirm），让 pipeline 不依赖 readline：
 // 入口用 makeConfirm 接入真实 terminal 提示，测试则注入 fake。
@@ -250,7 +239,25 @@ export function makeConfirm(
   };
 }
 
-// Pipeline：三道关卡串起来
+// 把一次权限决定（放行/拦截）格式化后写进 transcript。
+// 格式化归调用方管，logger 只提供通用的 section()。
+export function logPermission(
+  logger: SessionLogger,
+  toolName: string,
+  args: unknown,
+  reason: string,
+  decision: "allow" | "deny",
+): void {
+  logger.section(
+    "PERMISSION",
+    `${reason}\nTool: ${toolName}(${JSON.stringify(args)})\nDecision: ${decision}`,
+  );
+}
+
+// ═══════════════════════════════════════════════════════════
+//  Pipeline：三道关卡串起来
+// ═══════════════════════════════════════════════════════════
+
 export async function checkPermission(
   block: Anthropic.ToolUseBlock,
   confirm: Confirm,
@@ -314,10 +321,8 @@ export async function agentLoop(
 
     const results: Anthropic.ToolResultBlockParam[] = [];
     for (const block of response.content) {
-      if (block.type !== "tool_use") {
-        printProse(block);
-        continue;
-      }
+      printProse(block);
+      if (block.type !== "tool_use") continue;
 
       // s03 改动：执行前先过一遍 permission pipeline
       if (!(await checkPermission(block, confirm, logger))) {
@@ -335,7 +340,7 @@ export async function agentLoop(
         handler && schema
           ? handler(schema.parse(block.input))
           : `Unknown: ${block.name}`;
-      print(output.slice(0, 200), "gray");
+      print(preview(output), "gray");
       logger.toolResult(block.name, output);
       results.push({
         type: "tool_result",

@@ -54,8 +54,14 @@ describe("runRead", () => {
     expect(runRead(rel("read.txt"))).toBe("line1\nline2");
   });
 
+  it("结尾换行不产生多余空行", () => {
+    fs.writeFileSync(path.join(tmp, "trailing.txt"), "line1\nline2\n");
+    expect(runRead(rel("trailing.txt"))).toBe("line1\nline2");
+  });
+
   it("按上限截断并报告剩余行数", () => {
-    fs.writeFileSync(path.join(tmp, "long.txt"), "a\nb\nc\nd");
+    // 带结尾换行：验证空行不被算进剩余行数
+    fs.writeFileSync(path.join(tmp, "long.txt"), "a\nb\nc\nd\n");
     expect(runRead(rel("long.txt"), 2)).toBe("a\nb\n... (2 more lines)");
   });
 
