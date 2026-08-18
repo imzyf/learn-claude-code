@@ -25,12 +25,14 @@
  *          （外加 runTodoWrite 实现）。dispatch 表在这里重新组装成
  *          BASE_HANDLERS —— 权限层降级了，文件工具得换回带 safePath 的版本。
  *   Hook 层：hook 实例（createHooks）连同 contextInjectHook / logHook /
- *          summaryHook 全部从 s04 原样复用。
- *   + 唠叨提醒：连续 3 轮没更新 todo 就注入 <reminder>
- *     （agentLoop 里的 roundsSinceTodo 计数器）。
+ *          largeOutputHook / summaryHook 全部从 s04 原样复用。
+ *   + 唠叨提醒：连续 3 轮没更新 todo 就在本轮 tool_result 里补一条
+ *     <reminder>（agentLoop 里的 createNagCounter 计数器）。
  *   + SYSTEM prompt 加入「先计划再执行」的指引。
  *   - permissionHook 精简为只剩拒绝名单（复用 s03 的 checkDenyList），
  *     不再有 s04 的 Allow? 确认关卡——把注意力留给 todo_write 本身。
+ *   - s04 那个「强制再来一轮」的 Stop hook 不再注册（和 code.py 一致）。
+ *   - 循环里工具输出的 preview 打印去掉，输出只由 logger 收进 transcript。
  *
  * 一处 TS 特有的差异：Python 版本在 TodoManager.update 里手动校验条目结构；
  * 这里把结构校验交给 zod 的 safeParse（normalizeTodos），TodoManager 只做
@@ -52,7 +54,6 @@ import { hasToolUse, printProse, textOf, zodTool } from "../lib/tools";
 // 来自 s02：tool 定义（tools）与 schema 表（TOOL_SCHEMAS）——纯数据，原样复用；
 // 四个文件工具也取 s02 的版本，它们带 safePath（理由见下面的 BASE_HANDLERS）。
 import {
-  tools as baseTools,
   errMsg,
   type Handlers,
   runEdit,
@@ -60,14 +61,17 @@ import {
   runRead,
   runWrite,
   TOOL_SCHEMAS as S02_TOOL_SCHEMAS,
+  tools as s02Tools,
 } from "../s02_tool_use/main";
 // 来自 s03：runBash（内联危险命令检查已移除）+ 拒绝名单检查（checkDenyList）。
 import { checkDenyList, runBash } from "../s03_permission/main";
-// 来自 s04：hook 系统（createHooks 实例）与三个通用 hook，原样复用。
+// 来自 s04：hook 系统（createHooks 实例）与四个通用 hook，原样复用。
 import {
+  contextInjectHook,
   createHooks,
   type Deps,
   type HookSystem,
+  largeOutputHook,
   logHook,
   summaryHook,
 } from "../s04_hooks/main";
@@ -108,9 +112,21 @@ export function normalizeTodos(todos: unknown): {
   }
   const parsed = z.array(todoItem).safeParse(todos);
   if (!parsed.success) {
-    return { error: "todos must be a list of {content, status} objects" };
+    return { error: describeIssue(parsed.error) };
   }
   return { todos: parsed.data };
+}
+
+// zod 的 issue.path 形如 [2, "status"]：把它翻回 Python 那种带下标的文案
+// （`todos[2] has invalid status`）。模型靠这句自纠，指明是哪一条才有用。
+function describeIssue(error: z.ZodError): string {
+  const [index, field] = error.issues[0].path;
+  if (typeof index !== "number") {
+    return "todos must be a list of {content, status} objects";
+  }
+  return typeof field === "string"
+    ? `todos[${index}] has invalid ${field}`
+    : `todos[${index}] must be an object with content and status`;
 }
 
 // todo 清单是模型自己维护的结构化状态，跨轮存在内存里。
@@ -127,12 +143,12 @@ export class TodoManager {
 
     const validated: Todo[] = [];
     let inProgress = 0;
-    todos.forEach((todo, index) => {
+    for (const [index, todo] of todos.entries()) {
       const content = todo.content.trim();
       if (!content) throw new Error(`todos[${index}] requires content`);
       if (todo.status === "in_progress") inProgress += 1;
       validated.push({ content, status: todo.status });
-    });
+    }
     if (inProgress > 1) {
       throw new Error("Only one todo can be in_progress at a time");
     }
@@ -155,7 +171,13 @@ export class TodoManager {
   }
 }
 
+// 和 Python 的模块级 TODO 一样，清单是进程内唯一一份：subagent（s06）和主
+// agent 共用它。测试之间要靠 resetTodos 手动隔离。
 export const TODO = new TodoManager();
+
+export function resetTodos(): void {
+  TODO.items = [];
+}
 
 // 把 todo 清单按 `[status] content` 逐行写进 transcript（纯文本、无 ANSI）。
 export function logTodos(logger: SessionLogger, todos: readonly Todo[]): void {
@@ -179,12 +201,12 @@ export function runTodoWrite(
   return output;
 }
 
-// dispatch 处 parse 用的 schema：只管结构，不带条数/非空限制。越界输入要走
-// TodoManager 返回 Error 文案，而不是在 schema.parse 处抛异常打断循环。
-const todoWriteSchema = z.object({
-  // string 一支：兼容模型偶尔把数组发成 JSON 字符串，schema.parse 才不会抛错（normalizeTodos 负责解开）。
-  todos: z.union([z.array(todoItem), z.string()]),
-});
+// dispatch 处 parse 用的 schema：todos 一律放行到 handler。校验唯一地发生在
+// normalizeTodos / TodoManager 里，结果是回给模型的一条 `Error: ...` 文案。
+// 这里但凡收紧一点（比如要求 z.array(todoItem)），模型漏个 status 就会在
+// agentLoop 的 schema.parse 处抛 ZodError 打断整个循环——Python 版则是
+// try/except 收成文案回给模型（code.py:307-310），不会中断。
+const todoWriteSchema = z.object({ todos: z.unknown() });
 
 // 发给模型的 tool 声明：带上 20 条上限和 content 非空（JSON Schema 里的
 // maxItems / minLength），和 Python 版的 input_schema 对齐。这只是给模型的
@@ -215,7 +237,7 @@ export const BASE_HANDLERS: Handlers = {
 
 // 装配好的三张表导出，供下游（s06）在其之上追加 task 等新工具复用。
 export const tools: Anthropic.Tool[] = [
-  ...baseTools,
+  ...s02Tools,
   zodTool(
     "todo_write",
     "Create and manage a task list for your current coding session.",
@@ -242,32 +264,31 @@ export const TOOL_HANDLERS: Partial<
 //  s05 只补一个精简版 permissionHook。
 // ═══════════════════════════════════════════════════════════
 
-// PreToolUse/PostToolUse hook 收到的结构 —— 原始的 tool_use block。
-type ToolCallInfo = Anthropic.ToolUseBlock;
-
 // PreToolUse：s05 只保留拒绝名单这一道关卡（s04 的 Allow? 确认关卡去掉）。
 // 检测逻辑复用 s03 的 checkDenyList，命中即拦截。
 export function permissionHook(
   logger: SessionLogger,
-  call: ToolCallInfo,
+  call: Anthropic.ToolUseBlock,
 ): string | null {
   if (call.name === "bash") {
     const reason = checkDenyList((call.input as any).command ?? "");
     if (reason) {
-      logger.console(
-        `[HOOK] PreToolUse(permissionHook): [blocked] '${reason}'`,
-        "red",
-      );
-      return reason;
+      // 命中的具体 pattern 只写进日志；回给模型的文案和 s04 / Python 保持一致。
+      logger.console(`[HOOK] PreToolUse(permissionHook): ${reason}`, "red");
+      return "Permission denied by deny list";
     }
   }
   return null;
 }
 
 // 默认 hook 注册收进函数，只在入口调用一次；import 该模块不产生副作用。
+// 五个 hook 和 code.py 的注册表逐条对齐；s04 那个「强制再来一轮」的 Stop hook
+// 不在其中（它是 s04 演示用的，Python 版没有）。
 export function registerDefaultHooks(hooks: HookSystem): void {
+  hooks.register("UserPromptSubmit", contextInjectHook);
   hooks.register("PreToolUse", permissionHook);
   hooks.register("PreToolUse", logHook);
+  hooks.register("PostToolUse", largeOutputHook);
   hooks.register("Stop", summaryHook);
   // 注册完一次性记录（和 s04 一致，复用 s04 的格式化）。
   hooks.logRegistration();
@@ -284,35 +305,48 @@ export function loadHooks(logger: SessionLogger): HookSystem {
 //  agentLoop —— 和 s04 一样，只多了 nag 计数器
 // ═══════════════════════════════════════════════════════════
 
-// 唠叨计数器跨用户轮持续（module 级）；测试用 resetNagCounter 复位。
-// nag 机制在 s05 引入，这里作为「单一出处」导出，供 s06 的 agentLoop 复用。
-// 计数器本身保持 module 私有，只暴露 bump / reset / nagIfStale 三个操作。
-let roundsSinceTodo = 0;
+const NAG_AFTER_ROUNDS = 3;
 
-export function resetNagCounter(): void {
-  roundsSinceTodo = 0;
+// 唠叨计数器。Python 里它是 agent_loop 的局部变量（code.py:279），每条用户输入
+// 从 0 开始；这里用闭包对应，agentLoop 每次调用建一个实例。做成模块级变量的话
+// 计数会跨用户轮残留，新一轮跑 1 个工具轮次就可能被提醒，语义不再是「连续 3 轮」。
+// nag 机制在 s05 引入，这里作为「单一出处」导出，供 s06+ 的 agentLoop 复用。
+export interface NagCounter {
+  // 每完成一个 tool-use 轮次调用一次，计数 +1。
+  bump(): void;
+  // todo_write 被调用即复位。
+  reset(): void;
+  // 连续 3 轮没更新 todo 就往本轮的 tool_result 里追加一条 <reminder>。
+  nagIfStale(
+    results: Anthropic.ContentBlockParam[],
+    logger: SessionLogger,
+  ): void;
 }
 
-// 每完成一个 tool-use 轮次调用一次，计数 +1。
-export function bumpNagCounter(): void {
-  roundsSinceTodo += 1;
-}
-
-// 循环顶部调用：连续 3 轮没更新 todo 就注入一条 <reminder> 并复位计数器。
-export function nagIfStale(
-  messages: Anthropic.MessageParam[],
-  logger: SessionLogger,
-): void {
-  if (roundsSinceTodo < 3 || !messages.length) return;
-  logger.section(
-    "REMINDER",
-    `连续 ${roundsSinceTodo} 轮未更新 todo，注入 <reminder>`,
-  );
-  messages.push({
-    role: "user",
-    content: "<reminder>Update your todos.</reminder>",
-  });
-  roundsSinceTodo = 0;
+export function createNagCounter(): NagCounter {
+  let roundsSinceTodo = 0;
+  return {
+    bump() {
+      roundsSinceTodo += 1;
+    },
+    reset() {
+      roundsSinceTodo = 0;
+    },
+    // 提醒和 tool_result 同处一条 user 消息（对齐 code.py:321-324）：既不会
+    // 制造两条相邻的 user 消息，模型也在同一次请求里看到它。
+    nagIfStale(results, logger) {
+      if (roundsSinceTodo < NAG_AFTER_ROUNDS) return;
+      logger.console(
+        `[NAG] 连续 ${roundsSinceTodo} 轮未更新 todo，注入 <reminder>`,
+        "yellow",
+      );
+      results.push({
+        type: "text",
+        text: "<reminder>Update your todos.</reminder>",
+      });
+      roundsSinceTodo = 0;
+    },
+  };
 }
 
 export async function agentLoop(
@@ -320,9 +354,8 @@ export async function agentLoop(
   deps: Deps,
 ): Promise<string> {
   const { client, logger, hooks } = deps;
+  const nag = createNagCounter();
   while (true) {
-    nagIfStale(messages, logger);
-
     logger.request(messages);
     const response = await client.messages.create({
       model: MODEL_ID,
@@ -343,13 +376,13 @@ export async function agentLoop(
       return textOf(response);
     }
 
-    bumpNagCounter();
-    const results: Anthropic.ToolResultBlockParam[] = [];
+    nag.bump();
+    // 类型是 ContentBlockParam[] 而不是 ToolResultBlockParam[]：<reminder>
+    // 作为一个 text block 挂在同一条 user 消息的末尾。
+    const results: Anthropic.ContentBlockParam[] = [];
     for (const block of response.content) {
-      if (block.type !== "tool_use") {
-        printProse(block);
-        continue;
-      }
+      printProse(block);
+      if (block.type !== "tool_use") continue;
 
       const blocked = await hooks.trigger("PreToolUse", block);
       if (blocked) {
@@ -372,7 +405,7 @@ export async function agentLoop(
       await hooks.trigger("PostToolUse", block, output);
 
       // todo_write 被调用即复位唠叨计数器。
-      if (block.name === "todo_write") resetNagCounter();
+      if (block.name === "todo_write") nag.reset();
 
       results.push({
         type: "tool_result",
@@ -381,12 +414,12 @@ export async function agentLoop(
       });
     }
 
+    nag.nagIfStale(results, logger);
     messages.push({ role: "user", content: results });
   }
 }
 
 // ── 入口 ──────────────────────────────────────────
-// Prompt example: Create lib/slug.ts with a slugify(text) function, write 3 vitest cases in lib/slug.test.ts, run the tests, and fix any failures.
 if (import.meta.main) {
   const client = createClient();
   const logger = createLogger(import.meta.dirname);

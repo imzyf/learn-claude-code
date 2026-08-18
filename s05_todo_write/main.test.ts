@@ -2,9 +2,10 @@
  * s05_todo_write/main.test.ts
  *
  * todo_write 的输入归一化（normalizeTodos）与执行（runTodoWrite）纯逻辑单测。
- * agentLoop 覆盖 s05 的新增点：连续 3 轮没更新 todo 就注入 <reminder>，
- * todo_write 一旦被调用即复位计数器。每个用例各建各的 createHooks(noopLogger)
- * 实例，天然隔离；计数器用 resetNagCounter 复位。
+ * agentLoop 覆盖 s05 的新增点：连续 3 轮没更新 todo 就往 tool_result 里追加
+ * <reminder>，todo_write 一旦被调用即复位计数器。每个用例各建各的
+ * createHooks(noopLogger) 实例，计数器随 agentLoop 新建，天然隔离；
+ * 只有模块级的 TODO 清单要用 resetTodos 手动复位。
  */
 
 import type Anthropic from "@anthropic-ai/sdk";
@@ -22,12 +23,12 @@ import {
   normalizeTodos,
   permissionHook,
   registerDefaultHooks,
-  resetNagCounter,
+  resetTodos,
   runTodoWrite,
 } from "./main";
 
 beforeEach(() => {
-  resetNagCounter();
+  resetTodos();
 });
 
 const todo = (
@@ -55,14 +56,26 @@ describe("normalizeTodos", () => {
     expect(normalizeTodos("not json").error).toMatch(/JSON array string/);
   });
 
-  it("拒绝结构错误的条目", () => {
-    expect(normalizeTodos([{ content: "x" }]).error).toMatch(/content, status/);
+  it("拒绝结构错误的条目，并指明是哪一条", () => {
+    expect(
+      normalizeTodos([todo("ok", "pending"), { content: "x" }]).error,
+    ).toBe("todos[1] has invalid status");
   });
 
   it("拒绝无效的状态值", () => {
-    expect(
-      normalizeTodos([{ content: "x", status: "done" }]).error,
-    ).toBeDefined();
+    expect(normalizeTodos([{ content: "x", status: "done" }]).error).toBe(
+      "todos[0] has invalid status",
+    );
+  });
+
+  it("拒绝不是对象的条目", () => {
+    expect(normalizeTodos(["x"]).error).toBe(
+      "todos[0] must be an object with content and status",
+    );
+  });
+
+  it("拒绝既不是数组也不是字符串的输入", () => {
+    expect(normalizeTodos({ content: "x" }).error).toMatch(/content, status/);
   });
 });
 
@@ -110,7 +123,7 @@ describe("permissionHook", () => {
         noopLogger,
         toolUseBlock("t", "bash", { command: "sudo ls" }),
       ),
-    ).toBe("Blocked: 'sudo' is on the deny list");
+    ).toBe("Permission denied by deny list");
   });
 
   it("允许安全命令", () => {
@@ -164,8 +177,20 @@ describe("agentLoop", () => {
     await agentLoop(messages, { client, logger: noopLogger, hooks });
 
     const toolResults = messages[2].content as Anthropic.ToolResultBlockParam[];
-    expect(toolResults[0].content).toBe("Blocked: 'sudo' is on the deny list");
+    expect(toolResults[0].content).toBe("Permission denied by deny list");
   });
+
+  // 提醒是挂在 tool_result 那条 user 消息末尾的 text block，不是独立消息。
+  const remindedMessages = (messages: Anthropic.MessageParam[]) =>
+    messages.filter(
+      (m) =>
+        Array.isArray(m.content) &&
+        m.content.some(
+          (b) =>
+            b.type === "text" &&
+            b.text === "<reminder>Update your todos.</reminder>",
+        ),
+    );
 
   it("连续 3 轮工具调用未使用 todo_write 后注入 <reminder>", async () => {
     const hooks = createHooks(noopLogger);
@@ -182,10 +207,68 @@ describe("agentLoop", () => {
     await agentLoop(messages, { client, logger: noopLogger, hooks });
 
     expect(client.messages.create).toHaveBeenCalledTimes(4);
-    const reminded = messages.some(
-      (m) => m.content === "<reminder>Update your todos.</reminder>",
+    const reminded = remindedMessages(messages);
+    expect(reminded).toHaveLength(1);
+    // 和第 3 轮的 tool_result 同处一条消息，不额外制造相邻的 user 消息。
+    const blocks = reminded[0].content as Anthropic.ContentBlockParam[];
+    expect(blocks.map((b) => b.type)).toEqual(["tool_result", "text"]);
+    expect(
+      messages.some((m, i) => i > 0 && m.role === messages[i - 1].role),
+    ).toBe(false);
+  });
+
+  it("计数器不跨 agentLoop 调用残留", async () => {
+    const hooks = createHooks(noopLogger);
+    const messages: Anthropic.MessageParam[] = [
+      { role: "user", content: "go" },
+    ];
+    // 第一轮用掉 2 次工具调用（不足以触发提醒）。
+    await agentLoop(messages, {
+      client: fakeClient(
+        bashRound("echo 1"),
+        bashRound("echo 2"),
+        fakeMessage([textBlock("done")], "end_turn"),
+      ),
+      logger: noopLogger,
+      hooks,
+    });
+    // 第二轮同样只用 2 次：计数从 0 重新开始，就不该被提醒。
+    messages.push({ role: "user", content: "again" });
+    await agentLoop(messages, {
+      client: fakeClient(
+        bashRound("echo 3"),
+        bashRound("echo 4"),
+        fakeMessage([textBlock("done")], "end_turn"),
+      ),
+      logger: noopLogger,
+      hooks,
+    });
+
+    expect(remindedMessages(messages)).toHaveLength(0);
+  });
+
+  it("todos 结构非法时返回错误文案，不中断循环", async () => {
+    const hooks = createHooks(noopLogger);
+    const client = fakeClient(
+      fakeMessage(
+        [toolUseBlock("tu", "todo_write", { todos: [{ content: "a" }] })],
+        "tool_use",
+      ),
+      fakeMessage([textBlock("done")], "end_turn"),
     );
-    expect(reminded).toBe(true);
+    const messages: Anthropic.MessageParam[] = [
+      { role: "user", content: "go" },
+    ];
+
+    const result = await agentLoop(messages, {
+      client,
+      logger: noopLogger,
+      hooks,
+    });
+
+    expect(result).toBe("done");
+    const toolResults = messages[2].content as Anthropic.ToolResultBlockParam[];
+    expect(toolResults[0].content).toBe("Error: todos[0] has invalid status");
   });
 
   it("todo_write 重置计数器后不再提醒", async () => {
@@ -210,10 +293,7 @@ describe("agentLoop", () => {
 
     await agentLoop(messages, { client, logger: noopLogger, hooks });
 
-    const reminded = messages.some(
-      (m) => m.content === "<reminder>Update your todos.</reminder>",
-    );
-    expect(reminded).toBe(false);
+    expect(remindedMessages(messages)).toHaveLength(0);
   });
 
   it("允许 Stop hook 强制再执行一轮", async () => {
