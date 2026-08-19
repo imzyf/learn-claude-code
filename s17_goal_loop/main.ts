@@ -629,10 +629,8 @@ export class GoalSession {
   ): Promise<Anthropic.ToolResultBlockParam[]> {
     const results: Anthropic.ToolResultBlockParam[] = [];
     for (const block of response.content) {
-      if (block.type !== "tool_use") {
-        printProse(block);
-        continue;
-      }
+      printProse(block);
+      if (block.type !== "tool_use") continue;
       const blocked = await this.hooks.trigger("PreToolUse", block);
       let output: string;
       if (blocked) {

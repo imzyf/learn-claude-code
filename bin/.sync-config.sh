@@ -32,6 +32,7 @@ SYNC_DIRS=(
 SYNC_FILES=(
   ".env.example:.env.example.upstream"
   "README-zh.md:README-zh.upstream.md"
+  requirements.txt
 )
 
 # 从同步中排除的本地化文件（rsync --exclude）。

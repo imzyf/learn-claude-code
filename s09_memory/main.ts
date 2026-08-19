@@ -18,9 +18,9 @@
  *     5. 真的写入了新记忆时才整合（合并重复、剔除过期，控制在 30 条内）
  *
  * 相比 s08 的变化：
- *   工具层：tools（base + todo + task + load_skill + compact，共 9 个）直接复用 s08，
+ *   工具层：tools（base + task + load_skill + compact）直接复用 s08，
  *          schema/handler 表原样沿用 s07 —— s09 不新增工具，记忆读写全部由循环自动完成。
- *   Hook 层 / nag：复用 s05（与 s07/s08 一致）；技能层复用 s07；压缩流水线复用 s08。
+ *   Hook 层：复用 s05 的默认 hook（与 s07/s08 一致）；技能层复用 s07；压缩流水线复用 s08。
  *   + 记忆层 —— writeMemoryFile / selectRelevantMemories / loadMemories /
  *     extractMemories / consolidateMemories
  *   + buildSystem() —— 在 s07 的技能版 SYSTEM 之上追加记忆索引与召回正文；两者每轮
@@ -48,13 +48,9 @@ import { colorize, print } from "../lib/terminal";
 import { hasToolUse, printProse, textOf } from "../lib/tools";
 import { errMsg } from "../s02_tool_use/main";
 import type { Deps as S04Deps } from "../s04_hooks/main";
-// 来自 s05：hook 装配（loadHooks = createHooks + registerDefaultHooks）+ nag 机制。
-import {
-  bumpNagCounter,
-  loadHooks,
-  nagIfStale,
-  resetNagCounter,
-} from "../s05_todo_write/main";
+// 来自 s05：hook 装配（loadHooks = createHooks + registerDefaultHooks）。
+// todo_write 与配套的 nag 机制不在本章工具表里（同 code.py），所以不引入 createNagCounter。
+import { loadHooks } from "../s05_todo_write/main";
 // 来自 s07：技能层（SYSTEM 目录 + registry）+ frontmatter 解析 + Deps。
 import {
   buildSystem as buildSkillSystem,
@@ -548,7 +544,7 @@ export async function extractMemories(
 
     const candidates = extractJsonArray(textOf(response))
       .map((item) => validateMemoryRecord(item, true))
-      .filter((record): record is MemoryRecord => record !== null);
+      .filter((record) => record !== null);
 
     // 写入前逐条过持久性与去重检查；已写入的也进 known，防止同一轮内互相重复。
     const known: { name: string; description: string; body: string }[] = [
@@ -688,7 +684,7 @@ export async function consolidateMemories(
 
     const consolidated = extractJsonArray(textOf(response))
       .map((item) => validateMemoryRecord(item))
-      .filter((record): record is MemoryRecord => record !== null);
+      .filter((record) => record !== null);
     // 结果为空或 slug 撞车都会让记忆凭空消失，宁可整个放弃这次整合。
     const slugs = consolidated.map((record) => memorySlug(record.name));
     if (!consolidated.length || slugs.length !== new Set(slugs).size) {
@@ -740,7 +736,7 @@ export async function consolidateMemories(
 
 // ═══════════════════════════════════════════════════════════
 //  agentLoop —— 和 s08 一样（压缩流水线 + compact 拦截 + reactive 重试，
-//  hook/nag 复用 s05，schema/handler 表复用 s07），s09 在其上叠加记忆：
+//  hook 复用 s05，schema/handler 表复用 s07），s09 在其上叠加记忆：
 //  开局把召回内容拼进 SYSTEM，本轮结束后提取新记忆 + 必要时整理。
 // ═══════════════════════════════════════════════════════════
 
@@ -757,7 +753,6 @@ export async function agentLoop(
   const dispatchDeps: S07Deps = { ...deps, system };
 
   while (true) {
-    nagIfStale(messages, logger);
     // s09：留一份压缩前快照，供本轮结束时精确提取记忆。
     const preCompact = structuredClone(messages);
 
@@ -820,15 +815,14 @@ export async function agentLoop(
       return textOf(response);
     }
 
-    bumpNagCounter();
-    // compact 工具会重写整个 messages[] —— 一旦触发，本轮剩余的 tool_result 全部作废。
-    let didCompact = false;
-    const results: Anthropic.ToolResultBlockParam[] = [];
+    // compact 工具会重写整个 messages[]，但压缩要等本轮工具全部执行完再做：
+    // 提前 break 会让同一批次里已经执行过的工具（文件已写、命令已跑）的输出既
+    // 进不了 messages 也进不了摘要，模型永远不知道自己那几步的结果。
+    let compactRequested = false;
+    const results: Anthropic.ContentBlockParam[] = [];
     for (const block of response.content) {
-      if (block.type !== "tool_use") {
-        printProse(block);
-        continue;
-      }
+      printProse(block);
+      if (block.type !== "tool_use") continue;
 
       const blocked = await hooks.trigger("PreToolUse", block);
       if (blocked) {
@@ -840,25 +834,34 @@ export async function agentLoop(
         continue;
       }
 
-      // s08：compact 工具用摘要重写整个历史，不能再追加对应的 tool_result
+      // s08：compact 工具用摘要重写整个历史。这里只记标志，压缩放到批次末尾，
+      // 让同批次的其他工具照常执行、结果照常入历史（随后一起被摘要吸收）。
       if (block.name === "compact") {
-        replaceMessages(messages, await compactHistory(messages, deps));
-        didCompact = true;
-        break; // 结束本轮，用压缩后的上下文重新开始
+        compactRequested = true;
+        results.push({
+          type: "tool_result",
+          tool_use_id: block.id,
+          content: "Compaction requested after this tool batch.",
+        });
+        continue;
       }
 
       const schema = TOOL_SCHEMAS[block.name];
       const handler = TOOL_HANDLERS[block.name];
+      // 异常收成 tool_result 文案（同 s07/s08），包括 schema 校验失败。
       // await —— task handler（spawnSubagent）是 async。
-      const output =
-        handler && schema
-          ? await handler(schema.parse(block.input), dispatchDeps)
-          : `Unknown: ${block.name}`;
+      let output: string;
+      try {
+        output =
+          handler && schema
+            ? await handler(schema.parse(block.input), dispatchDeps)
+            : `Unknown: ${block.name}`;
+      } catch (e) {
+        output = `Error: ${errMsg(e)}`;
+      }
       logger.toolResult(block.name, output);
 
       await hooks.trigger("PostToolUse", block, output);
-
-      if (block.name === "todo_write") resetNagCounter();
 
       results.push({
         type: "tool_result",
@@ -867,8 +870,10 @@ export async function agentLoop(
       });
     }
 
-    if (didCompact) continue;
     messages.push({ role: "user", content: results });
+    // 本轮结果入历史之后再压缩，摘要里才包含这一批工具做了什么。
+    if (compactRequested)
+      replaceMessages(messages, await compactHistory(messages, deps));
   }
 }
 

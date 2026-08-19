@@ -5,12 +5,13 @@
  * 直接单测最合适；写盘的路径（snip 存档）把 sessionDir 指到临时目录，
  * L3 只测 under-budget 的 no-op 路径；summarizeHistory 用 fake client 验证摘要提取。
  * agentLoop 复用 s07 的分发骨架：load_skill / task / 普通工具。
- * 其余（技能层、permissionHook、subagent 隔离、todo）沿用 s05/s06/s07，其测试不在此重复。
+ * 其余（技能层、permissionHook、subagent 隔离）沿用 s05/s06/s07，其测试不在此重复。
  */
 
 import * as fs from "node:fs";
+import * as path from "node:path";
 import type Anthropic from "@anthropic-ai/sdk";
-import { beforeEach, describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   fakeClient,
   fakeMessage,
@@ -20,8 +21,7 @@ import {
   useTempDir,
 } from "../lib/testing";
 import { createHooks } from "../s04_hooks/main";
-// s05/s06/s07 的层沿用旧实现，各自的测试不在此重复；这里只借 resetNagCounter 做 setup。
-import { resetNagCounter } from "../s05_todo_write/main";
+// s05/s06/s07 的层沿用旧实现，各自的测试不在此重复。
 import type { SkillRegistry } from "../s07_skill_loading/main";
 import {
   agentLoop,
@@ -29,6 +29,7 @@ import {
   estimateSize,
   microCompact,
   persistLargeOutput,
+  reactiveCompact,
   replaceMessages,
   snipCompact,
   summarizeHistory,
@@ -40,10 +41,6 @@ let tmp = "";
 
 useTempDir(import.meta.dirname, (dir) => {
   tmp = dir;
-});
-
-beforeEach(() => {
-  resetNagCounter();
 });
 
 // 内存 registry：load_skill 分发无需碰文件系统。
@@ -192,10 +189,11 @@ describe("microCompact", () => {
       expect(part.content).toBe("w".repeat(200));
   });
 
-  it("末尾跟着 reminder 时仍能保住最新一轮", () => {
+  // Stop hook 的 force 会在工具结果之后再追加一条 user 消息，最新一轮仍算没看过。
+  it("末尾跟着普通 user 消息时仍能保住最新一轮", () => {
     const messages: Anthropic.MessageParam[] = [
       ...parallelToolRound(["p1", "p2", "p3", "p4"], () => "w".repeat(200)),
-      { role: "user", content: "<reminder>Update your todos.</reminder>" },
+      { role: "user", content: "keep going" },
     ];
     microCompact(messages, noopLogger);
     for (const part of collectToolResults(messages))
@@ -213,6 +211,23 @@ describe("toolResultBudget", () => {
 describe("persistLargeOutput", () => {
   it("短输出原样返回，不碰磁盘", () => {
     expect(persistLargeOutput("id1", "short", tmp)).toBe("short");
+  });
+
+  it("tool_use_id 里的路径分隔符被清洗，存档不会写出目录", () => {
+    const resultsDir = path.join(tmp, ".task_outputs", "tool-results");
+    const placeholder = persistLargeOutput(
+      "../../escape/id",
+      "x".repeat(40_000),
+      tmp,
+    );
+
+    const saved = placeholder
+      .split("\n")
+      .find((line) => line.startsWith("Full output: "))
+      ?.slice("Full output: ".length) as string;
+    expect(path.dirname(saved)).toBe(resultsDir);
+    expect(path.basename(saved)).toMatch(/^[\d-T]+_\.\._\.\._escape_id\.txt$/);
+    expect(fs.readFileSync(saved).toString()).toHaveLength(40_000);
   });
 });
 
@@ -261,6 +276,54 @@ describe("summarizeHistory", () => {
     });
 
     expect(summary).toBe("[no text in response]");
+  });
+});
+
+// ── reactiveCompact (prompt_too_long 应急路径) ─────────────
+describe("reactiveCompact", () => {
+  const compactDeps = (client: ReturnType<typeof fakeClient>) => ({
+    client,
+    logger: noopLogger,
+    hooks: createHooks(noopLogger),
+    sessionDir: tmp,
+    activeRequest: "current ask",
+  });
+
+  // 摘要子请求的输入（summaryInput 序列化后的整段历史）。
+  const summaryInputOf = (client: ReturnType<typeof fakeClient>): string =>
+    vi.mocked(client.messages.create).mock.calls[0][0].messages[0]
+      .content as string;
+
+  it("历史比尾部保留数还短时，摘要整段并只留摘要", async () => {
+    const client = fakeClient(fakeMessage([textBlock("S")], "end_turn"));
+    const messages: Anthropic.MessageParam[] = [
+      { role: "user", content: "one huge request" },
+      { role: "assistant", content: [textBlock("ok")] },
+    ];
+
+    const out = await reactiveCompact(messages, compactDeps(client));
+
+    // 留尾会把全部历史原样留下，等于没压缩，重试的 prompt 只会更长。
+    expect(out).toHaveLength(1);
+    expect(out[0].content).toContain('"S"');
+    // 摘要的输入是整段历史，不是空数组。
+    expect(summaryInputOf(client)).toContain("one huge request");
+  });
+
+  it("历史够长时摘要头部、原样保留尾部", async () => {
+    const client = fakeClient(fakeMessage([textBlock("S")], "end_turn"));
+    const messages: Anthropic.MessageParam[] = Array.from(
+      { length: 8 },
+      (_, i) => ({ role: "user", content: `m${i}` }),
+    );
+
+    const out = await reactiveCompact(messages, compactDeps(client));
+
+    expect(out).toHaveLength(6); // 1 条摘要 + 尾部 5 条
+    expect(out[out.length - 1]).toBe(messages[7]);
+    // 只有尾部之前的 m0~m2 进了摘要。
+    expect(summaryInputOf(client)).toContain("m0");
+    expect(summaryInputOf(client)).not.toContain("m3");
   });
 });
 
@@ -318,6 +381,69 @@ describe("agentLoop", () => {
     expect(result).toBe("parent done");
     const toolResults = messages[2].content as Anthropic.ToolResultBlockParam[];
     expect(toolResults[0].content).toBe("sub result");
+  });
+
+  it("模型发来畸形 input 时收成 tool_result 错误文案，不中断循环", async () => {
+    const client = fakeClient(
+      // read_file 要 { path: string }，这里只给了 limit
+      fakeMessage(
+        [toolUseBlock("tu_1", "read_file", { limit: 5 })],
+        "tool_use",
+      ),
+      fakeMessage([textBlock("recovered")], "end_turn"),
+    );
+    const messages: Anthropic.MessageParam[] = [
+      { role: "user", content: "go" },
+    ];
+
+    const result = await agentLoop(messages, {
+      ...loopDeps(),
+      client,
+      skills: {},
+    });
+
+    expect(result).toBe("recovered");
+    const toolResults = messages[2].content as Anthropic.ToolResultBlockParam[];
+    expect(toolResults[0].content).toMatch(/^Error: /);
+  });
+
+  it("compact 与其他工具同批次时，先跑完整批再压缩", async () => {
+    const client = fakeClient(
+      fakeMessage(
+        [
+          toolUseBlock("tu_1", "bash", { command: "echo before-compact" }),
+          toolUseBlock("tu_2", "compact", {}),
+        ],
+        "tool_use",
+      ),
+      fakeMessage([textBlock("SUMMARY")], "end_turn"), // 摘要子请求
+      fakeMessage([textBlock("done")], "end_turn"),
+    );
+    const messages: Anthropic.MessageParam[] = [
+      { role: "user", content: "go" },
+    ];
+
+    const result = await agentLoop(messages, {
+      ...loopDeps(),
+      client,
+      skills: {},
+    });
+
+    expect(result).toBe("done");
+    // 同批次里排在 compact 之前的工具，其结果要先入历史再被摘要吸收 ——
+    // 提前 break 的话这次 bash 白跑，模型看不到输出。
+    const summaryInput = vi.mocked(client.messages.create).mock.calls[1][0]
+      .messages[0].content as string;
+    expect(summaryInput).toContain(
+      '"tool_use_id":"tu_1","content":"before-compact"',
+    );
+    expect(summaryInput).toContain(
+      "Compaction requested after this tool batch.",
+    );
+    // 压缩后历史只剩摘要 + 压缩后那次回复，没有孤立的 tool_result。
+    expect(messages).toHaveLength(2);
+    expect(messages[0].content).toContain('"SUMMARY"');
+    expect(collectToolResults(messages)).toHaveLength(0);
   });
 
   it("执行普通工具调用", async () => {

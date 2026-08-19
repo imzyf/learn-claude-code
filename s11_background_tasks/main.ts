@@ -432,10 +432,8 @@ export async function agentLoop(
 
     const results: Anthropic.ToolResultBlockParam[] = [];
     for (const block of response.content) {
-      if (block.type !== "tool_use") {
-        printProse(block);
-        continue;
-      }
+      printProse(block);
+      if (block.type !== "tool_use") continue;
       results.push({
         type: "tool_result",
         tool_use_id: block.id,

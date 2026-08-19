@@ -44,15 +44,15 @@ import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
 import { colorize, print } from "../lib/terminal";
 import { hasToolUse, printProse, textOf, zodTool } from "../lib/tools";
 import {
-  TOOL_SCHEMAS as BASE_TOOL_SCHEMAS,
-  tools as baseTools,
   errMsg,
   type Handlers,
+  TOOL_SCHEMAS as S02_TOOL_SCHEMAS,
+  tools as s02Tools,
 } from "../s02_tool_use/main";
 import {
-  TOOL_HANDLERS as BASE_TOOL_HANDLERS,
   type Confirm,
   makeConfirm,
+  TOOL_HANDLERS as S03_TOOL_HANDLERS,
 } from "../s03_permission/main";
 import {
   contextInjectHook,
@@ -311,10 +311,10 @@ export const CONNECT_TOOL: Anthropic.Tool = zodTool(
 );
 
 // 内置工具是固定的那一份；MCP 工具每轮从 state.clients 现算，不进这个数组。
-export const BUILTIN_TOOLS: Anthropic.Tool[] = [...baseTools, CONNECT_TOOL];
+export const BUILTIN_TOOLS: Anthropic.Tool[] = [...s02Tools, CONNECT_TOOL];
 
 export const TOOL_SCHEMAS: Partial<Record<string, z.ZodObject>> = {
-  ...BASE_TOOL_SCHEMAS,
+  ...S02_TOOL_SCHEMAS,
   connect_mcp: connectMcpSchema,
 };
 
@@ -332,7 +332,7 @@ function isObject(value: unknown): value is Record<string, unknown> {
 export function assembleToolPool(state: McpState): ToolPool {
   const tools = [...BUILTIN_TOOLS];
   const handlers: Handlers = {
-    ...BASE_TOOL_HANDLERS,
+    ...S03_TOOL_HANDLERS,
     connect_mcp: ({ name }) => connectMcp(name, state),
   };
   const policies = new Map<string, McpPolicy>();

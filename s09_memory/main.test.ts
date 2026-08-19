@@ -11,7 +11,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type Anthropic from "@anthropic-ai/sdk";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   fakeClient,
   fakeMessage,
@@ -22,8 +22,6 @@ import {
   useTempDir,
 } from "../lib/testing";
 import { createHooks } from "../s04_hooks/main";
-// nag 计数器是 s05 的模块级状态，每个测试前复位（同 s08 的做法）。
-import { resetNagCounter } from "../s05_todo_write/main";
 import {
   agentLoop,
   buildSystem,
@@ -49,10 +47,6 @@ let tmp = "";
 
 useTempDir(import.meta.dirname, (dir) => {
   tmp = dir;
-});
-
-beforeEach(() => {
-  resetNagCounter();
 });
 
 // 记忆函数与 agentLoop 共用 s06 的 Deps（client + logger + hooks）；测试用裸 hook 实例。
@@ -596,6 +590,58 @@ describe("agentLoop", () => {
     const toolResults = messages[2].content as Anthropic.ToolResultBlockParam[];
     expect(toolResults[0].content).toBe("hi");
     expect(memoryFilenames(tmp)).toEqual([]); // 未写入任何记忆
+  });
+
+  it("模型发来畸形 input 时收成 tool_result 错误文案，不中断循环", async () => {
+    const client = fakeClient(
+      // read_file 要 { path: string }，这里只给了 limit
+      fakeMessage(
+        [toolUseBlock("tu_1", "read_file", { limit: 5 })],
+        "tool_use",
+      ),
+      fakeMessage([textBlock("recovered")], "end_turn"),
+      fakeMessage([textBlock("[]")], "end_turn"), // extractMemories
+    );
+    const messages: Anthropic.MessageParam[] = [
+      { role: "user", content: "go" },
+    ];
+
+    const result = await agentLoop(messages, { ...loopDeps(), client });
+
+    expect(result).toBe("recovered");
+    const toolResults = messages[2].content as Anthropic.ToolResultBlockParam[];
+    expect(toolResults[0].content).toMatch(/^Error: /);
+  });
+
+  it("compact 与其他工具同批次时，先跑完整批再压缩", async () => {
+    const client = fakeClient(
+      fakeMessage(
+        [
+          toolUseBlock("tu_1", "bash", { command: "echo before-compact" }),
+          toolUseBlock("tu_2", "compact", {}),
+        ],
+        "tool_use",
+      ),
+      fakeMessage([textBlock("SUMMARY")], "end_turn"), // compactHistory 的摘要子请求
+      fakeMessage([textBlock("done")], "end_turn"),
+      fakeMessage([textBlock("[]")], "end_turn"), // extractMemories
+    );
+    const messages: Anthropic.MessageParam[] = [
+      { role: "user", content: "go" },
+    ];
+
+    const result = await agentLoop(messages, { ...loopDeps(), client });
+
+    expect(result).toBe("done");
+    // 同批次里排在 compact 之前的工具，其结果要先入历史再被摘要吸收。
+    const summaryInput = vi.mocked(client.messages.create).mock.calls[1][0]
+      .messages[0].content as string;
+    expect(summaryInput).toContain(
+      '"tool_use_id":"tu_1","content":"before-compact"',
+    );
+    // 压缩后历史只剩摘要 + 压缩后那次回复，没有孤立的 tool_result。
+    expect(messages).toHaveLength(2);
+    expect(String(messages[0].content)).toContain('"SUMMARY"');
   });
 
   it("分发 task 给子 agent，只保留它的总结", async () => {

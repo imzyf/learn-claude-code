@@ -372,7 +372,7 @@ export class AnthropicAgentRunner implements AgentRunner {
       max_tokens: 2000,
     });
     const text = response.content
-      .filter((block): block is Anthropic.TextBlock => block.type === "text")
+      .filter((block) => block.type === "text")
       .map((block) => block.text)
       .join("\n")
       .trim();
