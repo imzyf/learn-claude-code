@@ -37,7 +37,8 @@
  * 一处 TS 特有的差异：Python 版本在 TodoManager.update 里手动校验条目结构；
  * 这里把结构校验交给 zod 的 safeParse（normalizeTodos），TodoManager 只做
  * zod 表达不了的那几条规则：20 条上限、content 去空白后非空、同时只能有
- * 一个 in_progress。
+ * 一个 in_progress。dispatch 处的 try/catch 与 code.py 的 execute_tool 对应：
+ * 工具异常（含 schema 校验失败）都是一条 tool_result，不打断循环。
  *
  * 基于 s04（hooks）构建。Usage:
  *
@@ -201,17 +202,12 @@ export function runTodoWrite(
   return output;
 }
 
-// dispatch 处 parse 用的 schema：todos 一律放行到 handler。校验唯一地发生在
-// normalizeTodos / TodoManager 里，结果是回给模型的一条 `Error: ...` 文案。
-// 这里但凡收紧一点（比如要求 z.array(todoItem)），模型漏个 status 就会在
-// agentLoop 的 schema.parse 处抛 ZodError 打断整个循环——Python 版则是
-// try/except 收成文案回给模型（code.py:307-310），不会中断。
-const todoWriteSchema = z.object({ todos: z.unknown() });
-
-// 发给模型的 tool 声明：带上 20 条上限和 content 非空（JSON Schema 里的
-// maxItems / minLength），和 Python 版的 input_schema 对齐。这只是给模型的
-// 约束提示，真正的兜底仍在 TodoManager。
-const todoWriteToolSchema = z.object({
+// todo_write 的 schema：zodTool 用它生成发给模型的声明（20 条上限、content
+// 非空，对齐 Python 版的 input_schema），dispatch 处也用它校验模型发来的 input。
+// string 分支收模型偶尔把 todos 发成 JSON 字符串的情况；解开它、以及 zod 表达
+// 不了的那条规则（同时只能有一个 in_progress），由 normalizeTodos / TodoManager
+// 兜底。
+const todoWriteSchema = z.object({
   todos: z.union([
     z.array(todoItem.extend({ content: z.string().min(1) })).max(MAX_TODOS),
     z.string(),
@@ -241,7 +237,7 @@ export const tools: Anthropic.Tool[] = [
   zodTool(
     "todo_write",
     "Create and manage a task list for your current coding session.",
-    todoWriteToolSchema,
+    todoWriteSchema,
   ),
 ];
 
@@ -396,10 +392,16 @@ export async function agentLoop(
 
       const schema = TOOL_SCHEMAS[block.name];
       const handler = TOOL_HANDLERS[block.name];
-      const output =
-        handler && schema
-          ? handler(schema.parse(block.input), deps)
-          : `Unknown: ${block.name}`;
+      // 异常收成 tool_result 文案（对齐 code.py:307-310），包括 schema 校验失败。
+      let output: string;
+      try {
+        output =
+          handler && schema
+            ? handler(schema.parse(block.input), deps)
+            : `Unknown: ${block.name}`;
+      } catch (e) {
+        output = `Error: ${errMsg(e)}`;
+      }
       logger.toolResult(block.name, output);
 
       await hooks.trigger("PostToolUse", block, output);

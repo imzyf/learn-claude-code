@@ -49,15 +49,20 @@ export function hasToolUse(response: Anthropic.Message): boolean {
 // 打印助手回复的各类 block：正文 text（green）、thinking 推理独白（blue）、
 // tool_use 工具调用意图 name + input（cyan）。工具的实际执行仍由调用方负责。
 // input 只打前 200 字符：write_file 之类的工具参数里带整份文件内容，全量打印会刷屏。
-export function printProse(block: Anthropic.ContentBlock): void {
+// prefix 标注这几行来自哪个 agent（s06 起主循环之外还有 subagent 在说话，
+// 不加前缀两者的输出在终端里分不开）；单 agent 的章节留空即可。
+export function printProse(block: Anthropic.ContentBlock, prefix = ""): void {
   if (block.type === "text") {
     const text = block.text.trim();
-    if (text) print(`🔮 ${text}`, "green");
+    if (text) print(`${prefix}🔮 ${text}`, "green");
   } else if (block.type === "thinking") {
     const text = block.thinking.trim();
-    if (text) print(`💭 ${text}`, "blue");
+    if (text) print(`${prefix}💭 ${text}`, "blue");
   } else if (block.type === "tool_use") {
-    print(`🔧 ${block.name}(${preview(JSON.stringify(block.input))})`, "cyan");
+    print(
+      `${prefix}🔧 ${block.name}(${preview(JSON.stringify(block.input))})`,
+      "cyan",
+    );
   }
 }
 

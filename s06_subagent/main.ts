@@ -21,7 +21,7 @@
  *          dispatch 复用 s05 的 BASE_HANDLERS（单一出处）。
  *   Hook 层：注册表/触发器与默认 hook 全部复用 s05（它又复用 s04），s06 不再重复定义。
  *   + task 工具 + 带全新 messages[] 的 spawnSubagent()
- *   + 安全限制：每个子 agent 最多 30 轮
+ *   + 安全限制：每个子 agent 最多 MAX_SUB_TURNS 轮
  *   主循环几乎没变：task 通过 TOOL_HANDLERS 自动分发，唯一区别是
  *   `await handler(...)`，因为 spawnSubagent 是异步的。
  *
@@ -36,11 +36,12 @@ import { z } from "zod";
 import { createLogger } from "../lib/logger";
 import { createClient, MODEL_ID } from "../lib/model";
 import { colorize, print } from "../lib/terminal";
-import { hasToolUse, printProse, textOf, zodTool } from "../lib/tools";
+import { hasToolUse, preview, printProse, textOf, zodTool } from "../lib/tools";
 // 来自 s02：基础工具层（bash + 四个文件工具）——父子 agent 都建立在这一层上。
 import {
-  tools as baseTools,
+  errMsg,
   TOOL_SCHEMAS as S02_TOOL_SCHEMAS,
+  tools as s02Tools,
 } from "../s02_tool_use/main";
 // 来自 s04：共享的 Deps 类型（client + logger + hooks）。
 import type { Deps } from "../s04_hooks/main";
@@ -68,14 +69,17 @@ const SUB_SYSTEM =
 //  三张表都用展开语法在基础之上追加一个 task，调用点（agentLoop）不用改。
 // ═══════════════════════════════════════════════════════════
 
+// minLength: 1 和 code.py:302 的 input_schema 对齐。zodTool 用它生成发给模型的
+// 声明，dispatch 处也用它校验模型发来的 input。
 const taskSchema = z.object({ prompt: z.string().min(1) });
 
 // subagent 只拿基础工具层（没有 task），从源头杜绝递归派生。
-const subTools = baseTools;
+// 拷贝而非别名（对齐 code.py 的 `list(BASE_TOOLS)`），下游改 tools 不会波及这里。
+const subTools = [...s02Tools];
 
 // 三张装配表导出，供 s07 在其上继续叠加。
 export const tools: Anthropic.Tool[] = [
-  ...baseTools,
+  ...s02Tools,
   // s06 新增：task 工具
   zodTool(
     "task",
@@ -102,6 +106,12 @@ export const TOOL_HANDLERS: Partial<
 //  s06 新增：Subagent —— 全新 messages[]，只回最终文本
 // ═══════════════════════════════════════════════════════════
 
+// 安全上限：子 agent 最多跑这么多轮。兜底文案也引用它，改一处即可。
+export const MAX_SUB_TURNS = 30;
+
+// 子循环所有终端输出的前缀，和父 agent 的输出区分开。
+const SUB_PREFIX = "[sub] ";
+
 export async function spawnSubagent(
   prompt: string,
   deps: Deps,
@@ -115,8 +125,7 @@ export async function spawnSubagent(
     { role: "user", content: prompt },
   ]; // fresh context
 
-  for (let turn = 0; turn < 30; turn++) {
-    // safety limit
+  for (let turn = 0; turn < MAX_SUB_TURNS; turn++) {
     logger.request(messages);
     const response = await client.messages.create({
       model: MODEL_ID,
@@ -143,9 +152,11 @@ export async function spawnSubagent(
 
     const results: Anthropic.ToolResultBlockParam[] = [];
     for (const block of response.content) {
+      // 和父循环同一套打印，只是带 [sub] 前缀：子 agent 的 text / thinking
+      // 也要看得见，同时在终端里和父 agent 的输出区分开。
+      printProse(block, SUB_PREFIX);
       if (block.type !== "tool_use") continue;
 
-      print(`> [sub] [${block.name}] ${JSON.stringify(block.input)}`, "cyan");
       // subagent 同样跑父实例的 hooks（权限一并生效）。
       const blocked = await hooks.trigger("PreToolUse", block);
       if (blocked) {
@@ -159,13 +170,18 @@ export async function spawnSubagent(
 
       const schema = S02_TOOL_SCHEMAS[block.name];
       const handler = BASE_HANDLERS[block.name];
-      const output =
-        handler && schema
-          ? handler(schema.parse(block.input))
-          : `Unknown: ${block.name}`;
+      let output: string;
+      try {
+        output =
+          handler && schema
+            ? handler(schema.parse(block.input))
+            : `Unknown: ${block.name}`;
+      } catch (e) {
+        output = `Error: ${errMsg(e)}`;
+      }
       logger.toolResult(block.name, output);
       await hooks.trigger("PostToolUse", block, output);
-      print(`  [sub] [${block.name}] ${output.slice(0, 100)}`, "gray");
+      print(`${SUB_PREFIX}[${block.name}] ${preview(output, 100)}`, "gray");
       results.push({
         type: "tool_result",
         tool_use_id: block.id,
@@ -175,9 +191,9 @@ export async function spawnSubagent(
     messages.push({ role: "user", content: results });
   }
 
-  // 兜底：撞上 30 轮安全上限时，父 agent 收到的就是这句话。
+  // 兜底：撞上安全上限时，父 agent 收到的就是这句话。
   logger.console("[Subagent stopped]", "magenta");
-  return "Subagent stopped after 30 turns without a final answer.";
+  return `Subagent stopped after ${MAX_SUB_TURNS} turns without a final answer.`;
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -213,10 +229,8 @@ export async function agentLoop(
 
     const results: Anthropic.ToolResultBlockParam[] = [];
     for (const block of response.content) {
-      if (block.type !== "tool_use") {
-        printProse(block);
-        continue;
-      }
+      printProse(block);
+      if (block.type !== "tool_use") continue;
 
       const blocked = await hooks.trigger("PreToolUse", block);
       if (blocked) {
@@ -230,11 +244,17 @@ export async function agentLoop(
 
       const schema = TOOL_SCHEMAS[block.name];
       const handler = TOOL_HANDLERS[block.name];
+      // 异常收成 tool_result 文案（对齐 code.py:233-235），包括 schema 校验失败。
       // s06: await —— task handler（spawnSubagent）是 async。
-      const output =
-        handler && schema
-          ? await handler(schema.parse(block.input), deps)
-          : `Unknown: ${block.name}`;
+      let output: string;
+      try {
+        output =
+          handler && schema
+            ? await handler(schema.parse(block.input), deps)
+            : `Unknown: ${block.name}`;
+      } catch (e) {
+        output = `Error: ${errMsg(e)}`;
+      }
       logger.toolResult(block.name, output);
 
       await hooks.trigger("PostToolUse", block, output);

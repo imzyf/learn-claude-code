@@ -267,6 +267,37 @@ describe("agentLoop", () => {
     });
 
     expect(result).toBe("done");
+    // 数组形式的结构错误在 dispatch 处的 schema 校验就被拦下。
+    const toolResults = messages[2].content as Anthropic.ToolResultBlockParam[];
+    expect(toolResults[0].content).toContain("Invalid option");
+  });
+
+  it("todos 是 JSON 字符串时由 TodoManager 校验结构", async () => {
+    // string 分支通过 schema，结构错误留到 normalizeTodos 才发现，文案形如
+    // `todos[0] has invalid status`——两条路径都不中断循环。
+    const hooks = createHooks(noopLogger);
+    const client = fakeClient(
+      fakeMessage(
+        [
+          toolUseBlock("tu", "todo_write", {
+            todos: '[{"content": "a"}]',
+          }),
+        ],
+        "tool_use",
+      ),
+      fakeMessage([textBlock("done")], "end_turn"),
+    );
+    const messages: Anthropic.MessageParam[] = [
+      { role: "user", content: "go" },
+    ];
+
+    const result = await agentLoop(messages, {
+      client,
+      logger: noopLogger,
+      hooks,
+    });
+
+    expect(result).toBe("done");
     const toolResults = messages[2].content as Anthropic.ToolResultBlockParam[];
     expect(toolResults[0].content).toBe("Error: todos[0] has invalid status");
   });

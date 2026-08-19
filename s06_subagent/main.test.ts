@@ -18,7 +18,7 @@ import {
 } from "../lib/testing";
 import { createHooks } from "../s04_hooks/main";
 import { permissionHook } from "../s05_todo_write/main";
-import { agentLoop, spawnSubagent } from "./main";
+import { agentLoop, MAX_SUB_TURNS, spawnSubagent } from "./main";
 
 // ── permissionHook ────────────────────────────────────────
 describe("permissionHook", () => {
@@ -28,7 +28,7 @@ describe("permissionHook", () => {
         noopLogger,
         toolUseBlock("t", "bash", { command: "sudo x" }),
       ),
-    ).toBe("Blocked: 'sudo' is on the deny list");
+    ).toBe("Permission denied by deny list");
   });
 });
 
@@ -67,8 +67,8 @@ describe("spawnSubagent", () => {
   });
 
   it("始终未完成时回退为提示消息", async () => {
-    // 30 个 tool_use 响应，永不 end_turn → 触发安全上限兜底
-    const rounds = Array.from({ length: 30 }, (_, i) =>
+    // 撞满上限的 tool_use 响应，永不 end_turn -> 触发安全上限兜底
+    const rounds = Array.from({ length: MAX_SUB_TURNS }, (_, i) =>
       fakeMessage(
         [toolUseBlock(`s${i}`, "bash", { command: "echo x" })],
         "tool_use",
@@ -83,7 +83,7 @@ describe("spawnSubagent", () => {
     });
 
     expect(result).toBe(
-      "Subagent stopped after 30 turns without a final answer.",
+      `Subagent stopped after ${MAX_SUB_TURNS} turns without a final answer.`,
     );
   });
 });
@@ -114,6 +114,29 @@ describe("agentLoop", () => {
     // 父 agent 只看到 subagent 的最终摘要，看不到它的中间步骤
     const toolResults = messages[2].content as Anthropic.ToolResultBlockParam[];
     expect(toolResults[0].content).toBe("sub result");
+  });
+
+  it("非法 input 返回错误文案，不中断循环也不起子 agent", async () => {
+    // 空 prompt 不满足 schema 的 minLength: 1，dispatch 处收成一条 tool_result
+    // 让模型自纠；subagent 没有被启动。
+    const client = fakeClient(
+      fakeMessage([toolUseBlock("tu_1", "task", { prompt: "" })], "tool_use"),
+      fakeMessage([textBlock("parent done")], "end_turn"),
+    );
+    const messages: Anthropic.MessageParam[] = [
+      { role: "user", content: "go" },
+    ];
+
+    const result = await agentLoop(messages, {
+      client,
+      logger: noopLogger,
+      hooks: createHooks(noopLogger),
+    });
+
+    expect(result).toBe("parent done");
+    expect(client.messages.create).toHaveBeenCalledTimes(2);
+    const toolResults = messages[2].content as Anthropic.ToolResultBlockParam[];
+    expect(toolResults[0].content).toContain("Too small");
   });
 
   it("执行普通工具调用", async () => {
