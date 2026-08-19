@@ -23,10 +23,16 @@
  *   + Task 类型（id、subject、description、status、owner、blockedBy）
  *   + TaskStore：校验任务 ID、读写 <dir>/task_xxxxxxxx.json，目录不得越出工作区
  *   + tasksDirFor(sessionDir) = <session>/.tasks/
+ *   + updateDependencies：两阶段建图的第二步，加边时校验存在性、自依赖与成环
  *   + incompleteDependencies / canStart：依赖缺失或未完成即视为被阻塞
  *   + claimTask：设置 owner，pending -> in_progress
  *   + completeTask：校验 owner，置为 completed，并汇报刚被解除阻塞的下游任务
- *   + 5 个任务工具，合并进 s02 的 tools / TOOL_SCHEMAS 与 s03 的 dispatch 表
+ *   + 6 个任务工具，合并进 s02 的 tools / TOOL_SCHEMAS 与 s03 的 dispatch 表
+ *
+ * 任务图分两阶段构建：先 create_task 建出所有节点，再用返回的 ID 调 update_task
+ *   加边。模型可以在一条回复里并行发出多个 create_task，这些同级调用在任何
+ *   tool result 回传之前就已经定稿，所以某个 create_task 拿不到兄弟调用刚生成的
+ *   ID，边只能等 ID 回来之后再补。
  *
  * TS 特有说明：
  *   - code.py 用模块级的 TASKS = TaskStore(TASKS_DIR)；这里把 store 经 deps 传入
@@ -70,7 +76,9 @@ import { loadHooks, type Deps as S04Deps } from "../s04_hooks/main";
 const WORKDIR = process.cwd();
 const SYSTEM =
   `You are a coding agent at ${WORKDIR}. ` +
-  `Use task tools to track dependencies and progress.`;
+  `Use task tools to track dependencies and progress. Create all task nodes ` +
+  `first. After create_task returns runtime-generated IDs, use update_task ` +
+  `with those exact IDs to add dependencies.`;
 
 // deps 与 s04 一致，另加 tasks：任务存储由 session 持有并跨轮传入。
 export type Deps = S04Deps & { tasks: TaskStore };
@@ -106,6 +114,19 @@ export type Task = {
 // 校验放在拼路径之前，`..` 之类的输入连文件名都构不成。
 const TASK_ID_PATTERN = /^task_[0-9a-f]{8}$/;
 
+// 磁盘上的任务文件可能被手改或来自旧版本，读回来时整份校验，
+// 缺字段、状态非法都在 load 处就报错，而不是拖到用 blockedBy 时才炸。
+// 用 looseObject 保留未知字段：后续章节（s13）会在 Task 上加自己的字段，
+// 它们共用这个 store，校验不该把这些字段洗掉。
+const TaskSchema = z.looseObject({
+  id: z.string().regex(TASK_ID_PATTERN),
+  subject: z.string(),
+  description: z.string(),
+  status: z.enum(TASK_STATUSES),
+  owner: z.string().nullable(),
+  blockedBy: z.array(z.string()),
+});
+
 // 一份 .tasks/ 目录的读写封装：校验 ID、拼路径、序列化 JSON。
 export class TaskStore {
   constructor(readonly directory: string) {}
@@ -132,18 +153,11 @@ export class TaskStore {
     return fs.existsSync(this.taskPath(taskId));
   }
 
-  // 创建任务并立即落盘。subject 不能为空，依赖必须已经存在，
-  // 否则任务图一开始就指向一个永远不会完成的 ID。
-  create(subject: string, description = "", blockedBy: string[] = []): Task {
+  // 创建任务并立即落盘。新任务的 blockedBy 恒为空：建图的第二阶段
+  // 才由 updateDependencies 用返回的 ID 加边。
+  create(subject: string, description = ""): Task {
     const trimmed = subject.trim();
     if (!trimmed) throw new Error("Task subject cannot be empty");
-
-    const dependencies = [...new Set(blockedBy)];
-    for (const dependency of dependencies) {
-      if (!this.exists(dependency)) {
-        throw new Error(`Dependency not found: ${dependency}`);
-      }
-    }
 
     for (let attempt = 0; attempt < 100; attempt += 1) {
       const task: Task = {
@@ -152,7 +166,7 @@ export class TaskStore {
         description,
         status: "pending",
         owner: null,
-        blockedBy: dependencies,
+        blockedBy: [],
       };
       try {
         // "wx" = 排他创建：文件已存在就抛 EEXIST，换个 ID 重试。
@@ -169,6 +183,59 @@ export class TaskStore {
     throw new Error("Could not allocate a unique task ID");
   }
 
+  // taskId 沿 blockedBy 走下去能否到达 targetId。加边前用它判环：
+  // 要给 A 加依赖 B，而 B 已经（间接）依赖 A，这条边就会成环。
+  private dependsOn(taskId: string, targetId: string): boolean {
+    const pending = [taskId];
+    const visited = new Set<string>();
+    for (let current = pending.pop(); current; current = pending.pop()) {
+      if (current === targetId) return true;
+      if (visited.has(current)) continue;
+      visited.add(current);
+      pending.push(...this.load(current).blockedBy);
+    }
+    return false;
+  }
+
+  // 建图第二阶段：给已存在的任务加依赖边。先整轮校验再统一保存，
+  // 中途抛错不会留下改了一半的任务文件。
+  updateDependencies(taskId: string, addBlockedBy: string[]): Task {
+    const task = this.load(taskId);
+    // 已认领或已开工的任务不再改依赖，否则 canStart 的判定会在中途反悔。
+    if (task.status !== "pending" || task.owner !== null) {
+      throw new Error(
+        `Task ${taskId} dependencies can only be updated while ` +
+          "pending and unowned",
+      );
+    }
+
+    const dependencies = [...new Set(addBlockedBy)];
+    for (const dependency of dependencies) {
+      if (dependency === taskId) {
+        throw new Error("Task cannot depend on itself");
+      }
+      if (!this.exists(dependency)) {
+        throw new Error(`Dependency not found: ${dependency}`);
+      }
+      // 已经存在的边不必判环：它当初加进来时就查过了。
+      if (
+        !task.blockedBy.includes(dependency) &&
+        this.dependsOn(dependency, taskId)
+      ) {
+        throw new Error(
+          `Dependency cycle detected: ${taskId} -> ${dependency}`,
+        );
+      }
+    }
+
+    // 重复添加已有依赖是安全的，不产生重复边。
+    task.blockedBy.push(
+      ...dependencies.filter((d) => !task.blockedBy.includes(d)),
+    );
+    this.save(task);
+    return task;
+  }
+
   // 保存任务，覆盖原有内容。
   save(task: Task): void {
     fs.writeFileSync(
@@ -177,17 +244,14 @@ export class TaskStore {
     );
   }
 
-  // 读取任务；文件不存在、ID 对不上、状态不合法都抛错，
+  // 读取任务；文件不存在、内容不合 schema、ID 对不上都抛错，
   // 由调用方（callTool / incompleteDependencies）决定怎么收敛。
   load(taskId: string): Task {
-    const task = JSON.parse(
-      fs.readFileSync(this.taskPath(taskId), "utf8"),
-    ) as Task;
+    const task = TaskSchema.parse(
+      JSON.parse(fs.readFileSync(this.taskPath(taskId), "utf8")),
+    );
     if (task.id !== taskId) {
       throw new Error(`Task file ID does not match ${taskId}`);
-    }
-    if (!TASK_STATUSES.includes(task.status)) {
-      throw new Error(`Invalid task status: ${task.status}`);
     }
     return task;
   }
@@ -304,20 +368,29 @@ export function completeTask(
 
 // ── 任务工具的 handler ─────────────────────────────────────
 
-// 创建任务，回报 ID、subject 与（去重后的）依赖。
+// 创建任务，回报运行时生成的 ID，模型据此在第二阶段加边。
 export function runCreateTask(
   tasks: TaskStore,
   subject: string,
   description: string,
-  blockedBy: string[] | undefined,
   logger: SessionLogger,
 ): string {
-  const task = tasks.create(subject, description, blockedBy ?? []);
-  const deps = task.blockedBy.length
-    ? ` (blockedBy: ${task.blockedBy.join(", ")})`
-    : "";
-  logger.console(`  [create] ${task.subject}${deps}`, "blue");
-  return `Created ${task.id}: ${task.subject}${deps}`;
+  const task = tasks.create(subject, description);
+  logger.console(`  [create] ${task.subject}`, "blue");
+  return `Created ${task.id}: ${task.subject}`;
+}
+
+// 加依赖边，回报这个任务当前完整的 blockedBy。
+export function runUpdateTask(
+  tasks: TaskStore,
+  taskId: string,
+  addBlockedBy: string[],
+  logger: SessionLogger,
+): string {
+  const task = tasks.updateDependencies(taskId, addBlockedBy);
+  const deps = task.blockedBy.join(", ") || "(none)";
+  logger.console(`  [update] ${task.subject} blockedBy: ${deps}`, "blue");
+  return `Updated ${task.id} blockedBy: ${deps}`;
 }
 
 // 列出所有任务：状态标记 + owner + 依赖，一任务一行。
@@ -331,7 +404,7 @@ export function runListTasks(tasks: TaskStore): string {
   };
   return all
     .map((t) => {
-      const marker = markers[t.status] ?? "[?]";
+      const marker = markers[t.status];
       const deps = t.blockedBy.length
         ? ` (blockedBy: ${t.blockedBy.join(", ")})`
         : "";
@@ -348,8 +421,11 @@ export function makeTaskHandlers(
   logger: SessionLogger,
 ): Handlers {
   return {
-    create_task: ({ subject, description, blockedBy }) =>
-      runCreateTask(tasks, subject, description ?? "", blockedBy, logger),
+    create_task: ({ subject, description }) =>
+      runCreateTask(tasks, subject, description ?? "", logger),
+    // 依赖不存在、自依赖、成环都抛错，同样收敛成 tool_result 里的错误文本。
+    update_task: ({ task_id, addBlockedBy }) =>
+      runUpdateTask(tasks, task_id, addBlockedBy, logger),
     list_tasks: () => runListTasks(tasks),
     // 任务不存在直接抛错，由 callTool 收敛成 tool_result 里的错误文本。
     get_task: ({ task_id }) => getTask(tasks, task_id),
@@ -362,10 +438,16 @@ export function makeTaskHandlers(
 //  s10 新增：任务工具定义，合并进 s02 的工具集
 // ═══════════════════════════════════════════════════════════
 
-const createTaskSchema = z.object({
+// 建图这两个工具用 strictObject（JSON Schema 里就是 additionalProperties: false）
+// 并把 ID 格式写进 pattern：约束直接摆在模型看得到的 schema 里，
+// 比等 handler 抛错再让模型重试少绕一圈。
+const createTaskSchema = z.strictObject({
   subject: z.string(),
   description: z.string().optional(),
-  blockedBy: z.array(z.string()).optional(),
+});
+const updateTaskSchema = z.strictObject({
+  task_id: z.string().regex(TASK_ID_PATTERN),
+  addBlockedBy: z.array(z.string().regex(TASK_ID_PATTERN)).min(1),
 });
 const listTasksSchema = z.object({});
 const getTaskSchema = z.object({ task_id: z.string() });
@@ -375,8 +457,13 @@ const completeTaskSchema = z.object({ task_id: z.string() });
 const taskTools: Anthropic.Tool[] = [
   zodTool(
     "create_task",
-    "Create a task with optional dependencies.",
+    "Create a task and return its runtime-generated ID.",
     createTaskSchema,
+  ),
+  zodTool(
+    "update_task",
+    "Add dependencies using IDs returned by create_task.",
+    updateTaskSchema,
   ),
   zodTool(
     "list_tasks",
@@ -402,6 +489,7 @@ export const tools: Anthropic.Tool[] = [...s02Tools, ...taskTools];
 export const TOOL_SCHEMAS: Partial<Record<string, z.ZodObject>> = {
   ...S02_TOOL_SCHEMAS,
   create_task: createTaskSchema,
+  update_task: updateTaskSchema,
   list_tasks: listTasksSchema,
   get_task: getTaskSchema,
   claim_task: claimTaskSchema,
@@ -445,7 +533,7 @@ export async function executeTool(
 }
 
 // ═══════════════════════════════════════════════════════════
-//  agentLoop —— 结构同 s04，只是 dispatch 表多了 5 个任务工具
+//  agentLoop —— 结构同 s04，只是 dispatch 表多了 6 个任务工具
 // ═══════════════════════════════════════════════════════════
 
 export async function agentLoop(
@@ -482,10 +570,8 @@ export async function agentLoop(
 
     const results: Anthropic.ToolResultBlockParam[] = [];
     for (const block of response.content) {
-      if (block.type !== "tool_use") {
-        printProse(block);
-        continue;
-      }
+      printProse(block);
+      if (block.type !== "tool_use") continue;
       results.push({
         type: "tool_result",
         tool_use_id: block.id,

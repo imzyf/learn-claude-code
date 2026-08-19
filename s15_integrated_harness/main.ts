@@ -32,8 +32,8 @@
  *   + 错误恢复层（本章唯一的新机制）：429 / 529 退避重试、连续 529 切
  *     fallback model、max_tokens 先升配额再要求 continuation、
  *     prompt too long 触发一次 reactive compact
- *   + agentLoop：一轮里依次做后台通知注入 -> todo nag -> 压缩流水线 ->
- *     cron 注入 -> 组装 system + 工具池 -> 带恢复的模型调用 -> 工具轮
+ *   + agentLoop：一轮里依次做后台通知注入 -> 压缩流水线 -> cron 注入 ->
+ *     组装 system + 工具池 -> 带恢复的模型调用 -> 工具轮 + todo nag
  *   + 入口事件队列：用户输入 / cron 队列 / Lead 收件箱 / 后台完成，
  *     四种唤醒源共用一个队列，单消费者
  *
@@ -71,9 +71,7 @@ import { type Confirm, makeConfirm } from "../s03_permission/main";
 import type { HookSystem } from "../s04_hooks/main";
 // 来自 s05：todo 工具 + 唠叨计数器。
 import {
-  bumpNagCounter,
-  nagIfStale,
-  resetNagCounter,
+  createNagCounter,
   runTodoWrite,
   TOOL_SCHEMAS as S05_TOOL_SCHEMAS,
   tools as s05Tools,
@@ -499,6 +497,8 @@ export async function agentLoop(
   } = deps;
   const handlers = makeHarnessHandlers(deps);
   const state = new RecoveryState();
+  // s05 的唠叨计数器：每次 agentLoop 调用（= 一条用户输入）从 0 开始。
+  const nag = createNagCounter();
   let maxTokens = DEFAULT_MAX_TOKENS;
   // cron 注入的 prompt 也算本轮的授权请求：压缩后它和用户原话一起进
   // Authoritative request 段。
@@ -516,10 +516,8 @@ export async function agentLoop(
 
     // 1) 后台任务通知：上一轮派发、现在跑完的命令在这里回到对话。
     injectBackgroundResults(messages, background, logger);
-    // 2) 连续 3 轮没更新 todo 就补一条 <reminder>。
-    nagIfStale(messages, logger);
 
-    // 3) 压缩流水线：budget -> snip -> micro，仍超阈值才做 LLM 摘要。
+    // 2) 压缩流水线：budget -> snip -> micro，仍超阈值才做 LLM 摘要。
     replaceMessages(
       messages,
       toolResultBudget(messages, TOOL_RESULT_BUDGET, logger, sessionDir),
@@ -537,7 +535,7 @@ export async function agentLoop(
       );
     }
 
-    // 4) cron 注入放在调用之前：模型没接收就能原样撤回（同 s12）。
+    // 3) cron 注入放在调用之前：模型没接收就能原样撤回（同 s12）。
     const fired = consumeCronQueue(cron);
     const scheduledStart = messages.length;
     for (const job of fired) {
@@ -552,7 +550,7 @@ export async function agentLoop(
       waitingForAck = [...waitingForAck, ...fired];
     }
 
-    // 5) system prompt 与工具池都随状态变化，每轮重算。
+    // 4) system prompt 与工具池都随状态变化，每轮重算。
     const system = assembleSystemPrompt({
       skills,
       memoryIndex: readMemoryIndex(memoryDir),
@@ -582,7 +580,7 @@ export async function agentLoop(
       return errText;
     }
 
-    // 6) 带恢复的模型调用。
+    // 5) 带恢复的模型调用。
     let response: Anthropic.Message;
     try {
       logger.request(messages, true);
@@ -635,7 +633,7 @@ export async function agentLoop(
       waitingForAck = [];
     }
 
-    // 7) max_tokens：先升配额重来，再要求续写，都不行就把截断结果交出去。
+    // 6) max_tokens：先升配额重来，再要求续写，都不行就把截断结果交出去。
     if (response.stop_reason === "max_tokens") {
       if (!state.hasEscalated) {
         maxTokens = ESCALATED_MAX_TOKENS;
@@ -658,7 +656,7 @@ export async function agentLoop(
 
     messages.push({ role: "assistant", content: response.content });
 
-    // 8) 没有 tool_use block 就收尾：Stop hook -> 提取记忆 -> 归还目录 lease。
+    // 7) 没有 tool_use block 就收尾：Stop hook -> 提取记忆 -> 归还目录 lease。
     if (!hasToolUse(response)) {
       const force = await hooks.trigger("Stop", messages);
       if (force) {
@@ -672,10 +670,15 @@ export async function agentLoop(
       return textOf(response);
     }
 
-    // 9) 工具轮：hook 拦截 -> 后台派发 or 前台执行 -> hook 后处理。
-    bumpNagCounter();
-    let didCompact = false;
-    const results: Anthropic.ToolResultBlockParam[] = [];
+    // 8) 工具轮：hook 拦截 -> 后台派发 or 前台执行 -> hook 后处理。
+    nag.bump();
+    // compact 会重写整个 messages[]，但压缩排在本轮工具批次末尾：提前 break 会让
+    // 同批次里已经执行过的工具（文件已写、后台任务已派发）的输出既进不了 messages
+    // 也进不了摘要（对齐 code.py 的 compact_requested）。
+    let compactRequested = false;
+    // 类型是 ContentBlockParam[]：nag 的 <reminder> 作为 text block 挂在
+    // 同一条 user 消息末尾（同 s05）。
+    const results: Anthropic.ContentBlockParam[] = [];
     for (const block of response.content) {
       printProse(block);
       if (block.type !== "tool_use") continue;
@@ -690,15 +693,17 @@ export async function agentLoop(
         continue;
       }
 
-      // compact 会重写整个 messages[]，请求它的那次 tool_use 也会被摘要抹掉，
-      // 所以不能再追加对应的 tool_result（孤立引用会被 API 拒绝）。
+      // compact 自己也照常回一条 tool_result，不会留下孤立引用 —— compactHistory
+      // 会把整个 messages[] 换成一条摘要，tool_use 和 tool_result 一起消失。
       if (block.name === "compact") {
-        replaceMessages(
-          messages,
-          await compactHistory(messages, { ...deps, activeRequest }),
-        );
-        didCompact = true;
-        break;
+        compactRequested = true;
+        results.push({
+          type: "tool_result",
+          tool_use_id: block.id,
+          content:
+            "[Compaction requested. This completed turn will be summarized.]",
+        });
+        continue;
       }
 
       let output: string;
@@ -718,7 +723,7 @@ export async function agentLoop(
       }
 
       await hooks.trigger("PostToolUse", block, output);
-      if (block.name === "todo_write") resetNagCounter();
+      if (block.name === "todo_write") nag.reset();
 
       results.push({
         type: "tool_result",
@@ -727,8 +732,15 @@ export async function agentLoop(
       });
     }
 
-    if (didCompact) continue;
+    // 9) 连续 3 轮没更新 todo 就在同一条 user 消息里补一条 <reminder>。
+    nag.nagIfStale(results, logger);
     messages.push({ role: "user", content: results });
+    // 本轮结果入历史之后再压缩，摘要里才包含这一批工具做了什么。
+    if (compactRequested)
+      replaceMessages(
+        messages,
+        await compactHistory(messages, { ...deps, activeRequest }),
+      );
   }
 }
 

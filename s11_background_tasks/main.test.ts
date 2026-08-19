@@ -5,6 +5,7 @@
  *   - shouldRunBackground 只认显式的 run_in_background（纯函数）
  *   - runBashAsync / formatBashResult 的输出与退出码
  *   - BackgroundManager 派发 -> 完成 -> collect 通知的生命周期（含 failed）
+ *   - stopBackgroundProcesses 停掉仍在跑的命令（退出路径）
  *   - injectBackgroundResults 并进末尾 user 消息 / 单开一条消息
  *   - bash 工具覆盖后仍带 run_in_background，其余四个工具不变
  *   - agentLoop 端到端派发一次后台 bash，回传占位符
@@ -27,6 +28,7 @@ import {
   injectBackgroundResults,
   runBashAsync,
   shouldRunBackground,
+  stopBackgroundProcesses,
   TOOL_SCHEMAS,
   tools,
 } from "./main";
@@ -162,6 +164,23 @@ describe("BackgroundManager", () => {
     );
     expect(background.collect(noopLogger)).toHaveLength(0);
     expect(background.tasks.bg_0001).toBeDefined();
+  });
+});
+
+// ── 退出清理：停掉仍在跑的命令，否则子进程会 ref 住事件循环 ──
+describe("stopBackgroundProcesses", () => {
+  it("终止仍在运行的后台命令", async () => {
+    const background = new BackgroundManager();
+    background.start(
+      toolUseBlock("tu_1", "bash", { command: "sleep 30" }),
+      noopLogger,
+    );
+    // 等子进程真正起来，再发信号。
+    await sleep(50);
+    stopBackgroundProcesses();
+
+    await waitFor(() => background.tasks.bg_0001?.status !== "running");
+    expect(background.tasks.bg_0001.status).toBe("failed");
   });
 });
 

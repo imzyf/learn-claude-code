@@ -157,7 +157,10 @@ describe("claimTask / completeTask", () => {
   it("拒绝认领已有负责人或被阻塞的任务", () => {
     const team = newTeam();
     const base = team.tasks.create("schema");
-    const dependent = team.tasks.create("api", "", [base.id]);
+    const dependent = team.tasks.updateDependencies(
+      team.tasks.create("api").id,
+      [base.id],
+    );
 
     claimTask(team, base.id, "alice", noopLogger);
     expect(claimTask(team, base.id, "bob", noopLogger)).toContain(
@@ -171,7 +174,7 @@ describe("claimTask / completeTask", () => {
   it("仅允许负责人完成任务并报告解除阻塞的工作", () => {
     const team = newTeam();
     const base = team.tasks.create("schema");
-    team.tasks.create("api", "", [base.id]);
+    team.tasks.updateDependencies(team.tasks.create("api").id, [base.id]);
     claimTask(team, base.id, "alice", noopLogger);
 
     expect(completeTask(team, base.id, "bob", noopLogger)).toContain(
@@ -249,7 +252,7 @@ describe("scanUnclaimedTasks / claimNextTask", () => {
   it("只提供已就绪且没有负责人的任务", () => {
     const team = newTeam();
     const base = team.tasks.create("schema");
-    team.tasks.create("api", "", [base.id]);
+    team.tasks.updateDependencies(team.tasks.create("api").id, [base.id]);
     const free = team.tasks.create("docs");
     claimTask(team, base.id, "alice", noopLogger);
 

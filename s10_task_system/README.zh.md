@@ -26,7 +26,7 @@ TodoWrite 没有记录这些依赖和分工。它可以显示“编写 API”仍
 
 ![Task System Overview](images/task-system-overview.svg)
 
-代码保留 S04 的五个基础工具、Permission、Hooks 和统一 `execute_tool`，再加入 5 个任务工具、`.tasks/` 目录持久化和 `blockedBy` 依赖检查。
+代码保留 S04 的五个基础工具、Permission、Hooks 和统一 `execute_tool`，再加入 6 个任务工具、`.tasks/` 目录持久化和 `blockedBy` 依赖检查。
 
 TodoWrite vs Task System：
 
@@ -69,12 +69,22 @@ ID 使用 `task_` 加 8 位随机十六进制字符生成。创建文件时使�
 ### create_task: 创建任务
 
 ```python
-def create_task(subject: str, description: str = "",
-                blockedBy: list[str] | None = None) -> Task:
-    return TASKS.create(subject, description, blockedBy)
+def create_task(subject: str, description: str = "") -> Task:
+    return TASKS.create(subject, description)
 ```
 
-`TaskStore.create` 检查 subject 和依赖 ID，再把任务写入 `.tasks/{id}.json`。`blockedBy` 声明依赖，比如“写 API”的 `blockedBy` 可以指向数据库任务的 ID。
+`TaskStore.create` 检查 subject，分配随机 ID，再把任务写入 `.tasks/{id}.json`。新任务的 `blockedBy` 固定为空，工具结果会把运行时生成的 ID 返回给模型。
+
+### update_task: 使用返回的 ID 添加依赖
+
+```python
+def update_task(task_id: str, addBlockedBy: list[str]) -> Task:
+    return TASKS.update_dependencies(task_id, addBlockedBy)
+```
+
+任务图采用两阶段构建：先创建所有节点，再使用 `create_task` 返回的 ID 调用 `update_task` 添加边。模型可能在一条回复里同时发出多个工具调用，而这些同级调用在任何工具结果产生前就已经确定，因此某个 `create_task` 无法直接使用另一个调用刚生成的 ID。
+
+`update_task` 会先校验整次修改，再统一保存。目标任务和依赖必须存在，目标必须仍为 pending 且无人认领，并且不能形成自依赖或环。重复添加已有依赖是安全的，不会产生重复边。
 
 ### can_start: 依赖检查
 
@@ -159,11 +169,16 @@ pending ──claim──→ in_progress ──complete──→ completed
 ### 合起来跑
 
 ```python
-# 创建有依赖的任务
+# 第一阶段：创建所有节点并取得运行时 ID
 schema = create_task("setup database schema")
-endpoints = create_task("create API endpoints", blockedBy=[schema.id])
-tests = create_task("write tests", blockedBy=[endpoints.id])
-docs = create_task("write docs", blockedBy=[schema.id])
+endpoints = create_task("create API endpoints")
+tests = create_task("write tests")
+docs = create_task("write docs")
+
+# 第二阶段：使用返回的 ID 建立依赖边
+update_task(endpoints.id, addBlockedBy=[schema.id])
+update_task(tests.id, addBlockedBy=[endpoints.id])
+update_task(docs.id, addBlockedBy=[schema.id])
 
 # Agent 认领第一个可做的任务
 claim_task(schema.id)       # ✓ Claimed (无依赖)
@@ -179,7 +194,7 @@ claim_task(tests.id)        # ✓ Claimed (endpoints 已完成)
 complete_task(tests.id)     # ✓ Completed
 ```
 
-每个 `create_task` 写一个 JSON 文件，每个 `claim_task` / `complete_task` 更新文件。跨会话时，`.tasks/` 目录还在，Agent 读文件就能恢复进度。
+每个 `create_task` 写一个 JSON 文件，`update_task`、`claim_task` 和 `complete_task` 更新文件。跨会话时，`.tasks/` 目录还在，Agent 读文件就能恢复进度。
 
 ---
 
@@ -208,4 +223,4 @@ python s10_task_system/code.py
 s11 Background Tasks → 把慢操作放到后台。Agent 可以继续处理其他任务，后台执行完成后再接收通知。
 
 
-<!-- translation-sync: zh@v4, en@v4, ja@v4 -->
+<!-- translation-sync: zh@v5, en@v5, ja@v5 -->

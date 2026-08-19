@@ -53,7 +53,9 @@ MODEL = os.environ["MODEL_ID"]
 
 SYSTEM = (
     f"You are a coding agent at {WORKDIR}. "
-    "Use task tools to track dependencies and progress."
+    "Use task tools to track dependencies and progress. Create all task nodes "
+    "first. After create_task returns runtime-generated IDs, use update_task "
+    "with those exact IDs to add dependencies."
 )
 
 
@@ -97,16 +99,10 @@ class TaskStore:
     def exists(self, task_id: str) -> bool:
         return self._path(task_id).is_file()
 
-    def create(self, subject: str, description: str = "",
-               blocked_by: list[str] | None = None) -> Task:
+    def create(self, subject: str, description: str = "") -> Task:
         subject = subject.strip()
         if not subject:
             raise ValueError("Task subject cannot be empty")
-
-        dependencies = list(dict.fromkeys(blocked_by or []))
-        for dependency in dependencies:
-            if not self.exists(dependency):
-                raise ValueError(f"Dependency not found: {dependency}")
 
         self._root(create=True)
         for _ in range(100):
@@ -116,7 +112,7 @@ class TaskStore:
                 description=description,
                 status="pending",
                 owner=None,
-                blockedBy=dependencies,
+                blockedBy=[],
             )
             try:
                 with self._path(task.id, create_root=True).open(
@@ -127,6 +123,52 @@ class TaskStore:
             except FileExistsError:
                 continue
         raise RuntimeError("Could not allocate a unique task ID")
+
+    def _depends_on(self, task_id: str, target_id: str) -> bool:
+        """Return whether task_id transitively depends on target_id."""
+        pending = [task_id]
+        visited = set()
+        while pending:
+            current = pending.pop()
+            if current == target_id:
+                return True
+            if current in visited:
+                continue
+            visited.add(current)
+            pending.extend(self.load(current).blockedBy)
+        return False
+
+    def update_dependencies(self, task_id: str,
+                            add_blocked_by: list[str]) -> Task:
+        if not isinstance(add_blocked_by, list):
+            raise ValueError("addBlockedBy must be a list of task IDs")
+
+        task = self.load(task_id)
+        if task.status != "pending" or task.owner is not None:
+            raise ValueError(
+                f"Task {task_id} dependencies can only be updated while "
+                "pending and unowned"
+            )
+
+        dependencies = list(dict.fromkeys(add_blocked_by))
+        for dependency in dependencies:
+            if dependency == task_id:
+                raise ValueError("Task cannot depend on itself")
+            if not self.exists(dependency):
+                raise ValueError(f"Dependency not found: {dependency}")
+            if dependency not in task.blockedBy and self._depends_on(
+                dependency, task_id
+            ):
+                raise ValueError(
+                    f"Dependency cycle detected: {task_id} -> {dependency}"
+                )
+
+        task.blockedBy.extend(
+            dependency for dependency in dependencies
+            if dependency not in task.blockedBy
+        )
+        self.save(task)
+        return task
 
     def save(self, task: Task) -> None:
         self._path(task.id, create_root=True).write_text(
@@ -154,9 +196,12 @@ class TaskStore:
 TASKS = TaskStore(TASKS_DIR)
 
 
-def create_task(subject: str, description: str = "",
-                blockedBy: list[str] | None = None) -> Task:
-    return TASKS.create(subject, description, blockedBy)
+def create_task(subject: str, description: str = "") -> Task:
+    return TASKS.create(subject, description)
+
+
+def update_task(task_id: str, addBlockedBy: list[str]) -> Task:
+    return TASKS.update_dependencies(task_id, addBlockedBy)
 
 
 def load_task(task_id: str) -> Task:
@@ -290,15 +335,17 @@ def run_glob(pattern: str) -> str:
         return f"Error: {error}"
 
 
-def run_create_task(subject: str, description: str = "",
-                    blockedBy: list[str] | None = None) -> str:
-    task = create_task(subject, description, blockedBy)
-    dependencies = (
-        f" (blockedBy: {', '.join(task.blockedBy)})"
-        if task.blockedBy else ""
-    )
-    print(f"  [create] {task.subject}{dependencies}")
-    return f"Created {task.id}: {task.subject}{dependencies}"
+def run_create_task(subject: str, description: str = "") -> str:
+    task = create_task(subject, description)
+    print(f"  [create] {task.subject}")
+    return f"Created {task.id}: {task.subject}"
+
+
+def run_update_task(task_id: str, addBlockedBy: list[str]) -> str:
+    task = update_task(task_id, addBlockedBy)
+    dependencies = ", ".join(task.blockedBy) or "(none)"
+    print(f"  [update] {task.subject} blockedBy: {dependencies}")
+    return f"Updated {task.id} blockedBy: {dependencies}"
 
 
 def run_list_tasks() -> str:
@@ -347,8 +394,10 @@ TOOLS = [
      "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}}, "required": ["path", "old_text", "new_text"]}},
     {"name": "glob", "description": "Find files matching a glob pattern.",
      "input_schema": {"type": "object", "properties": {"pattern": {"type": "string"}}, "required": ["pattern"]}},
-    {"name": "create_task", "description": "Create a task with optional dependencies.",
-     "input_schema": {"type": "object", "properties": {"subject": {"type": "string"}, "description": {"type": "string"}, "blockedBy": {"type": "array", "items": {"type": "string"}}}, "required": ["subject"]}},
+    {"name": "create_task", "description": "Create a task and return its runtime-generated ID.",
+     "input_schema": {"type": "object", "properties": {"subject": {"type": "string"}, "description": {"type": "string"}}, "required": ["subject"], "additionalProperties": False}},
+    {"name": "update_task", "description": "Add dependencies using IDs returned by create_task.",
+     "input_schema": {"type": "object", "properties": {"task_id": {"type": "string", "pattern": "^task_[0-9a-f]{8}$"}, "addBlockedBy": {"type": "array", "items": {"type": "string", "pattern": "^task_[0-9a-f]{8}$"}, "minItems": 1}}, "required": ["task_id", "addBlockedBy"], "additionalProperties": False}},
     {"name": "list_tasks", "description": "List tasks with status, owner, and dependencies.",
      "input_schema": {"type": "object", "properties": {}}},
     {"name": "get_task", "description": "Get a task by ID.",
@@ -366,6 +415,7 @@ TOOL_HANDLERS = {
     "edit_file": run_edit,
     "glob": run_glob,
     "create_task": run_create_task,
+    "update_task": run_update_task,
     "list_tasks": run_list_tasks,
     "get_task": run_get_task,
     "claim_task": run_claim_task,

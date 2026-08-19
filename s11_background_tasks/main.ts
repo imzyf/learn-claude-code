@@ -31,6 +31,8 @@
  *     前台 bash 仍走 s03 的同步 runBash。
  *   - Python 在 import 时就 atexit.register + signal.signal；这里保持 import 无副作用，
  *     进程组清理在第一次派发后台任务时才安装（installShellCleanup 幂等）。
+ *   - Python 的 daemon 线程不会拖住退出；Node 的子进程会 ref 住事件循环，
+ *     所以 REPL 退出时要显式调用 stopBackgroundProcesses()。
  *   - tool_result 块和文本通知可以放进同一条 user 消息（content 是数组，
  *     可以混装多种 block），和 Python 的 inject_background_results 一致。
  *
@@ -115,30 +117,36 @@ function killGroup(pid: number, signal: NodeJS.Signals): boolean {
   }
 }
 
+// 停掉所有还在跑的后台命令及其进程组。
+// 子进程和它的 stdout / stderr pipe 都 ref 住事件循环，只要还有命令在跑，
+// Node 就不会退出；REPL 收到 q 之后必须显式调用这个函数，对应 Python
+// daemon 线程「主线程退出即结束」的语义。
+export function stopBackgroundProcesses(): void {
+  for (const child of liveProcesses) {
+    if (child.pid !== undefined) {
+      killGroup(child.pid, "SIGTERM");
+      killGroup(child.pid, "SIGKILL");
+    }
+  }
+  liveProcesses.clear();
+}
+
 // 进程退出前收尾：还在跑的后台命令连同其进程组一起停掉。
 // Python 用 atexit + SIGTERM handler，这里对应 exit / SIGTERM / SIGINT 三个事件。
 export function installShellCleanup(): void {
   if (cleanupInstalled) return;
   cleanupInstalled = true;
-  const stopAll = () => {
-    for (const child of liveProcesses) {
-      if (child.pid !== undefined) {
-        killGroup(child.pid, "SIGTERM");
-        killGroup(child.pid, "SIGKILL");
-      }
-    }
-    liveProcesses.clear();
-  };
-  process.on("exit", stopAll);
+  process.on("exit", stopBackgroundProcesses);
   for (const signal of ["SIGTERM", "SIGINT"] as const) {
     process.on(signal, () => {
-      stopAll();
+      stopBackgroundProcesses();
       process.exit(128 + (signal === "SIGTERM" ? 15 : 2));
     });
   }
 }
 
-// 输出上限，同 s02/s03 的前台 bash；累积时就设上限，避免长跑命令把内存吃满。
+// 输出上限，同 s02/s03 的前台 bash：累积时限流（单块可能略微超出），
+// 返回前再截断，避免长跑命令把内存吃满。
 const OUTPUT_LIMIT = 50_000;
 
 // 后台执行用的异步 bash —— 独立子进程 + 独立进程组，不阻塞事件循环。
@@ -193,7 +201,10 @@ export async function runBashAsync(
   });
 }
 
-// 退出码非 0 时在输出前面标一行，和前台 bash 的结果格式保持一致。
+// 退出码非 0 时在输出前面标一行。这是后台路径独有的：前台走 s01 的 runBash，
+// 只回 stdout + stderr，不带退出码（Python 两条路径共用 _format_bash_result，
+// 这里为了复用 s01 而分叉）。同理，前台的 isDangerous 只拦前台，后台命令的
+// 拦截由 PreToolUse 的 DENY_LIST 负责。
 export function formatBashResult(
   output: string,
   exitCode: number | null,
@@ -216,8 +227,13 @@ export type BackgroundTask = {
 
 // 模型显式请求才进后台：只认 bash 上明确为 true 的 run_in_background，
 // 不再按 install / build / test 之类的关键词猜测。
-export function shouldRunBackground(toolName: string, toolInput: any): boolean {
-  return toolName === "bash" && toolInput?.run_in_background === true;
+export function shouldRunBackground(
+  toolName: string,
+  toolInput: unknown,
+): boolean {
+  const flag = (toolInput as { run_in_background?: unknown } | null)
+    ?.run_in_background;
+  return toolName === "bash" && flag === true;
 }
 
 // 后台任务的登记簿：进行中的任务、已完成的输出，以及一条完成队列。
@@ -491,4 +507,6 @@ if (import.meta.main) {
     print();
   }
   rl.close();
+  // 未完成的后台命令会 ref 住事件循环，退出前主动停掉，不然要等它跑完（或 120s 超时）。
+  stopBackgroundProcesses();
 }

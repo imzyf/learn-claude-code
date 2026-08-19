@@ -144,6 +144,9 @@ const TEMPORARY_MEMORY_MARKERS = [
   "本次任务",
   "当前任务",
   "暂时",
+  "今回だけ",
+  "このセッション",
+  "現在のタスク",
 ];
 // 召回正文的总长上限：命中太多记忆时按顺序截断，避免挤掉当前请求。
 const RECALL_CHAR_LIMIT = 20_000;
@@ -396,10 +399,12 @@ export async function selectRelevantMemories(
       }
     }
 
-    logger.console(
-      `[Memory] select relevant by LLM: ${selected.join(", ")}`,
-      "yellow",
-    );
+    if (selected.length) {
+      logger.console(
+        `[Memory] select relevant by LLM: ${selected.join(", ")}`,
+        "yellow",
+      );
+    }
 
     return selected;
   } catch (e) {
@@ -409,10 +414,12 @@ export async function selectRelevantMemories(
       "red",
     );
     const selected = keywordMemorySelection(files, query, maxItems);
-    logger.console(
-      `[Memory] select relevant by keyword: ${selected.join(", ")}`,
-      "yellow",
-    );
+    if (selected.length) {
+      logger.console(
+        `[Memory] select relevant by keyword: ${selected.join(", ")}`,
+        "yellow",
+      );
+    }
     return selected;
   }
 }
@@ -426,16 +433,24 @@ export function keywordMemorySelection(
   const words = new Set(
     query.toLowerCase().match(/[a-z0-9_]{3,}|[一-鿿]{2,}/g) ?? [],
   );
-  return files
-    .map((f) => {
-      const text = `${f.name} ${f.description}`.toLowerCase();
-      const score = [...words].filter((w) => text.includes(w)).length;
-      return { filename: f.filename, score };
-    })
-    .filter((item) => item.score > 0)
-    .sort((a, b) => b.score - a.score || a.filename.localeCompare(b.filename))
-    .slice(0, maxItems)
-    .map((item) => item.filename);
+  return (
+    files
+      .map((f) => {
+        const text = `${f.name} ${f.description}`.toLowerCase();
+        const score = [...words].filter((w) => text.includes(w)).length;
+        return { filename: f.filename, score };
+      })
+      .filter((item) => item.score > 0)
+      // 同分时按文件名的 codepoint 序兜底（同 memoryFilenames 与 s07 的 scanSkills）：
+      // localeCompare 会把 'a' 排到 'B' 前面，召回顺序就和 Python 版对不上了。
+      .sort(
+        (a, b) =>
+          b.score - a.score ||
+          (a.filename < b.filename ? -1 : a.filename > b.filename ? 1 : 0),
+      )
+      .slice(0, maxItems)
+      .map((item) => item.filename)
+  );
 }
 // 取最近三条非空用户消息（按时间顺序），截断到 4000 字符。
 export function recentUserText(
@@ -703,13 +718,17 @@ export async function consolidateMemories(
     };
     try {
       removeRecords();
+      // 整合是一次批量替换：逐条直接写盘，索引等全部写完再重建一次
+      //（走 writeMemoryFile 会每写一条就重扫一遍目录）。
       for (const record of consolidated) {
-        writeMemoryFile(
-          dir,
-          record.name,
-          record.type,
-          record.description,
-          record.body,
+        fs.writeFileSync(
+          memoryPath(dir, `${memorySlug(record.name)}.md`),
+          memoryDocument(
+            record.name,
+            record.type,
+            record.description,
+            record.body,
+          ),
         );
       }
       rebuildIndex(dir);
@@ -806,9 +825,14 @@ export async function agentLoop(
         messages.push({ role: "user", content: force });
         continue;
       }
-      // s09（step 4）：对话告一段落 —— 用压缩前快照提取新记忆；
+      // s09（step 4）：对话告一段落 —— 用压缩前快照加上本轮收尾回复提取新记忆
+      //（收尾回复此时才产生，不在快照里，而稳定事实常常就写在这句话上）；
       // s09（step 5）：真的写入了才检查是否需要整理（未到阈值内部直接返回）。
-      if (await extractMemories(memoryDir, preCompact, deps)) {
+      const transcript: Anthropic.MessageParam[] = [
+        ...preCompact,
+        { role: "assistant", content: response.content },
+      ];
+      if (await extractMemories(memoryDir, transcript, deps)) {
         await consolidateMemories(memoryDir, deps);
       }
 

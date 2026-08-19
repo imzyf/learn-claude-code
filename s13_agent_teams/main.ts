@@ -79,6 +79,7 @@ import {
   getTask,
   incompleteDependencies,
   runCreateTask,
+  runUpdateTask,
   TOOL_SCHEMAS as S10_TOOL_SCHEMAS,
   tools as s10Tools,
   type Task,
@@ -835,7 +836,9 @@ export function makeWorkspaceHandlers(resolveCwd: CwdResolver): Handlers {
       }),
     read_file: ({ path: p, limit }) =>
       withCwd((cwd) => {
-        let lines = fs.readFileSync(resolveIn(cwd, p), "utf8").split("\n");
+        // 对齐 Python 的 splitlines()：结尾换行不产生多余空行，CRLF 不残留 \r。
+        let lines = fs.readFileSync(resolveIn(cwd, p), "utf8").split(/\r?\n/);
+        if (lines.at(-1) === "") lines.pop();
         if (limit && limit < lines.length) {
           lines = [
             ...lines.slice(0, limit),
@@ -1459,8 +1462,11 @@ export function makeLeadTaskHandlers(
   logger: SessionLogger,
 ): Handlers {
   return {
-    create_task: ({ subject, description, blockedBy }) =>
-      runCreateTask(team.tasks, subject, description ?? "", blockedBy, logger),
+    create_task: ({ subject, description }) =>
+      runCreateTask(team.tasks, subject, description ?? "", logger),
+    // 只有 Lead 能改依赖：队友工具集里没有 update_task。
+    update_task: ({ task_id, addBlockedBy }) =>
+      runUpdateTask(team.tasks, task_id, addBlockedBy, logger),
     list_tasks: () => runListTasks(team),
     get_task: ({ task_id }) => getTask(team.tasks, task_id),
     claim_task: ({ task_id }) => claimTask(team, task_id, "agent", logger),
@@ -1665,9 +1671,13 @@ export const PROMPT_SECTIONS: Record<string, string> = {
   identity: "You are a coding agent. Act, don't explain.",
   tools:
     "Available tools: bash, read_file, write_file, edit_file, glob, get_task, " +
-    "create_task, list_tasks, claim_task, complete_task, spawn_teammate, " +
-    "list_teammates, send_message, request_shutdown, request_plan, review_plan, " +
-    "create_worktree.",
+    "create_task, update_task, list_tasks, claim_task, complete_task, " +
+    "spawn_teammate, list_teammates, send_message, request_shutdown, " +
+    "request_plan, review_plan, create_worktree.",
+  tasks:
+    "Create all task nodes first. Only after create_task returns " +
+    "runtime-generated IDs, use update_task with those exact IDs to add " +
+    "dependencies. Only the Lead changes task dependencies.",
   teams:
     "When parallel work would help, first propose a small team with clear " +
     "responsibilities and wait for the user's confirmation. Do not call " +

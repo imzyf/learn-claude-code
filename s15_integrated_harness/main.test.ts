@@ -23,7 +23,6 @@ import {
   toolUseBlock,
 } from "../lib/testing";
 import { createHooks, type HookSystem } from "../s04_hooks/main";
-import { resetNagCounter } from "../s05_todo_write/main";
 import { BackgroundManager } from "../s11_background_tasks/main";
 import { createCronState, scheduleJob } from "../s12_cron_scheduler/main";
 import { createTeamState } from "../s13_agent_teams/main";
@@ -53,9 +52,6 @@ import {
 let dir = "";
 beforeEach(() => {
   dir = makeTempDir(import.meta.dirname);
-  // 唠叨计数器是 s05 的模块级状态，用例之间要复位，否则会被上一个用例
-  // 攒下的轮数带出一条 <reminder>。
-  resetNagCounter();
 });
 afterEach(() => {
   fs.rmSync(dir, { recursive: true, force: true });
@@ -369,6 +365,37 @@ describe("agentLoop", () => {
     expect(String(messages[0].content)).toContain("[Compacted]");
     expect(String(messages[0].content)).toContain("太长了，压缩一下");
     expect(messages.some((m) => JSON.stringify(m).includes("t1"))).toBe(false);
+  });
+
+  it("compact 与其他工具同批次时，先跑完整批再压缩", async () => {
+    const { client } = harnessClient(
+      fakeMessage(
+        [
+          toolUseBlock("t1", "bash", { command: "echo before-compact" }),
+          toolUseBlock("t2", "compact", {}),
+        ],
+        "tool_use",
+      ),
+      fakeMessage([textBlock("compacted")], "end_turn"),
+    );
+    const request = "跑完这一批再压缩";
+    const messages: Anthropic.MessageParam[] = [
+      { role: "user", content: request },
+    ];
+
+    const deps = { ...makeDeps(client), activeRequest: request };
+    expect(await agentLoop(messages, deps)).toBe("compacted");
+    // 同批次里排在 compact 之前的工具，其结果要先入历史再被摘要吸收 ——
+    // 提前 break 的话这次 bash 白跑，模型看不到输出。
+    const subRequests = vi
+      .mocked(client.messages.create)
+      .mock.calls.map((call) => call[0])
+      .filter((params) => !params.tools);
+    expect(JSON.stringify(subRequests)).toContain(
+      '\\"tool_use_id\\":\\"t1\\",\\"content\\":\\"before-compact\\"',
+    );
+    expect(messages).toHaveLength(2);
+    expect(String(messages[0].content)).toContain("[Compacted]");
   });
 
   it("后台 bash 先回占位结果，完成后以 task_notification 回到对话", async () => {
