@@ -138,6 +138,7 @@ describe("scanSkills", () => {
       '---\nname: "  "\ndescription: ""\n---\n# Blank meta\n',
     );
     skill("numeric-meta", "---\nname: 123\ndescription: 456\n---\n# Numeric\n");
+    skill(".hidden", "---\nname: hidden\n---\nbody"); // dot dir → skipped
     fs.mkdirSync(path.join(dir, "not-a-skill"), { recursive: true }); // no SKILL.md → skipped
     fs.writeFileSync(path.join(dir, "loose.txt"), "ignored"); // top-level file → skipped
   });
@@ -146,7 +147,7 @@ describe("scanSkills", () => {
     expect(scanSkills(path.join(dir, "nope"))).toEqual({});
   });
 
-  it("只收录带 SKILL.md 的目录，其余跳过", () => {
+  it("只收录带 SKILL.md 的普通目录，隐藏目录与其余的跳过", () => {
     const reg = scanSkills(dir);
     expect(Object.keys(reg).sort()).toEqual([
       "blank-meta",
@@ -249,6 +250,13 @@ describe("loadSkill", () => {
       "Error: Unknown skill 'ghost'. Available: none",
     );
   });
+
+  it("Object.prototype 上的名字不算命中", () => {
+    expect(loadSkill(registry, "constructor")).toBe(
+      "Error: Unknown skill 'constructor'. Available: code-review, pdf",
+    );
+    expect(loadSkill(registry, "toString")).toContain("Unknown skill");
+  });
 });
 
 // ── runLoadSkill: 专属 skill 日志通道 ─────────────────────
@@ -314,6 +322,32 @@ describe("agentLoop", () => {
     expect(client.messages.create).toHaveBeenCalledTimes(2);
     const toolResults = messages[2].content as Anthropic.ToolResultBlockParam[];
     expect(toolResults[0].content).toBe("FULL code-review content");
+  });
+
+  it("模型发来畸形 input 时收成 tool_result 错误文案，不中断循环", async () => {
+    const client = fakeClient(
+      // load_skill 要 { name: string }，这里给了 number
+      fakeMessage(
+        [toolUseBlock("tu_1", "load_skill", { name: 1 })],
+        "tool_use",
+      ),
+      fakeMessage([textBlock("recovered")], "end_turn"),
+    );
+    const messages: Anthropic.MessageParam[] = [
+      { role: "user", content: "go" },
+    ];
+
+    const result = await agentLoop(messages, {
+      client,
+      logger: noopLogger,
+      hooks: createHooks(noopLogger),
+      skills: registry,
+      system: "test",
+    });
+
+    expect(result).toBe("recovered");
+    const toolResults = messages[2].content as Anthropic.ToolResultBlockParam[];
+    expect(toolResults[0].content).toMatch(/^Error: /);
   });
 
   it("执行一次普通工具调用", async () => {

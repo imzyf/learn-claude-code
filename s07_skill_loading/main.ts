@@ -47,8 +47,9 @@ import { colorize, print } from "../lib/terminal";
 import { hasToolUse, printProse, textOf, zodTool } from "../lib/tools";
 // 来自 s02：基础工具层（bash + 四个文件工具）。
 import {
-  tools as baseTools,
+  errMsg,
   TOOL_SCHEMAS as S02_TOOL_SCHEMAS,
+  tools as s02Tools,
 } from "../s02_tool_use/main";
 import type { Deps as S04Deps } from "../s04_hooks/main";
 // 来自 s05：hook 装配（loadHooks = createHooks + registerDefaultHooks）+ 基础
@@ -114,11 +115,15 @@ export function scanSkills(dir: string): SkillRegistry {
   const registry: SkillRegistry = {};
   if (!fs.existsSync(dir)) return registry;
   const root = fs.realpathSync(dir);
+  // 按名字的 codepoint 序排（对齐 code.py 的 sorted(glob(...))）；localeCompare 会
+  // 把 'a' 排到 'B' 前面，目录顺序就和 Python 版对不上了。
   const entries = fs
     .readdirSync(dir, { withFileTypes: true })
-    .sort((a, b) => a.name.localeCompare(b.name));
+    .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
+    // 隐藏目录跳过：Python 的 glob("*/SKILL.md") 不匹配以 . 开头的目录。
+    if (entry.name.startsWith(".")) continue;
     const manifest = path.join(dir, entry.name, "SKILL.md");
     if (!fs.existsSync(manifest)) continue;
     // 必须是普通文件，且解完符号链接后仍在 skills/ 里：skills/x/SKILL.md 指向
@@ -150,6 +155,11 @@ function collapse(text: string): string {
     .trim();
 }
 
+// registry 是普通对象，查表要走自有属性，别落到 Object.prototype 上。
+export function hasSkill(registry: SkillRegistry, name: string): boolean {
+  return Object.hasOwn(registry, name);
+}
+
 // 列出所有技能（名称 + 一行描述）。
 export function listSkills(registry: SkillRegistry): string {
   const skills = Object.values(registry);
@@ -177,9 +187,10 @@ export function loadSkills(dir: string, logger: SessionLogger): SkillRegistry {
 
 // 加载技能完整内容。经 registry 查表——不做路径拼接，杜绝目录穿越。
 // 查不到时把可选名字一并回给模型，它下一轮就能改用正确的名字。
+// 用 Object.hasOwn 而非 registry[name] 的真值判断：name 由模型给，`constructor`
+// / `toString` 会命中 Object.prototype，拿到一个真值但 .content 是 undefined。
 export function loadSkill(registry: SkillRegistry, name: string): string {
-  const skill = registry[name];
-  if (skill) return skill.content;
+  if (hasSkill(registry, name)) return registry[name].content;
   const available = Object.keys(registry).join(", ") || "none";
   return `Error: Unknown skill '${name}'. Available: ${available}`;
 }
@@ -206,7 +217,7 @@ export function logSkill(
 // loadSkill 保持纯查表，日志这个副作用留在这层 wrapper。
 export function runLoadSkill(name: string, deps: Deps): string {
   const content = loadSkill(deps.skills, name);
-  const found = deps.skills[name] !== undefined;
+  const found = hasSkill(deps.skills, name);
   logSkill(deps.logger, name, found, content.length);
   return content;
 }
@@ -219,7 +230,7 @@ export function runLoadSkill(name: string, deps: Deps): string {
 const loadSkillSchema = z.object({ name: z.string() });
 
 export const tools: Anthropic.Tool[] = [
-  ...baseTools,
+  ...s02Tools,
   // s07 新增：load_skill（目录已在 SYSTEM 里，这里加载完整内容）
   zodTool(
     "load_skill",
@@ -276,10 +287,8 @@ export async function agentLoop(
 
     const results: Anthropic.ToolResultBlockParam[] = [];
     for (const block of response.content) {
-      if (block.type !== "tool_use") {
-        printProse(block);
-        continue;
-      }
+      printProse(block);
+      if (block.type !== "tool_use") continue;
 
       const blocked = await hooks.trigger("PreToolUse", block);
       if (blocked) {
@@ -293,11 +302,18 @@ export async function agentLoop(
 
       const schema = TOOL_SCHEMAS[block.name];
       const handler = TOOL_HANDLERS[block.name];
+      // 异常收成 tool_result 文案（对齐 code.py:319-325），包括 schema 校验失败：
+      // 模型发来的畸形 input 只该换来一条错误回执，不该打断整个循环。
       // await —— 表里的 handler 类型允许异步（s08 会往这张表里加 async 工具）。
-      const output =
-        handler && schema
-          ? await handler(schema.parse(block.input), deps)
-          : `Unknown: ${block.name}`;
+      let output: string;
+      try {
+        output =
+          handler && schema
+            ? await handler(schema.parse(block.input), deps)
+            : `Unknown: ${block.name}`;
+      } catch (e) {
+        output = `Error: ${errMsg(e)}`;
+      }
       logger.toolResult(block.name, output);
 
       await hooks.trigger("PostToolUse", block, output);
