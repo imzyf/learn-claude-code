@@ -188,7 +188,7 @@ const PERMISSION_RULES: {
     // 规则 2：bash 命令含破坏性关键字（rm、写入 /etc、chmod 777）
     tools: ["bash"],
     check: (args) =>
-      ["rm ", "> /etc/", "chmod 777"].some((kw) =>
+      ["rm ", "unlink ", "> /etc/", "chmod 777"].some((kw) =>
         (args.command ?? "").includes(kw),
       ),
     message: "Potentially destructive command",

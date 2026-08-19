@@ -50,16 +50,7 @@ export const errMsg = (e: unknown) =>
 //  s02 新增：四个新 tool
 // ═══════════════════════════════════════════════════════════
 
-/**
- * 把路径限制在 WORKDIR 内，三个文件工具的公共前置检查。
- *
- * @param p 相对 WORKDIR 或绝对的路径
- * @returns 归一化后的绝对路径
- * @throws 路径落在 WORKDIR 外时抛错，由各 handler 捕获成 `Error: ...` 文本
- *
- * 与 Python 原版的差异：Path.resolve() 展开 symlink，Node 的 path.resolve()
- * 只做词法归一化，所以 workspace 内指向外部的 symlink 能通过这里的检查。
- */
+// 把路径限制在 WORKDIR 内，三个文件工具的公共前置检查，越界抛错由各 handler 捕获。
 export function safePath(p: string): string {
   const resolved = path.resolve(WORKDIR, p);
   if (resolved !== WORKDIR && !resolved.startsWith(WORKDIR + path.sep)) {
@@ -68,16 +59,10 @@ export function safePath(p: string): string {
   return resolved;
 }
 
-/**
- * read_file：读文件内容，可截断行数，避免大文件塞爆 context。
- *
- * @param p 文件路径
- * @param limit 最多返回的行数，省略则全量；截断时补一行 `... (N more lines)`
- * @returns 文件内容，出错时返回 `Error: ...`（读不到、越界都不抛给循环）
- */
+// read_file：读文件内容，可用 limit 截断行数，避免大文件塞爆 context。
 export function runRead(p: string, limit?: number): string {
   try {
-    // 对齐 Python 的 splitlines()：结尾换行不产生多余空行，CRLF 不残留 \r。
+    // 按行拆分：结尾换行不产生多余空行，CRLF 不残留 \r。
     let lines = fs.readFileSync(safePath(p), "utf8").split(/\r?\n/);
     if (lines.at(-1) === "") lines.pop();
     if (limit && limit < lines.length) {
@@ -92,13 +77,7 @@ export function runRead(p: string, limit?: number): string {
   }
 }
 
-/**
- * write_file：整文件覆盖写，父目录不存在就递归创建。
- *
- * @param p 文件路径，已存在则内容被整体替换
- * @param content 写入的完整内容
- * @returns `Wrote N bytes to <path>`，N 按 UTF-8 字节数算；出错时返回 `Error: ...`
- */
+// write_file：整文件覆盖写，父目录不存在就递归创建。
 export function runWrite(p: string, content: string): string {
   try {
     const filePath = safePath(p);
@@ -110,14 +89,7 @@ export function runWrite(p: string, content: string): string {
   }
 }
 
-/**
- * edit_file：按精确字符串替换一处，改局部时比整文件重写省 token。
- *
- * @param p 文件路径
- * @param oldText 要被替换的原文，只替换第一处匹配
- * @param newText 替换成的新文本，按字面写入
- * @returns `Edited <path>`；找不到 oldText 时返回 `Error: text not found in <path>`
- */
+// edit_file：按精确字符串替换第一处匹配，改局部时比整文件重写省 token。
 export function runEdit(p: string, oldText: string, newText: string): string {
   try {
     const filePath = safePath(p);
@@ -136,18 +108,7 @@ export function runEdit(p: string, oldText: string, newText: string): string {
   }
 }
 
-/**
- * glob：按 pattern 找文件，让 model 先定位再读，不用 `ls` 一层层试。
- *
- * @param pattern glob 表达式，相对 WORKDIR 解析，如 `lib/*.ts`
- * @returns 匹配到的相对路径，每行一个；无匹配返回 `(no matches)`
- *
- * 这里不用 safePath：pattern 不是单个路径，改成逐条过滤匹配结果，
- * 把 `../` 之类逃出 WORKDIR 的命中丢掉。
- *
- * 与 Python 原版的差异：`**` 在 fs.globSync 里递归匹配任意层级，Python 的
- * glob.glob 不传 recursive=True 时只匹配一层，所以同一 pattern 这边命中更多。
- */
+// glob：按 pattern 找文件，让 model 先定位再读，不用 `ls` 一层层试。
 export function runGlob(pattern: string): string {
   try {
     const results = fs
@@ -194,8 +155,7 @@ export const TOOL_SCHEMAS: Partial<Record<string, z.ZodObject>> = {
   glob: globSchema,
 };
 
-// `input: any` 对应 Python 的 `handler(**block.input)` —— 每个 handler
-// 解构出各自 schema 在 `.parse()` 之后保证的结构。
+// 每个 handler 解构出各自 schema 在 `.parse()` 之后保证的结构。
 export type Handlers = Partial<Record<string, (input: any) => string>>;
 
 const TOOL_HANDLERS: Handlers = {
@@ -227,10 +187,8 @@ export async function agentLoop(
     });
     logger.response(response);
 
-    // 追加 assistant 这一轮（包含所有 tool-call block）
     messages.push({ role: "assistant", content: response.content });
 
-    // 如果 model 没有调用 tool，就结束
     if (!hasToolUse(response)) {
       return textOf(response);
     }
@@ -241,17 +199,6 @@ export async function agentLoop(
       printProse(block);
       if (block.type !== "tool_use") continue;
 
-      /*
-        block 结构
-        {
-          "type": "tool_use",
-          "id": "call_00_e3IosLtwiBk4IpGPy0QC7370",
-          "name": "bash",
-          "input": {
-            "command": "node --version"
-          }
-        }
-      */
       // 按 tool 名字查出对应的 schema
       const schema = TOOL_SCHEMAS[block.name];
       // 按 tool 名字查出对应的 handler
@@ -271,13 +218,11 @@ export async function agentLoop(
       });
     }
 
-    // 把 tool 结果喂回去，loop 继续
     messages.push({ role: "user", content: results });
   }
 }
 
 // ── 入口 ──────────────────────────────────────────
-// import.meta.main 只在文件被直接运行时为 true。
 if (import.meta.main) {
   const client = createClient();
   const logger = createLogger(import.meta.dirname);
@@ -301,7 +246,7 @@ if (import.meta.main) {
     try {
       query = await rl.question(colorize("s02 >> ", "cyan"));
     } catch {
-      break; // stdin 关闭（Ctrl+D）
+      break;
     }
     const q = query.trim().toLowerCase();
     if (q === "" || q === "q" || q === "exit") break;

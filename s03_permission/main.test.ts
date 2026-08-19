@@ -74,6 +74,9 @@ describe("checkRules", () => {
     expect(checkRules("bash", { command: "chmod 777 x" })).toBe(
       "Potentially destructive command",
     );
+    expect(checkRules("bash", { command: "unlink foo" })).toBe(
+      "Potentially destructive command",
+    );
   });
 
   it("安全的 bash 命令返回 null", () => {
