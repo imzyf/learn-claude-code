@@ -1,14 +1,26 @@
-bin/.cache/
-lib/.cache/
+# npm/pnpm 依赖安装目录，靠 package.json 重新生成
 node_modules/
+# bin/sync-upstream.sh 的上游同步缓存，机器本地产物
+bin/.cache/
+# lib/pricing.ts 的价格缓存（7 天有效期），机器本地产物
+lib/.cache/
+# lib/logger.ts 写的运行日志，各章共用
 .log/
+# lib/testing.ts 的 makeTempDir，测试临时目录，各章共用
 .tmp/
-.transcripts/
-.task_outputs/
+# 本地环境变量，含密钥，不能提交
 .env
+# s08_context_compact 的历史消息 transcript 落盘目录
+.transcripts/
+# s08_context_compact 的工具调用结果落盘目录
+.task_outputs/
+# s09_memory 的记忆文件目录
 .memory/
+# s10_task_system / s13_agent_teams 的任务状态目录
 .tasks/
-.claude/memory.json
+# s12_cron_scheduler 的定时任务持久化文件
 .scheduled_tasks.json
+# s13_agent_teams 的文件邮箱目录
 .mailboxes/
+# s16_workflow_runtime 的运行快照、输出、journal 和锁文件目录
 .runtime/

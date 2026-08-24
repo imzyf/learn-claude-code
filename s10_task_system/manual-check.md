@@ -9,8 +9,6 @@ pnpm dev s10_task_system/main.ts
 tail -f "$(find s10_task_system/.log -name '*_transcript.log' | sort | tail -1)"
 ```
 
-任务目录跟着章节走，不在仓库根：`s10_task_system/.tasks/`。这跟 s09 的 `.memory/` 不一样，别找错地方。
-
 任务是有状态的，每节之间会互相干扰。开始前先清干净，需要重来时也是这一条：
 
 ```sh
@@ -131,26 +129,7 @@ owner 校验没法从 REPL 里撞到（handler 把 owner 写死成 `agent`），
 
 还有一条：已认领的任务不再改依赖。让模型给一个 `in_progress` 的任务加依赖，期望 `Error: Task task_xxx dependencies can only be updated while pending and unowned`。任务已经开工了还能往上加阻塞，就绪判定就会在中途反悔。
 
-## 6. 非法 ID 进不了文件系统，也不该让 REPL 退出
-
-任务 ID 会被直接拼进文件名，所以这条有实际攻击面。三道防线叠着，从外往里：
-
-- **schema 层**：`update_task` 的两个 ID 参数都带 `pattern: ^task_[0-9a-f]{8}$`，模型在 JSON Schema 里看得见，多半根本不会发出非法 ID。
-- **dispatch 层**：真发出来了，schema 解析抛错，收敛成 `Error: ...` 回给模型。
-- **store 层**：拼路径**之前**先校验 ID，`..` 之类的输入连文件名都构不成。
-
-`get_task` 的 schema 是裸字符串，正好用来验第三道：
-
-- `Get the task with id ../../../etc/passwd`
-  取 id 为 ../../../etc/passwd 的任务。
-- `Get the task with id task_zzzzzzzz`
-  取 id 为 task_zzzzzzzz 的任务。
-
-期望两次都是 `Error: Invalid task ID: ...`，REPL 继续等下一句话，`s10_task_system/.tasks/` 外没有任何新文件，`git status` 干净。
-
-REPL 因为这类输入退出，是本章最严重的 bug：一个模型幻觉出来的 ID 不该能终止会话。
-
-## 7. 跨会话：任务图留在磁盘上
+## 6. 跨会话：任务图留在磁盘上
 
 这是本章跟 s05 的 `todo_write` 最大的差别 —— 那边清单在内存里，一退出就没了。
 
@@ -162,15 +141,3 @@ REPL 因为这类输入退出，是本章最严重的 bug：一个模型幻觉�
 期望 `list_tasks` 返回的还是上一次那些任务，`completed` 的还是 `completed`，`blockedBy` 的边还在。恢复不需要任何加载步骤，读文件就是恢复。
 
 注意对照的是**磁盘**，不是模型的记忆：新会话的 history 是空的，模型能说出上次的任务，只可能是因为它调了 `list_tasks`。模型凭空复述出上次的内容而 transcript 里没有 `TOOL RESULT (list_tasks)`，那是它在编。
-
-## 8. 手改坏的任务文件在读取处就报错
-
-任务文件是普通 JSON，人可以改，旧版本也可能留下缺字段的文件。读取时整份过一遍 schema。挑一个任务文件，把 `status` 改成一个不存在的值，再在 REPL 里让模型 `list_tasks`，期望是一条 `Error: ...` 回到 `tool_result` 里，而不是列表少了一行、或者某处崩掉。
-
-校验放在读取处是为了让报错离现场近：`blockedBy` 缺字段这种问题，不在读取时拦下来，就会拖到用它取长度那一行才炸，堆栈指向一个跟原因无关的位置。
-
-再验一次「未知字段不被洗掉」：往某个任务文件里手工加一个 `"worktree": "demo"`，跑一次 `claim_task`（会触发一次读写往返），期望这个字段还在。schema 用的是 `z.looseObject` 而不是 `z.object`，就是为了这个：s13 在 `Task` 上加了自己的字段并共用这个 store，strip 语义会在一次往返里把它们静默删掉。字段没了就是 bug，而且是那种只在下游章节才暴露的 bug。
-
----
-
-跑完全部八节记得清场：`rm -rf s10_task_system/.tasks`。日志在 `s10_task_system/.log/`，按需清理。

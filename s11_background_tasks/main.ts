@@ -166,11 +166,14 @@ export async function runBashAsync(
     liveProcesses.add(child);
 
     let out = "";
-    const append = (chunk: Buffer) => {
-      if (out.length < OUTPUT_LIMIT) out += chunk.toString();
+    const append = (chunk: string) => {
+      if (out.length < OUTPUT_LIMIT) out += chunk;
     };
-    child.stdout?.on("data", append);
-    child.stderr?.on("data", append);
+    // setEncoding 让流按 UTF-8 边界解码：多字节字符跨 chunk 时不会解成乱码。
+    for (const stream of [child.stdout, child.stderr]) {
+      stream?.setEncoding("utf8");
+      stream?.on("data", append);
+    }
 
     let timedOut = false;
     const timer = setTimeout(() => {
