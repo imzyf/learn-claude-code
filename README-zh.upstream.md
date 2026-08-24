@@ -102,6 +102,9 @@ Claude Code = 一个 agent loop
             + 异步邮箱的团队协调
             + 任务绑定的 worktree 并行执行
             + 权限治理
+            + hooks 扩展系统
+            + memory 持久化
+            + MCP 外部能力路由
 ```
 
 就这些。这就是全部架构。每一个组件都是 harness 机制 -- 为 agent 构建的栖居世界的一部分。Agent 本身呢？是 Claude。一个模型。由 Anthropic 在人类推理和代码的全部广度上训练而成。Harness 没有让 Claude 变聪明。Claude 本来就聪明。Harness 给了 Claude 双手、双眼和一个工作空间。
@@ -295,7 +298,7 @@ cd web && npm install && npm run dev   # http://localhost:3000
 
 ## 学习路径
 
-主线：能动手 → 能做复杂任务 → 能记住和恢复 → 能长期运行 → 能协作 → 能扩展并合体
+主线：能动手 → 能做复杂任务 → 能记住和恢复 → 能长期运行 → 能协作 → 能扩展并合体 → 能编排并实现目标闭环
 
 ```mermaid
 flowchart TD
@@ -369,6 +372,27 @@ flowchart TD
 | [s15](./s15_integrated_harness/) | Agent Harness 集成 | 工具、运行时上下文、任务、团队、调度和 MCP 归到一个循环 |
 | [s16](./s16_workflow_runtime/) | Workflow Runtime | 脚本编排 / 生命周期事件 / journal 续跑 |
 | [s17](./s17_goal_loop/) | Goal Loop | 目标闸门 / 对话判断 / 自动续轮 |
+
+---
+
+## 如何阅读
+
+每一章都是一个文件夹。打开后你会看到：
+
+```
+s08_context_compact/
+  README.md              # 英文，默认章节 README
+  README.zh.md           # 中文译本
+  README.ja.md           # 日文译本
+  code.py                # 独立可运行的实现
+  images/                # SVG 图示（需要时）
+```
+
+阅读 `README.md` 理解核心思想，并逐步学习代码。复杂章节使用 `<details>` 折叠深入内容 -- 想深入时再展开。简单章节有 0-1 张图，复杂章节会有更多。
+
+按顺序从 s01 读到 s17。有些机制直接建立在前一章的运行时之上；独立机制章节会说明它们使用的是哪个较早版本的内核。
+
+---
 
 ## 项目结构
 
@@ -446,3 +470,5 @@ MIT
 **Agency 来自模型。Harness 让 agency 落地。造好 Harness，模型会完成剩下的。**
 
 **Bash is all you need. Real agents are all the universe needs.**
+
+**这不是“照抄源码”，而是“理解核心设计，然后自己构建”。**
