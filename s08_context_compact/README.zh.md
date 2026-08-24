@@ -88,11 +88,11 @@ for block in ranked:
 
 ## 第二步：snip_compact
 
-消息数量超过 50 条后，`snip_compact` 先把完整历史写入 `.transcripts/`，再保留最初 3 条和最近 47 条。中间的标记会写明删去了多少条消息，以及完整记录保存在哪里。
+消息数量超过 50 条后，`snip_compact` 先把完整历史写入 `.transcripts/`，再保留最初 3 条和最近 46 条。剩余一个位置用于归档标记，其中写明删去了多少条消息，以及完整记录保存在哪里。
 
 ```python
 head_end = 3
-tail_start = len(messages) - (max_messages - head_end)
+tail_start = len(messages) - (max_messages - head_end - 1)
 
 if self.has_tool_use(messages[head_end - 1]):
     while (head_end < tail_start
@@ -117,37 +117,34 @@ messages = [*messages[:head_end], marker, *messages[tail_start:]]
 
 ## 第三步：micro_compact
 
-`micro_compact` 会完整保留最近一次 assistant 响应之后新增的所有 `tool_result`，确保模型至少完整读取每条新结果一次。对于模型已经读取过的结果，它保留最近 3 条，并缩短其余超过 120 个字符的旧结果。已经转存的结果保留文件路径，其他结果只留下占位符：
+前两步完成后，`prepare` 会估算剩余上下文的大小，只有超过 `CONTEXT_CHAR_LIMIT` 时才执行 `micro_compact`。对于模型已经读取过的结果，它保留最近 3 条，并逐条缩短更早且超过 120 个字符的结果，直到上下文接近阈值的 80%。旧结果被替换前会先完整落盘，因此每个占位都带有可恢复路径：
 
-![旧结果替换为占位符](images/micro-compact.svg)
+![旧结果替换为可恢复路径](images/micro-compact.svg)
 
 ```python
 unseen = self.unseen_tool_result_positions(messages)
 consumed = [entry for entry in results if entry[:2] not in unseen]
 
 for _, _, block in consumed[:-self.KEEP_RECENT_RESULTS]:
+    if self.estimate_chars(messages) <= target_chars:
+        break
     content = str(block.get("content", ""))
     if len(content) <= 120:
         continue
-    saved_path = next(
-        (line.removeprefix("Full output: ") for line in content.splitlines()
-         if line.startswith("Full output: ")),
-        None,
-    )
-    block["content"] = (
-        f"[Earlier tool result saved at {saved_path}]"
-        if saved_path else "[Earlier tool result omitted.]"
-    )
+    saved_path = self.persisted_output_path(content)
+    if not saved_path:
+        saved_path = self.save_output(block["tool_use_id"], content)
+    block["content"] = f"[Earlier tool result saved at {saved_path}]"
 ```
 
-未转存的旧结果只保留占位符。第一步保存过的完整结果仍能通过路径读取，不会在第三步丢失位置。
+新结果通常会保持完整，直到模型读取一次。如果仅未读取的最新一批结果就足以撑爆上下文，`fit_tool_results` 会把其中最大的结果落盘，并保留 1,000 字符预览和完整路径，避免模型看到新结果前就先总结整段历史。
 
-前三步都是确定性的结构和文本操作，不产生额外 API 调用。
+前两步每轮都会执行，第三步只在上下文超限时执行。三步都是确定性、可恢复的结构和文本操作，不产生额外 API 调用。
 
 
 ## 第四步：compact_history
 
-前三步执行后，代码用 `estimate_chars(messages)` 计算当前消息的字符数：
+`micro_compact` 和 `fit_tool_results` 执行后，代码会再次用 `estimate_chars(messages)` 估算上下文：
 
 ```python
 CONTEXT_CHAR_LIMIT = 50000
@@ -156,7 +153,7 @@ def estimate_chars(messages):
     return len(json.dumps(messages, default=str, ensure_ascii=False))
 ```
 
-字符数超过 `CONTEXT_CHAR_LIMIT` 时，`compact_history` 完成四件事：
+字符数仍然超过 `CONTEXT_CHAR_LIMIT` 时，`compact_history` 完成四件事：
 
 1. 将完整消息历史写入 `.transcripts/`。
 2. 请求模型生成只包含事实的状态摘要。
@@ -181,19 +178,24 @@ def compact_history(messages, active_request):
 
 ## 为什么顺序固定
 
-四步管线的执行顺序是：
+管线按以下顺序执行，并且只在必要时进入有损的摘要步骤：
 
-```text
-tool_result_budget
-    → snip_compact
-    → micro_compact
-    → compact_history（超过阈值时）
+```python
+messages = self.tool_result_budget(messages)
+messages = self.snip_compact(messages)
+if self.estimate_chars(messages) > self.CONTEXT_CHAR_LIMIT:
+    target = int(self.CONTEXT_CHAR_LIMIT * 0.8)
+    messages = self.micro_compact(messages, target)
+    if self.estimate_chars(messages) > self.CONTEXT_CHAR_LIMIT:
+        messages = self.fit_tool_results(messages, target)
+    if self.estimate_chars(messages) > self.CONTEXT_CHAR_LIMIT:
+        messages = self.compact_history(messages, active_request)
 ```
 
 这个顺序同时满足两个条件：
 
-1. 前三步不调用模型，第四步才产生额外 API 请求。
-2. `tool_result_budget` 必须早于 `micro_compact`。大结果先落盘，之后才允许旧结果变成占位符。
+1. 第一步和第二步每轮执行，第三步只在超限时执行，只有第四步会增加 API 请求。
+2. 每条被缩短的工具结果都保留 `.task_outputs/tool-results/` 内的可信路径；只有仍然超限时才进入模型生成的历史摘要。
 
 顺序固定后，每一轮都从成本更低、信息更容易恢复的操作开始。
 
@@ -243,7 +245,7 @@ def agent_loop(messages, active_request):
             raise
 ```
 
-每次调用模型前都会经过同一条管线。CLI 在追加 `query` 后调用 `agent_loop(history, query)`，所以压缩多少次都不会丢失本轮请求。前三步处理后仍超过阈值，或者 API 明确拒绝上下文时，代码才会请求模型生成摘要。
+每次调用模型前都会经过同一条管线。CLI 在追加 `query` 后调用 `agent_loop(history, query)`，所以压缩多少次都不会丢失本轮请求。只有 `micro_compact` 处理后仍超过阈值，或者 API 明确拒绝上下文时，代码才会请求模型生成摘要。
 
 
 ## compact 工具
@@ -308,7 +310,7 @@ python s08_context_compact/code.py
 比较它们的一级标题，并总结这些标题的命名规律。
 ```
 
-任务会产生至少 5 条文件读取结果。每条新结果在模型首次读取前都会保持完整；后续轮次只保留最近 3 条已读取结果，更早且较长的结果会变成 `[Earlier tool result omitted.]`。已经转存的结果会保留保存路径。
+任务会产生至少 5 条文件读取结果。新结果通常会完整保留到模型首次读取；如果未读取结果本身过大，则保留预览和恢复路径。后续轮次保留最近 3 条已读取结果，更早且较长的结果会变成 `[Earlier tool result saved at ...]` 引用。
 
 ### 实验二：大结果转存
 

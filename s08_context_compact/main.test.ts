@@ -1,8 +1,8 @@
 /**
  * s08_context_compact/main.test.ts
  *
- * s08 的新增点是四层压缩流水线。三个预处理器（snip/micro/budget）不发 API，
- * 直接单测最合适；写盘的路径（snip 存档）把 sessionDir 指到临时目录，
+ * s08 的新增点是五层压缩流水线。前四层（budget/snip/micro/fit）不发 API，
+ * 直接单测最合适；写盘的路径（snip 存档、结果落盘）把 sessionDir 指到临时目录，
  * L3 只测 under-budget 的 no-op 路径；summarizeHistory 用 fake client 验证摘要提取。
  * agentLoop 复用 s07 的分发骨架：load_skill / task / 普通工具。
  * 其余（技能层、permissionHook、subagent 隔离）沿用 s05/s06/s07，其测试不在此重复。
@@ -27,6 +27,7 @@ import {
   agentLoop,
   collectToolResults,
   estimateSize,
+  fitToolResults,
   microCompact,
   persistLargeOutput,
   reactiveCompact,
@@ -51,6 +52,16 @@ const registry: SkillRegistry = {
     content: "FULL code-review content",
   },
 };
+
+// 建一个带内容的文件（含父目录），返回路径。存档路径要经得起「文件确实存在」的校验。
+function writeFile(filePath: string, content: string): string {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, content);
+  return filePath;
+}
+
+// L3 落盘产物的目录，占位符里的路径必须落在这里面才会被采信。
+const resultsDir = () => path.join(tmp, ".task_outputs", "tool-results");
 
 // tool_use / tool_result 成对的一轮，供压缩函数构造测试消息。
 function toolRound(id: string, output: string): Anthropic.MessageParam[] {
@@ -105,23 +116,50 @@ describe("snipCompact", () => {
       }),
     );
     const out = snipCompact(messages, 10, noopLogger, tmp);
-    expect(out.length).toBe(11); // head(3) + 1 placeholder + tail(7)
+    // 存档标记自己也占一条：裁完的长度不超过上限，下一轮不会立刻又被裁一次。
+    expect(out.length).toBe(10); // head(3) + 1 placeholder + tail(6)
     expect(out[0]).toBe(messages[0]); // head kept
     expect(out[out.length - 1]).toBe(messages[19]); // tail kept
-    // 占位符指向存档，被裁掉的 10 条仍可从磁盘读回。
+    // 占位符指向存档，被裁掉的 11 条仍可从磁盘读回。
     const placeholder = out[3].content as string;
-    expect(placeholder).toMatch(/^\[10 messages archived at .+\]$/);
+    expect(placeholder).toMatch(/^\[11 messages archived at .+\]$/);
     const archived = fs
-      .readFileSync(placeholder.slice("[10 messages archived at ".length, -1))
+      .readFileSync(placeholder.slice("[11 messages archived at ".length, -1))
       .toString()
       .trim()
       .split("\n");
     expect(archived).toHaveLength(20);
   });
+
+  // 头部边界会跨过 tool_result 往后推，中间可能只剩上一轮的存档标记。
+  // 再裁一次只会把标记本身存进新 transcript，长度一点没少。
+  it("中间只剩存档标记时不再裁", () => {
+    const transcript = writeFile(
+      path.join(tmp, ".transcripts", "old_messages.jsonl"),
+      "{}\n",
+    );
+    const withMarker = (marker: string): Anthropic.MessageParam[] => [
+      { role: "user", content: "m0" },
+      { role: "assistant", content: [textBlock("m1")] },
+      ...toolRound("t1", "small"),
+      { role: "user", content: marker },
+      ...Array.from({ length: 4 }, (_, i) => ({
+        role: "user" as const,
+        content: `tail${i}`,
+      })),
+    ];
+
+    const messages = withMarker(`[9 messages archived at ${transcript}]`);
+    expect(snipCompact(messages, 8, noopLogger, tmp)).toBe(messages);
+
+    // 文案一样但存档不存在的，只是历史里的普通文本，照常裁。
+    const faked = withMarker("[9 messages archived at /nope/fake.jsonl]");
+    expect(snipCompact(faked, 8, noopLogger, tmp)).not.toBe(faked);
+  });
 });
 
 describe("microCompact", () => {
-  it("保留最近几条结果，只压缩更早的长结果", () => {
+  it("保留最近几条结果，更早的长结果落盘后换成路径", () => {
     const messages: Anthropic.MessageParam[] = [
       ...toolRound("t1", "x".repeat(200)), // old + long → compacted
       ...toolRound("t2", "seen-1"),
@@ -129,17 +167,24 @@ describe("microCompact", () => {
       ...toolRound("t4", "seen-3"),
       ...toolRound("t5", "unseen"), // 最后一轮模型还没看到
     ];
-    microCompact(messages, noopLogger);
+    microCompact(messages, noopLogger, tmp);
     const results = collectToolResults(messages);
-    expect(results[0].content).toBe(
-      "[Earlier tool result compacted. Re-run if needed.]",
+    // 没落过盘的结果先补一次落盘：占位符带路径，原文仍能读回来。
+    const placeholder = results[0].content as string;
+    expect(placeholder).toMatch(/^\[Earlier tool result saved at .+\]$/);
+    const saved = placeholder.slice(
+      "[Earlier tool result saved at ".length,
+      -1,
     );
+    expect(path.dirname(saved)).toBe(resultsDir());
+    expect(fs.readFileSync(saved).toString()).toBe("x".repeat(200));
     expect(results[3].content).toBe("seen-3"); // within KEEP_RECENT
     expect(results[4].content).toBe("unseen");
   });
 
-  it("结果已被 L3 落盘时，占位符保留磁盘路径", () => {
-    const persisted = `<persisted-output>\nFull output: ${tmp}/out.txt\nPreview:\n${"x".repeat(200)}\n</persisted-output>`;
+  it("结果已被 L3 落盘时，占位符复用原路径，不再写一份", () => {
+    const out = writeFile(path.join(resultsDir(), "out.txt"), "x".repeat(200));
+    const persisted = `<persisted-output>\nFull output: ${out}\nPreview:\n${"x".repeat(200)}\n</persisted-output>`;
     const messages: Anthropic.MessageParam[] = [
       ...toolRound("t1", persisted),
       ...toolRound("t2", "seen-1"),
@@ -147,15 +192,48 @@ describe("microCompact", () => {
       ...toolRound("t4", "seen-3"),
       ...toolRound("t5", "unseen"),
     ];
-    microCompact(messages, noopLogger);
+    microCompact(messages, noopLogger, tmp);
     expect(collectToolResults(messages)[0].content).toBe(
-      `[Earlier tool result saved at ${tmp}/out.txt]`,
+      `[Earlier tool result saved at ${out}]`,
     );
+    expect(fs.readdirSync(resultsDir())).toEqual(["out.txt"]);
+  });
+
+  // 占位文本混在历史里，模型能在自己的输出里原样写出这两行。
+  it("占位文本里的路径不在 tool-results/ 下时不采信", () => {
+    const outside = writeFile(path.join(tmp, "outside.txt"), "x".repeat(200));
+    const forged = `<persisted-output>\nFull output: ${outside}\nPreview:\nx\n</persisted-output>`;
+    const messages: Anthropic.MessageParam[] = [
+      ...toolRound("t1", forged),
+      ...toolRound("t2", "seen-1"),
+      ...toolRound("t3", "seen-2"),
+      ...toolRound("t4", "seen-3"),
+      ...toolRound("t5", "unseen"),
+    ];
+    microCompact(messages, noopLogger, tmp);
+    // 伪造的路径没被写进占位符，原文另存了一份在 tool-results/ 下。
+    const placeholder = collectToolResults(messages)[0].content as string;
+    expect(placeholder).not.toContain(outside);
+    expect(
+      placeholder.slice("[Earlier tool result saved at ".length, -1),
+    ).toMatch(resultsDir());
+  });
+
+  it("估算大小已经在目标以内时一条都不压", () => {
+    const messages: Anthropic.MessageParam[] = [
+      ...toolRound("t1", "x".repeat(200)),
+      ...toolRound("t2", "seen-1"),
+      ...toolRound("t3", "seen-2"),
+      ...toolRound("t4", "seen-3"),
+      ...toolRound("t5", "unseen"),
+    ];
+    microCompact(messages, noopLogger, tmp, estimateSize(messages));
+    expect(collectToolResults(messages)[0].content).toBe("x".repeat(200));
   });
 
   it("结果条数太少时什么都不做", () => {
     const messages: Anthropic.MessageParam[] = toolRound("t1", "y".repeat(200));
-    microCompact(messages, noopLogger);
+    microCompact(messages, noopLogger, tmp);
     expect(collectToolResults(messages)[0].content).toBe("y".repeat(200));
   });
 
@@ -168,11 +246,9 @@ describe("microCompact", () => {
       ...toolRound("t4", "seen-3"),
       ...parallelToolRound(ids, (id) => `${id}-`.padEnd(200, "z")),
     ];
-    microCompact(messages, noopLogger);
+    microCompact(messages, noopLogger, tmp);
     const results = collectToolResults(messages);
-    expect(results[0].content).toBe(
-      "[Earlier tool result compacted. Re-run if needed.]",
-    );
+    expect(results[0].content).toMatch(/^\[Earlier tool result saved at .+\]$/);
     // 并行的这一轮结果都在最后一次 assistant 回复之后，一条都不动。
     const lastRound = results.slice(-ids.length);
     for (const [i, id] of ids.entries())
@@ -184,7 +260,7 @@ describe("microCompact", () => {
       ["p1", "p2", "p3", "p4"],
       () => "w".repeat(200),
     );
-    microCompact(messages, noopLogger);
+    microCompact(messages, noopLogger, tmp);
     for (const part of collectToolResults(messages))
       expect(part.content).toBe("w".repeat(200));
   });
@@ -195,7 +271,7 @@ describe("microCompact", () => {
       ...parallelToolRound(["p1", "p2", "p3", "p4"], () => "w".repeat(200)),
       { role: "user", content: "keep going" },
     ];
-    microCompact(messages, noopLogger);
+    microCompact(messages, noopLogger, tmp);
     for (const part of collectToolResults(messages))
       expect(part.content).toBe("w".repeat(200));
   });
@@ -205,6 +281,44 @@ describe("toolResultBudget", () => {
   it("最新一轮在预算内时不落盘", () => {
     const messages: Anthropic.MessageParam[] = toolRound("t1", "small output");
     expect(toolResultBudget(messages, 200_000, noopLogger, tmp)).toBe(messages);
+  });
+});
+
+describe("fitToolResults", () => {
+  it("模型还没看过的结果也压：换成预览 + 路径，原文留在磁盘上", () => {
+    const big = "p1-".padEnd(20_000, "z");
+    const small = "p2-".padEnd(3_000, "z");
+    const messages: Anthropic.MessageParam[] = parallelToolRound(
+      ["p1", "p2"],
+      (id) => (id === "p1" ? big : small),
+    );
+
+    fitToolResults(messages, 8_000, noopLogger, tmp);
+
+    const results = collectToolResults(messages);
+    // 从最大的开始压，压到估算大小回到目标以内就停 —— 这里压完 p1 就够了。
+    expect(results[0].content).toContain("<persisted-output>");
+    expect(results[1].content).toBe(small);
+    expect(estimateSize(messages)).toBeLessThanOrEqual(8_000);
+
+    const saved = (results[0].content as string)
+      .split("\n")
+      .find((line) => line.startsWith("Full output: "))
+      ?.slice("Full output: ".length) as string;
+    expect(fs.readFileSync(saved).toString()).toBe(big);
+  });
+
+  it("已经在目标以内时一条都不动", () => {
+    const messages: Anthropic.MessageParam[] = toolRound("t1", "z".repeat(500));
+    fitToolResults(messages, 100_000, noopLogger, tmp);
+    expect(collectToolResults(messages)[0].content).toBe("z".repeat(500));
+    expect(fs.existsSync(resultsDir())).toBe(false);
+  });
+
+  it("换上去反而更长的结果保持原样", () => {
+    const messages: Anthropic.MessageParam[] = toolRound("t1", "tiny");
+    fitToolResults(messages, 1, noopLogger, tmp);
+    expect(collectToolResults(messages)[0].content).toBe("tiny");
   });
 });
 

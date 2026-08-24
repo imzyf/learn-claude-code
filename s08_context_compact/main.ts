@@ -1,29 +1,32 @@
 /**
  * s08_context_compact/main.ts - 上下文压缩
  *
- * 在调用 LLM 之前插入四层压缩流水线：
+ * 在调用 LLM 之前插入五层压缩流水线：
  *
- *     L1: snipCompact       —— 消息数 > 50 时裁剪中间部分（先落盘存档）
- *     L2: microCompact      —— 用占位符替换较早的工具结果
- *     L3: toolResultBudget  —— 把大结果持久化到磁盘
- *     L4: compactHistory    —— LLM 完整摘要（1 次 API 调用）
+ *     L3:  toolResultBudget  —— 把最新一轮的大结果持久化到磁盘
+ *     L1:  snipCompact       —— 消息数 > 50 时裁剪中间部分（先落盘存档）
+ *     L2:  microCompact      —— 把较早的工具结果换成存档路径
+ *     L3b: fitToolResults    —— 仍超限时，最大的结果（含没看过的）换成预览 + 路径
+ *     L4:  compactHistory    —— LLM 完整摘要（1 次 API 调用）
  *
  *     应急：reactiveCompact —— API 仍返回 prompt_too_long 时触发
  *
  *     ┌─────────────────────────────────────────────────────────────┐
  *     │  messages[]                                                 │
  *     │    ↓                                                        │
- *     │  L3 budget ─→ L1 snip ─→ L2 micro ─→ [size > threshold?]   │
- *     │                                      ├─ No  → LLM          │
- *     │                                      └─ Yes → L4 summary   │
- *     │                                              ↓              │
- *     │                                          LLM call           │
+ *     │  L3 budget ─→ L1 snip ─→ [size > threshold?]                │
+ *     │                          ├─ No ────────────────→ LLM        │
+ *     │                          └─ Yes → L2 micro                  │
+ *     │                                   ↓ 还超                    │
+ *     │                                  L3b fit                    │
+ *     │                                   ↓ 还超                    │
+ *     │                                  L4 summary → LLM call      │
  *     │                                    [prompt_too_long?]       │
  *     │                                      └─ Yes → reactive      │
  *     └─────────────────────────────────────────────────────────────┘
  *
- * 核心原则：先做便宜的，最后才做昂贵的。
- * 执行顺序与 CC 源码一致：budget → snip → micro → auto。
+ * 核心原则：先做便宜的，最后才做昂贵的。L3/L1 每轮都跑（纯结构操作，可完全恢复），
+ * L2/L3b 只在超限时才动历史，L4 是唯一有损、且要多花一次 API 调用的一步。
  *
  * 相比 s07 的变化：
  *   工具层：复用 s07 的三张表（base + load_skill）并合入 s06 的 task，只往
@@ -108,11 +111,13 @@ const toolResultsDir = (sessionDir: string) =>
   path.join(sessionDir, ".task_outputs", "tool-results");
 
 // ═══════════════════════════════════════════════════════════
-//  s08 新增：四层压缩流水线
+//  s08 新增：五层压缩流水线
 // ═══════════════════════════════════════════════════════════
 
-// 八个阈值启动时可用 L{n}_COMPACT_* 环境变量覆盖（前缀是它属于哪一层压缩，
-// 默认值见 defaults.env，可复制到仓库根目录 .env，pnpm dev 会自动加载）。
+// 十个阈值启动时可用 L{n}_COMPACT_* 环境变量覆盖（前缀是它属于哪一层压缩）。
+// defaults.env 是这十个默认值的参考清单（不参与加载）；要试某一层，按
+// manual-check.md 的做法在命令行内联，
+// 只对这一次运行生效：L1_COMPACT_SNIP_MAX_MESSAGES=8 pnpm dev s08_context_compact/main.ts
 // L1 裁剪阈值：消息数超过它就裁掉中间部分。
 export const SNIP_MAX_MESSAGES = Number(
   process.env.L1_COMPACT_SNIP_MAX_MESSAGES ?? 50,
@@ -140,6 +145,17 @@ export const CONTEXT_LIMIT = Number(
 // L4 摘要输入上限：喂给摘要子请求的历史 JSON 超过它就掐头去尾（全文在存档里）。
 const SUMMARY_INPUT_LIMIT = Number(
   process.env.L4_COMPACT_SUMMARY_INPUT_LIMIT ?? 80_000,
+);
+// L2/L3b 的收敛目标，写成 L4 阈值的比例：压到这里就停手，留出下一轮的余量，
+// 也避免多压无谓的旧结果。单调 L4 阈值时触发点和停手点一起动，只有调这个比例
+// 才拉得开两者的距离：调到 0.99 能看清「够了就停」，调到 0.1 能看清一路压到底。
+const COMPACT_TARGET_RATIO = Number(process.env.L4_COMPACT_TARGET_RATIO ?? 0.8);
+export const COMPACT_TARGET_CHARS = Math.floor(
+  CONTEXT_LIMIT * COMPACT_TARGET_RATIO,
+);
+// L3b 的预览默认比 L3 短：走到这一步说明上下文已经超限，预览只用来让模型认出这条结果是什么。
+const FIT_PREVIEW_LENGTH = Number(
+  process.env.L3B_COMPACT_FIT_PREVIEW_LENGTH ?? 1000,
 );
 
 // 压缩后的消息把用户请求和历史摘要分开，SYSTEM 里说明两者的信任级别不同。
@@ -178,7 +194,7 @@ const outputText = (part: Anthropic.ToolResultBlockParam): string =>
     ? part.content
     : JSON.stringify(part.content);
 
-// L1: snipCompact —— 裁剪中间消息，保留头 3 条，尾 (maxMessages - 3) 条
+// L1: snipCompact —— 裁剪中间消息，保留头 3 条，尾 (maxMessages - 3 - 1) 条
 export function snipCompact(
   messages: Anthropic.MessageParam[],
   maxMessages: number,
@@ -188,7 +204,9 @@ export function snipCompact(
   if (messages.length <= maxMessages) return messages;
 
   const keepHead = SNIP_KEEP_HEAD;
-  const keepTail = maxMessages - SNIP_KEEP_HEAD;
+  // 尾部少留一条，把位置让给存档标记 —— 否则裁完的长度是 maxMessages + 1，
+  // 下一轮又超上限，每轮都要再裁一次。
+  const keepTail = maxMessages - SNIP_KEEP_HEAD - 1;
 
   let headEnd = keepHead;
   let tailStart = messages.length - keepTail;
@@ -223,6 +241,11 @@ export function snipCompact(
     tailStart -= 1;
   }
   if (headEnd >= tailStart) return messages;
+  // 中间只剩上一次留下的存档标记时不再裁：那一轮会把「标记」本身再存一次盘，
+  // 换来一条新标记，历史长度一点没少，只是每轮多写一个 transcript 文件。
+  const middle = messages.slice(headEnd, tailStart);
+  if (middle.length === 1 && isArchiveMarker(middle[0], sessionDir))
+    return messages;
   const snipped = tailStart - headEnd;
 
   // 被裁掉的每条消息记一行：索引 + 角色 + 内容预览。
@@ -255,10 +278,25 @@ export function snipCompact(
   return next;
 }
 
-// L2: microCompact —— 把较早的工具结果换成占位符
+// 判断一条消息是不是 snipCompact 自己留下的存档标记：文案对得上，路径也确实
+// 落在本 session 的 .transcripts/ 里。模型可以在回答里原样写出这行文案，所以只认
+// 磁盘上存在的存档，不认长得像的文本。
+function isArchiveMarker(
+  message: Anthropic.MessageParam,
+  sessionDir: string,
+): boolean {
+  if (typeof message.content !== "string") return false;
+  const match = /^\[\d+ messages archived at (.+)\]$/.exec(message.content);
+  return match ? isFileUnder(match[1], transcriptDir(sessionDir)) : false;
+}
+
+// L2: microCompact —— 把较早的工具结果换成存档路径
+// targetChars 给定时，估算大小一降到目标就停手，不再压更多旧结果。
 export function microCompact(
   messages: Anthropic.MessageParam[],
   logger: SessionLogger,
+  sessionDir: string,
+  targetChars?: number,
 ): Anthropic.MessageParam[] {
   // 只压模型已经看过的结果 —— 压掉没看过的等于把它没见过的信息直接抹了。
   const consumed = consumedToolResults(messages);
@@ -268,6 +306,8 @@ export function microCompact(
   // 最近 KEEP_RECENT 条之外的长结果原地换成占位符（短结果不值得动）。
   const replaced: string[] = [];
   for (const part of consumed.slice(0, -KEEP_RECENT)) {
+    if (targetChars !== undefined && estimateSize(messages) <= targetChars)
+      break;
     if (
       typeof part.content === "string" &&
       part.content.length > MICRO_COMPACT_MIN_LENGTH
@@ -278,11 +318,12 @@ export function microCompact(
       replaced.push(
         `- ${part.tool_use_id}: ${part.content.length} chars${flag}\n    ${preview}…`,
       );
-      // 已被 L3 落过盘的结果保留路径 —— 否则这一步会把唯一的取回线索也压掉。
-      const savedPath = persistedPathOf(part.content);
-      part.content = savedPath
-        ? `[Earlier tool result saved at ${savedPath}]`
-        : "[Earlier tool result compacted. Re-run if needed.]";
+      // 没被 L3 落过盘的结果先补一次落盘，占位符始终带得回原文的路径 ——
+      // 否则这一步就是真删，模型再也拿不回这条结果。
+      const savedPath =
+        persistedPathOf(part.content, sessionDir) ??
+        saveOutput(part.tool_use_id, part.content, sessionDir);
+      part.content = `[Earlier tool result saved at ${savedPath}]`;
     }
   }
 
@@ -386,18 +427,48 @@ export function persistLargeOutput(
   sessionDir: string,
 ): string {
   if (output.length <= PERSIST_THRESHOLD) return output;
-
+  // 预览长度 = 落盘阈值的十分之一，需要全文时模型可自行读那个文件。
+  return persistedPreview(
+    toolUseId,
+    output,
+    sessionDir,
+    Math.floor(PERSIST_THRESHOLD / 10),
+  );
+}
+// 原文写盘，返回存档路径。文件名带时间戳前缀，同一个 tool_use_id 重复落盘也不覆盖。
+export function saveOutput(
+  toolUseId: string,
+  output: string,
+  sessionDir: string,
+): string {
   const dir = toolResultsDir(sessionDir);
   fs.mkdirSync(dir, { recursive: true });
   const filePath = path.join(
     dir,
     `${timestampPrefix()}_${safeFileId(toolUseId)}.txt`,
   );
-  if (!fs.existsSync(filePath)) fs.writeFileSync(filePath, output);
-
-  // 模型看到路径和前 N 字预览（N = 阈值的十分之一），需要全文时可自行读文件。
-  const previewLength = Math.floor(PERSIST_THRESHOLD / 10);
-  return `<persisted-output>\n${PERSISTED_PATH_PREFIX}${filePath}\nPreview:\n${output.slice(0, previewLength)}\n</persisted-output>`;
+  fs.writeFileSync(filePath, output);
+  return filePath;
+}
+// 落盘并生成「路径 + 预览」的占位文本。已经落过盘的结果不再写第二份，
+// 直接从存档里按新的预览长度读一段（L3b 要的预览比 L3 短）。
+function persistedPreview(
+  toolUseId: string,
+  output: string,
+  sessionDir: string,
+  previewLength: number,
+): string {
+  const savedPath = persistedPathOf(output, sessionDir);
+  let preview = output.slice(0, previewLength);
+  if (savedPath) {
+    try {
+      preview = fs.readFileSync(savedPath, "utf8").slice(0, previewLength);
+    } catch {
+      // 存档读不回来（并发删除等）就退回用手里这段文本做预览。
+    }
+  }
+  const filePath = savedPath ?? saveOutput(toolUseId, output, sessionDir);
+  return `<persisted-output>\n${PERSISTED_PATH_PREFIX}${filePath}\nPreview:\n${preview}\n</persisted-output>`;
 }
 // tool_use_id 直接拼进文件名之前先清洗（对齐 code.py:299）：它来自模型响应，
 // 带上 "/" 或 ".." 就能把存档写到 tool-results/ 之外。字母数字与 ._- 之外一律换成
@@ -408,12 +479,83 @@ const safeFileId = (toolUseId: string): string =>
     .slice(0, 120) || "unknown";
 
 const PERSISTED_PATH_PREFIX = "Full output: ";
-// 从 L3 的占位文本里取回存档路径；不是 L3 产物就返回 undefined。
-const persistedPathOf = (content: string): string | undefined =>
-  content
-    .split("\n")
-    .find((line) => line.startsWith(PERSISTED_PATH_PREFIX))
-    ?.slice(PERSISTED_PATH_PREFIX.length);
+const SAVED_MARKER_PREFIX = "[Earlier tool result saved at ";
+// 从占位文本里取回存档路径，两种形态都认：L3 的 <persisted-output> 包装，
+// 以及 L2 换上去的一行 [Earlier tool result saved at …]。不是占位文本就返回 undefined。
+//
+// 路径必须落在本 session 的 tool-results/ 里、且文件真的存在才算数：占位文本混在
+// 历史里，模型完全可以在自己的回答或某个文件内容里写出同样的两行，认了就等于让它
+// 指定后续要读回来的路径。
+export function persistedPathOf(
+  content: string,
+  sessionDir: string,
+): string | undefined {
+  let candidate: string | undefined;
+  if (content.startsWith("<persisted-output>\n"))
+    candidate = content
+      .split("\n")
+      .find((line) => line.startsWith(PERSISTED_PATH_PREFIX))
+      ?.slice(PERSISTED_PATH_PREFIX.length);
+  if (content.startsWith(SAVED_MARKER_PREFIX) && content.endsWith("]"))
+    candidate = content.slice(SAVED_MARKER_PREFIX.length, -1);
+  if (!candidate) return undefined;
+  return isFileUnder(candidate, toolResultsDir(sessionDir))
+    ? candidate
+    : undefined;
+}
+// 目标路径是否是 dir 下真实存在的文件 —— 存档路径来自历史文本，用前先落到磁盘上核一遍。
+function isFileUnder(target: string, dir: string): boolean {
+  const resolved = path.resolve(target);
+  if (!resolved.startsWith(path.resolve(dir) + path.sep)) return false;
+  return fs.existsSync(resolved) && fs.statSync(resolved).isFile();
+}
+
+// L3b: fitToolResults —— L2 压完仍超限时的止损
+// 与 L2 的分工：L2 只碰模型已经看过的旧结果，这里连最新一轮还没看过的也压。
+// 光是没看过的那批结果就撑爆上下文时（一次并行读了几个大文件），不压它就只剩 L4
+// 那条路：模型还没见过这些结果，就先花一次 API 调用把整段历史摘要掉。
+// 落盘 + 预览是有路径可回的，摘要不是，所以宁可先压这一层。
+export function fitToolResults(
+  messages: Anthropic.MessageParam[],
+  targetChars: number,
+  logger: SessionLogger,
+  sessionDir: string,
+): Anthropic.MessageParam[] {
+  const before = estimateSize(messages);
+  const persisted: string[] = [];
+  // 从最大的结果开始，压到估算大小回到目标以内就停。
+  const ranked = [...collectToolResults(messages)].sort(
+    (a, b) => outputText(b).length - outputText(a).length,
+  );
+  for (const block of ranked) {
+    if (estimateSize(messages) <= targetChars) break;
+    const output = outputText(block);
+    const replacement = persistedPreview(
+      block.tool_use_id,
+      output,
+      sessionDir,
+      FIT_PREVIEW_LENGTH,
+    );
+    // 换上去反而更长（结果本来就短、或已经是更短的占位符）就别换。
+    if (replacement.length >= output.length) continue;
+    block.content = replacement;
+    persisted.push(`- ${block.tool_use_id}: ${output.length} chars → disk`);
+  }
+
+  if (persisted.length > 0) {
+    const after = estimateSize(messages);
+    print(
+      `[COMPACT L3b] fit tool results: ${persisted.length} results persisted to disk (${before} → ${after} chars)`,
+      "yellow",
+    );
+    logger.section(
+      `[COMPACT L3b] fit tool results (${persisted.length} persisted, ${before} → ${after} chars)`,
+      persisted.join("\n"),
+    );
+  }
+
+  return messages;
+}
 
 // L4: autoCompact —— LLM 完整摘要
 export async function compactHistory(
@@ -590,7 +732,7 @@ export const TOOL_HANDLERS: Partial<
 
 // ═══════════════════════════════════════════════════════════
 //  agentLoop —— 和 s07 一样（task/load_skill 自动分发），
-//  s08 在其上包一层压缩：调 LLM 前跑三个预处理器 + 可选摘要，
+//  s08 在其上包一层压缩：调 LLM 前跑两个预处理器，超限时再逐级加码，
 //  compact 工具单独拦截，API 报超长时应急重试。
 // ═══════════════════════════════════════════════════════════
 
@@ -605,8 +747,8 @@ export async function agentLoop(
   // 应急压缩（reactive）的连续使用次数，一次 API 调用成功即复位。
   let reactiveRetries = 0;
   while (true) {
-    // s08：三个预处理器（0 次 API 调用，先做便宜的）。顺序对齐 CC 源码：budget → snip → micro
-    // L3: 先把大结果落盘
+    // s08：每轮都跑的两个预处理器（0 次 API 调用，先做便宜的）。
+    // L3: 先把最新一轮的大结果落盘
     replaceMessages(
       messages,
       toolResultBudget(messages, TOOL_RESULT_BUDGET, logger, sessionDir),
@@ -616,13 +758,25 @@ export async function agentLoop(
       messages,
       snipCompact(messages, SNIP_MAX_MESSAGES, logger, sessionDir),
     );
-    // L2: 旧结果换占位符
-    replaceMessages(messages, microCompact(messages, logger));
 
-    // s08：仍超阈值 → LLM 摘要（1 次 API 调用）
+    // 上下文还在阈值内就到此为止：旧结果原样留着，模型手上的信息最全。
     if (estimateSize(messages) > CONTEXT_LIMIT) {
-      logger.console("[COMPACT L4] auto compact", "yellow");
-      replaceMessages(messages, await compactHistory(messages, deps));
+      // L2: 旧结果换成存档路径，压到目标就停
+      replaceMessages(
+        messages,
+        microCompact(messages, logger, sessionDir, COMPACT_TARGET_CHARS),
+      );
+      // L3b: 旧结果压完还超，说明大头在没看过的那批结果上，把它们换成预览 + 路径
+      if (estimateSize(messages) > CONTEXT_LIMIT)
+        replaceMessages(
+          messages,
+          fitToolResults(messages, COMPACT_TARGET_CHARS, logger, sessionDir),
+        );
+      // L4: 落盘这条路走到头还超阈值 → LLM 摘要（1 次 API 调用，有损）
+      if (estimateSize(messages) > CONTEXT_LIMIT) {
+        logger.console("[COMPACT L4] auto compact", "yellow");
+        replaceMessages(messages, await compactHistory(messages, deps));
+      }
     }
 
     let response: Anthropic.Message;
@@ -752,7 +906,7 @@ if (import.meta.main) {
     process.exit(0);
   });
 
-  print("s08: Context Compact — 四层压缩流水线，先便宜后昂贵", "cyan");
+  print("s08: Context Compact — 五层压缩流水线，先便宜后昂贵", "cyan");
   print("输入问题，回车发送。输入 q 退出。\n", "green");
 
   const history: Anthropic.MessageParam[] = [];
