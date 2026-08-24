@@ -59,7 +59,9 @@ User prefers using tabs, not spaces, for indentation.
 ```python
 def write_memory_file(name, mem_type, description, body):
     path = MEMORY_DIR / f"{memory_slug(name)}.md"
-    path.write_text(memory_document(name, mem_type, description, body))
+    path.write_text(
+        memory_document(name, mem_type, description, body), encoding="utf-8"
+    )
     rebuild_memory_index()
     return path
 ```
@@ -123,7 +125,7 @@ if not tool_calls:
 
 ```python
 snapshot = {
-    path.name: path.read_text()
+    path.name: path.read_text(encoding="utf-8")
     for path in MEMORY_DIR.glob("*.md")
     if path.name != MEMORY_INDEX.name
 }
@@ -137,14 +139,14 @@ try:
         path.write_text(memory_document(
             record["name"], record["type"],
             record["description"], record["body"],
-        ))
+        ), encoding="utf-8")
     rebuild_memory_index()
 except Exception:
     for path in MEMORY_DIR.glob("*.md"):
         if path.name != MEMORY_INDEX.name:
             path.unlink()
     for filename, content in snapshot.items():
-        (MEMORY_DIR / filename).write_text(content)
+        (MEMORY_DIR / filename).write_text(content, encoding="utf-8")
     rebuild_memory_index()
     raise
 ```

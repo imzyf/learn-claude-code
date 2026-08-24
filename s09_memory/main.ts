@@ -62,12 +62,14 @@ import {
   type SkillRegistry,
 } from "../s07_skill_loading/main";
 // 来自 s08：完整工具列表（base + task + load_skill + compact）+ 合并后的
-// schema/handler 表 + 四层压缩流水线 + reactive 应急压缩 + 原地替换工具 +
+// schema/handler 表 + 五层压缩流水线 + reactive 应急压缩 + 原地替换工具 +
 // 各层阈值（env 可配）。
 import {
+  COMPACT_TARGET_CHARS,
   CONTEXT_LIMIT,
   compactHistory,
   estimateSize,
+  fitToolResults,
   MAX_REACTIVE_RETRIES,
   microCompact,
   reactiveCompact,
@@ -775,7 +777,7 @@ export async function agentLoop(
     // s09：留一份压缩前快照，供本轮结束时精确提取记忆。
     const preCompact = structuredClone(messages);
 
-    // s08：三个预处理器：budget → snip → micro
+    // s08：每轮都跑 budget → snip，超阈值才逐级加码 micro → fit → LLM 摘要。
     replaceMessages(
       messages,
       toolResultBudget(messages, TOOL_RESULT_BUDGET, logger, sessionDir),
@@ -784,10 +786,20 @@ export async function agentLoop(
       messages,
       snipCompact(messages, SNIP_MAX_MESSAGES, logger, sessionDir),
     );
-    replaceMessages(messages, microCompact(messages, logger));
     if (estimateSize(messages) > CONTEXT_LIMIT) {
-      logger.console("[COMPACT L4] auto compact", "yellow");
-      replaceMessages(messages, await compactHistory(messages, deps));
+      replaceMessages(
+        messages,
+        microCompact(messages, logger, sessionDir, COMPACT_TARGET_CHARS),
+      );
+      if (estimateSize(messages) > CONTEXT_LIMIT)
+        replaceMessages(
+          messages,
+          fitToolResults(messages, COMPACT_TARGET_CHARS, logger, sessionDir),
+        );
+      if (estimateSize(messages) > CONTEXT_LIMIT) {
+        logger.console("[COMPACT L4] auto compact", "yellow");
+        replaceMessages(messages, await compactHistory(messages, deps));
+      }
     }
 
     let response: Anthropic.Message;
