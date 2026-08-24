@@ -25,7 +25,8 @@
  *     分钟重复入队，两者都随 durable 任务落盘
  *   + CronState：scheduledJobs / cronQueue，由 session 持有、跨轮复用
  *   + cronFor：croner 模式的构造+缓存单一入口，匹配与校验都走它
- *     （DOM/DOW 的 OR 语义、步长/区间/校验都由库负责，不再手写字段匹配；
+ *     （DOM/DOW 的 OR 语义、步长/区间/取值范围都由库负责，不再手写字段匹配；
+ *      只有 5 段这一条限制自己卡，因为 croner 也收 6/7 段；
  *      匹配内联进 runCronTick，校验靠构造抛错，均无需单独函数）
  *   + scheduleJob / cancelJob：注册/移除 cron 任务（带校验）
  *   + runCronTick：单次扫描，把到期任务推进 cronQueue（定时器每秒调用）
@@ -134,9 +135,14 @@ export function createCronState(sessionDir: string): CronState {
 // croner 每个模式解析一次即可复用；match 是纯计算、不启定时器，可安全缓存。
 const patternCache = new Map<string, Cron>();
 // cronFor：构造 + 匹配 + 校验的单一入口，解析结果按表达式缓存复用。
+// croner 本身也接受 6 段（带秒）和 7 段（带年）表达式，但 runCronTick 是分钟粒度、
+// 匹配前会把秒清零，收下 `*/30 * * * * *` 只会每分钟触发一次。段数在进 croner 前
+// 自己卡死，让模型拿到明确的错误，而不是一个被悄悄降级的任务。
 function cronFor(expr: string): Cron {
   let cron = patternCache.get(expr);
   if (!cron) {
+    const fields = expr.trim().split(/\s+/).length;
+    if (fields !== 5) throw new Error(`Expected 5 fields, got ${fields}`);
     cron = new Cron(expr);
     patternCache.set(expr, cron);
   }
@@ -273,12 +279,12 @@ export function hasCronQueue(state: CronState): boolean {
 // 模型已成功接收注入的消息：一次性任务注销，周期任务清 pendingDelivery 等下次匹配。
 // 落盘失败时把内存状态和队列一起回滚，宁可重复交付也不丢任务。
 export function acknowledgeCronJobs(state: CronState, jobs: CronJob[]): void {
-  const changed: { job: CronJob; pending: boolean }[] = [];
+  const changed: CronJob[] = [];
   const removed: CronJob[] = [];
   for (const delivered of jobs) {
     const current = state.scheduledJobs.get(delivered.id);
     if (!current) continue; // 交付期间被 cancel_cron 取消
-    changed.push({ job: current, pending: current.pendingDelivery });
+    changed.push(current);
     if (current.recurring) {
       current.pendingDelivery = false;
     } else {
@@ -287,14 +293,12 @@ export function acknowledgeCronJobs(state: CronState, jobs: CronJob[]): void {
     }
   }
   try {
-    if (changed.some(({ job }) => job.durable)) saveDurableJobs(state);
+    if (changed.some((job) => job.durable)) saveDurableJobs(state);
   } catch (e) {
+    // 销账没落盘就当没销过：一次性任务重新注册，所有涉及的任务统一按待投递处理
+    //（restoreCronJobs 会置回 pendingDelivery 并放回队列），宁可重复交付也不丢任务。
     for (const job of removed) state.scheduledJobs.set(job.id, job);
-    for (const { job, pending } of changed) job.pendingDelivery = pending;
-    restoreCronJobs(
-      state,
-      changed.map(({ job }) => job),
-    );
+    restoreCronJobs(state, changed);
     throw e;
   }
 }

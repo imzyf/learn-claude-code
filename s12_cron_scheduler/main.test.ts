@@ -3,10 +3,12 @@
  *
  * s12 的新增点是 cron 调度器层，测试只聚焦这一层：
  *   - runCronTick 匹配语义：字段匹配（*、步长、逗号、区间）与 DOM/DOW 的 OR
- *   - scheduleJob / cancelJob：注册/移除、非法表达式与空 prompt 拒绝、durable 落盘
+ *   - scheduleJob / cancelJob：注册/移除、非法表达式（含 croner 收但本章不收的
+ *     6 段带秒形式）与空 prompt 拒绝、durable 落盘
  *   - saveDurableJobs / loadDurableJobs：往返，跳过非法任务，pendingDelivery 重新入队
  *   - runCronTick：命中入队、同分钟去重、未销账前不重复入队
- *   - acknowledgeCronJobs / restoreCronJobs：一次性任务销账后移除、失败后回队列
+ *   - acknowledgeCronJobs / restoreCronJobs：一次性任务销账后移除、失败后回队列、
+ *     销账落盘失败时回滚成待投递
  *   - tools 叠加后仍带 cron 工具，s02 的基础工具仍在
  *   - agentLoop：消费 cron 队列注入 [Scheduled]、失败撤回、成功销账；
  *     schedule_cron 端到端注册一条任务
@@ -101,6 +103,12 @@ describe("runCronTick 匹配语义", () => {
     expect(fires("0 9 * *", new Date(2026, 2, 1, 9, 0))).toBe(false);
   });
 
+  it("拒绝 croner 也接受的 6 段（带秒）表达式", () => {
+    // 本章是分钟粒度：收下带秒的表达式只会每分钟触发一次，不如直接拒绝。
+    expect(fires("0 0 9 * * *", new Date(2026, 2, 1, 9, 0))).toBe(false);
+    expect(fires("*/30 * * * * *", new Date(2026, 2, 1, 9, 0))).toBe(false);
+  });
+
   it("DOM 和 DOW 都受限时使用 OR 逻辑", () => {
     // dom=1, dow=Tuesday(2). 03-01 是周日但 DOM=1 → 命中；03-03 是周二但 DOM≠1 → 命中。
     const cron = "0 9 1 * 2";
@@ -140,6 +148,13 @@ describe("scheduleJob / cancelJob", () => {
     const state = new CronState(durable());
     const err = scheduleJob(state, "bad", "x", true, false, noopLogger);
     expect(typeof err).toBe("string");
+    expect(state.scheduledJobs.size).toBe(0);
+  });
+
+  it("段数不是 5 时把错误回传给调用方", () => {
+    const state = new CronState(durable());
+    const err = scheduleJob(state, "0 0 9 * * *", "x", true, false, noopLogger);
+    expect(err).toBe("Expected 5 fields, got 6");
     expect(state.scheduledJobs.size).toBe(0);
   });
 
@@ -291,6 +306,20 @@ describe("acknowledgeCronJobs / restoreCronJobs", () => {
     restoreCronJobs(state, fired);
     expect(state.cronQueue.map((j) => j.id)).toEqual(["cron_1"]);
     expect(state.scheduledJobs.get("cron_1")?.pendingDelivery).toBe(true);
+  });
+
+  it("销账落盘失败时重新注册并放回队列", () => {
+    // durablePath 指向一个已存在的目录：rename 到目录上会抛错，等价于落盘失败。
+    const state = new CronState(dir);
+    const once = makeJob({ id: "cron_once", recurring: false, durable: true });
+    state.scheduledJobs.set(once.id, once);
+    once.pendingDelivery = true;
+    const fired = [once];
+
+    expect(() => acknowledgeCronJobs(state, fired)).toThrow();
+    expect(state.scheduledJobs.has("cron_once")).toBe(true);
+    expect(state.scheduledJobs.get("cron_once")?.pendingDelivery).toBe(true);
+    expect(state.cronQueue.map((j) => j.id)).toEqual(["cron_once"]);
   });
 
   it("忽略执行期间被取消的任务", () => {
