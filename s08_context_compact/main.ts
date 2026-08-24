@@ -30,8 +30,7 @@
  *
  * 相比 s07 的变化：
  *   工具层：复用 s07 的三张表（base + load_skill）并合入 s06 的 task，只往
- *          「给 API 看」的 tools 列表追加一个 compact，另外换掉 glob 的实现
- *          （结果排序 + 200 条上限，同 code.py 从本章起的改动）。
+ *          「给 API 看」的 tools 列表追加一个 compact。
  *          todo_write 与 nag 不在本章（同 code.py 的 BASE_TOOLS + compact）。
  *   Hook 层：hook 系统（触发器）复用 s04，默认 hook 复用 s05，与 s07 一致。
  *   Subagent / Skill：spawnSubagent 复用 s06、技能层复用 s07，不再重复定义。
@@ -701,47 +700,13 @@ export async function reactiveCompact(
 //  工具装配：s07（base + load_skill）+ s06 的 task + compact
 //  schema/handler 表由 s06、s07 两张合并而来；compact 只加进「给 API 看」的
 //  tools 列表，由 agentLoop 拦截（它要重写整个 messages[]），不走 dispatch。
-//  glob 的 handler 与描述在本章被换成下面这一份。
 // ═══════════════════════════════════════════════════════════
 
 // 无入参：compact 压缩的是整段历史，模型不需要（也不该）指定压缩范围。
 const compactSchema = z.object({});
 
-// glob 从本章起换成这一份（同 code.py：上游也是在 s08 改的，s02-s07 保持旧版）：
-// 结果排序，并截到 GLOB_MAX_MATCHES 条。一次 `**/*` 能刷出上万行，
-// 整段进 messages 就是让压缩流水线替它买单，这里先在源头把结果压住。
-const GLOB_MAX_MATCHES = 200;
-
-export function runGlob(pattern: string): string {
-  const workdir = process.cwd();
-  try {
-    // Node 的 globSync 本身就递归展开 `**`、结果也不重复，Python 那边的
-    // recursive=True 与 set() 在这里都不必要，只需要补上排序。
-    const matches = fs
-      .globSync(pattern, { cwd: workdir })
-      .filter((m) => path.resolve(workdir, m).startsWith(workdir + path.sep))
-      .sort();
-    const shown: string[] = matches.slice(0, GLOB_MAX_MATCHES);
-    if (matches.length > GLOB_MAX_MATCHES) {
-      shown.push("... (more matches omitted; narrow the pattern)");
-    }
-    return shown.length ? shown.join("\n") : "(no matches)";
-  } catch (e) {
-    return `Error: ${errMsg(e)}`;
-  }
-}
-
 export const tools: Anthropic.Tool[] = [
-  // glob 的描述跟着换一份：截断和 `**` 的行为要让模型知道，否则它会以为结果是全的。
-  ...s07Tools.map((tool) =>
-    tool.name === "glob"
-      ? {
-          ...tool,
-          description:
-            "Find files matching a glob pattern; ** matches recursively.",
-        }
-      : tool,
-  ),
+  ...s07Tools,
   ...s06Tools.filter((tool) => tool.name === "task"),
   // s08 新增：compact（触发 compactHistory，不是空操作）
   zodTool(
@@ -763,8 +728,6 @@ export const TOOL_HANDLERS: Partial<
 > = {
   ...S06_TOOL_HANDLERS,
   ...S07_TOOL_HANDLERS,
-  // 覆盖 s02 那份 glob：本章起走上面带排序与上限的实现。
-  glob: ({ pattern }) => runGlob(pattern),
 };
 
 // ═══════════════════════════════════════════════════════════

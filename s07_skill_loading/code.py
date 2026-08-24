@@ -89,7 +89,7 @@ class SkillLoader:
             if (not manifest.is_file()
                     or not manifest.resolve().is_relative_to(skills_root)):
                 continue
-            content = manifest.read_text()
+            content = manifest.read_text(encoding="utf-8")
             metadata, body = self.parse_frontmatter(content)
             raw_name = metadata.get("name")
             name = raw_name.strip() if isinstance(raw_name, str) else ""
@@ -152,7 +152,7 @@ def run_bash(command: str) -> str:
 
 def run_read(path: str, limit: int | None = None) -> str:
     try:
-        lines = (WORKDIR / path).resolve().read_text().splitlines()
+        lines = (WORKDIR / path).resolve().read_text(encoding="utf-8").splitlines()
         if limit and limit < len(lines):
             lines = lines[:limit] + [f"... ({len(lines) - limit} more lines)"]
         return "\n".join(lines)
@@ -164,7 +164,7 @@ def run_write(path: str, content: str) -> str:
     try:
         file_path = (WORKDIR / path).resolve()
         file_path.parent.mkdir(parents=True, exist_ok=True)
-        file_path.write_text(content)
+        file_path.write_text(content, encoding="utf-8")
         return f"Wrote {len(content)} bytes to {path}"
     except Exception as e:
         return f"Error: {e}"
@@ -173,10 +173,10 @@ def run_write(path: str, content: str) -> str:
 def run_edit(path: str, old_text: str, new_text: str) -> str:
     try:
         file_path = (WORKDIR / path).resolve()
-        text = file_path.read_text()
+        text = file_path.read_text(encoding="utf-8")
         if old_text not in text:
             return f"Error: text not found in {path}"
-        file_path.write_text(text.replace(old_text, new_text, 1))
+        file_path.write_text(text.replace(old_text, new_text, 1), encoding="utf-8")
         return f"Edited {path}"
     except Exception as e:
         return f"Error: {e}"
@@ -185,11 +185,15 @@ def run_edit(path: str, old_text: str, new_text: str) -> str:
 def run_glob(pattern: str) -> str:
     import glob
     try:
-        matches = []
-        for match in glob.glob(pattern, root_dir=WORKDIR):
-            if (WORKDIR / match).resolve().is_relative_to(WORKDIR):
-                matches.append(match)
-        return "\n".join(matches) if matches else "(no matches)"
+        matches = sorted({
+            match for match in glob.glob(
+                pattern, root_dir=WORKDIR, recursive=True)
+            if (WORKDIR / match).resolve().is_relative_to(WORKDIR)
+        })
+        shown = matches[:200]
+        if len(matches) > 200:
+            shown.append("... (more matches omitted; narrow the pattern)")
+        return "\n".join(shown) if shown else "(no matches)"
     except Exception as e:
         return f"Error: {e}"
 
@@ -203,7 +207,7 @@ TOOLS = [
      "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}},
     {"name": "edit_file", "description": "Replace exact text in a file once.",
      "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}}, "required": ["path", "old_text", "new_text"]}},
-    {"name": "glob", "description": "Find files matching a glob pattern.",
+    {"name": "glob", "description": "Find files matching a glob pattern; ** matches recursively.",
      "input_schema": {"type": "object", "properties": {"pattern": {"type": "string"}}, "required": ["pattern"]}},
     {"name": "load_skill", "description": "Load the full SKILL.md content by skill name.",
      "input_schema": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}},

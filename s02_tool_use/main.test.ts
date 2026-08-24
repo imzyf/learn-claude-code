@@ -135,11 +135,28 @@ describe("runEdit", () => {
 
 // ── runGlob ───────────────────────────────────────────────
 describe("runGlob", () => {
-  it("列出匹配的文件", () => {
-    fs.writeFileSync(path.join(tmp, "g1.mjsx"), "");
-    fs.writeFileSync(path.join(tmp, "g2.mjsx"), "");
-    const out = runGlob(rel("*.mjsx"));
-    expect(out.split("\n").sort()).toEqual([rel("g1.mjsx"), rel("g2.mjsx")]);
+  it("列出匹配的文件，按文件名排序", () => {
+    for (const name of ["g2.mjsx", "g1.mjsx", "g3.mjsx"]) {
+      fs.writeFileSync(path.join(tmp, name), "");
+    }
+    expect(runGlob(rel("*.mjsx")).split("\n")).toEqual([
+      rel("g1.mjsx"),
+      rel("g2.mjsx"),
+      rel("g3.mjsx"),
+    ]);
+  });
+
+  it("超过 200 条时截断，并留一行提示", () => {
+    for (let i = 0; i < 201; i++) {
+      fs.writeFileSync(
+        path.join(tmp, `f${String(i).padStart(3, "0")}.mjsx`),
+        "",
+      );
+    }
+    const lines = runGlob(rel("*.mjsx")).split("\n");
+    expect(lines).toHaveLength(201);
+    expect(lines[199]).toBe(rel("f199.mjsx"));
+    expect(lines[200]).toBe("... (more matches omitted; narrow the pattern)");
   });
 
   it("没有匹配项时返回占位符", () => {

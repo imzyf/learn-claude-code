@@ -109,12 +109,23 @@ export function runEdit(p: string, oldText: string, newText: string): string {
 }
 
 // glob：按 pattern 找文件，让 model 先定位再读，不用 `ls` 一层层试。
+// 结果排序，并截到 GLOB_MAX_MATCHES 条：一次 `**/*` 能刷出上万行，
+// 整段进 messages 就是白烧 context，先在源头把结果压住。
+const GLOB_MAX_MATCHES = 200;
+
 export function runGlob(pattern: string): string {
   try {
-    const results = fs
+    // Node 的 globSync 本身就递归展开 `**`、结果也不重复，code.py 那边的
+    // recursive=True 与 set() 在这里都不必要，只需要补上排序。
+    const matches = fs
       .globSync(pattern, { cwd: WORKDIR })
-      .filter((m) => path.resolve(WORKDIR, m).startsWith(WORKDIR + path.sep));
-    return results.length ? results.join("\n") : "(no matches)";
+      .filter((m) => path.resolve(WORKDIR, m).startsWith(WORKDIR + path.sep))
+      .sort();
+    const shown: string[] = matches.slice(0, GLOB_MAX_MATCHES);
+    if (matches.length > GLOB_MAX_MATCHES) {
+      shown.push("... (more matches omitted; narrow the pattern)");
+    }
+    return shown.length ? shown.join("\n") : "(no matches)";
   } catch (e) {
     return `Error: ${errMsg(e)}`;
   }
@@ -140,7 +151,11 @@ export const tools: Anthropic.Tool[] = [
   zodTool("read_file", "Read file contents.", readSchema),
   zodTool("write_file", "Write content to a file.", writeSchema),
   zodTool("edit_file", "Replace exact text in a file once.", editSchema),
-  zodTool("glob", "Find files matching a glob pattern.", globSchema),
+  zodTool(
+    "glob",
+    "Find files matching a glob pattern; ** matches recursively.",
+    globSchema,
+  ),
 ];
 
 // ═══════════════════════════════════════════════════════════

@@ -63,7 +63,7 @@ class SkillLoader:
             if (not manifest.is_file()
                     or not manifest.resolve().is_relative_to(skills_root)):
                 continue
-            content = manifest.read_text()
+            content = manifest.read_text(encoding="utf-8")
             metadata, body = self.parse_frontmatter(content)
             raw_name = metadata.get("name")
             name = raw_name.strip() if isinstance(raw_name, str) else ""

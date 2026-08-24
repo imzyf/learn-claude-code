@@ -32,7 +32,6 @@ import {
   persistLargeOutput,
   reactiveCompact,
   replaceMessages,
-  runGlob,
   snipCompact,
   summarizeHistory,
   toolResultBudget,
@@ -41,7 +40,7 @@ import {
 // 压缩层的落盘产物以 sessionDir 为根，测试注入临时目录，避免写进 s08 自己的目录。
 let tmp = "";
 
-const rel = useTempDir(import.meta.dirname, (dir) => {
+useTempDir(import.meta.dirname, (dir) => {
   tmp = dir;
 });
 
@@ -320,37 +319,6 @@ describe("fitToolResults", () => {
     const messages: Anthropic.MessageParam[] = toolRound("t1", "tiny");
     fitToolResults(messages, 1, noopLogger, tmp);
     expect(collectToolResults(messages)[0].content).toBe("tiny");
-  });
-});
-
-// ── runGlob：本章换掉的那份（排序 + 200 条上限）─────────
-describe("runGlob", () => {
-  it("结果按文件名排序输出", () => {
-    for (const name of ["g2.mjsx", "g1.mjsx", "g3.mjsx"]) {
-      fs.writeFileSync(path.join(tmp, name), "");
-    }
-    expect(runGlob(rel("*.mjsx")).split("\n")).toEqual([
-      rel("g1.mjsx"),
-      rel("g2.mjsx"),
-      rel("g3.mjsx"),
-    ]);
-  });
-
-  it("超过 200 条时截断，并留一行提示", () => {
-    for (let i = 0; i < 201; i++) {
-      fs.writeFileSync(
-        path.join(tmp, `f${String(i).padStart(3, "0")}.mjsx`),
-        "",
-      );
-    }
-    const lines = runGlob(rel("*.mjsx")).split("\n");
-    expect(lines).toHaveLength(201);
-    expect(lines[200]).toBe("... (more matches omitted; narrow the pattern)");
-    expect(lines[199]).toBe(rel("f199.mjsx"));
-  });
-
-  it("没有匹配项时返回占位符", () => {
-    expect(runGlob(rel("*.does-not-exist"))).toBe("(no matches)");
   });
 });
 
