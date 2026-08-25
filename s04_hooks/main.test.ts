@@ -2,8 +2,9 @@
  * s04_hooks/main.test.ts
  *
  * Hook 注册表（hooks.register / hooks.trigger）的核心语义：按序执行、
- * 第一个非 null 返回值即中断。permissionHook 通过工厂注入 Confirm，
- * 测试用 fake 确认函数覆盖 allow / deny，无需真实 stdin。
+ * 第一个非 null 返回值即中断，triggerSkippingPermission 只跳过 permissionHook。
+ * permissionHook 通过工厂注入 Confirm，测试用 fake 确认函数覆盖 allow / deny，
+ * 无需真实 stdin。
  * 每个用例各建各的 createHooks(noopLogger) 实例，天然隔离。
  */
 
@@ -58,6 +59,28 @@ describe("hooks.trigger", () => {
     const hooks = createHooks(noopLogger);
     hooks.register("PreToolUse", async () => "async-block");
     expect(await hooks.trigger("PreToolUse", {})).toBe("async-block");
+  });
+
+  it("triggerSkippingPermission 跳过 permissionHook，其余照常跑", async () => {
+    const hooks = createHooks(noopLogger);
+    const confirm = vi.fn(refuse);
+    const other = vi.fn(() => null);
+    hooks.register("PreToolUse", makePermissionHook(confirm));
+    hooks.register("PreToolUse", other);
+    // rm 会命中破坏性命令规则：permissionHook 跑起来就会问 confirm 并拦截。
+    const call = toolUseBlock("t", "bash", { command: "rm notes.txt" });
+
+    expect(
+      await hooks.triggerSkippingPermission("PreToolUse", call),
+    ).toBeNull();
+    expect(confirm).not.toHaveBeenCalled();
+    expect(other).toHaveBeenCalledOnce();
+
+    // 普通 trigger 仍然会问、会拦。
+    expect(await hooks.trigger("PreToolUse", call)).toBe(
+      "Permission denied by user",
+    );
+    expect(confirm).toHaveBeenCalledOnce();
   });
 });
 

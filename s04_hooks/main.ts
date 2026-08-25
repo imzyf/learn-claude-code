@@ -22,6 +22,8 @@
  * 相比 s03 的变化：
  *   + hook 实例 createHooks()（注册表 + logger 收进闭包，经 deps 传递）
  *   + hooks.register() / hooks.trigger()
+ *     （另有 hooks.triggerSkippingPermission()：对应 code.py 的
+ *      trigger_hooks(skip_permission=True)，给自己判过权限的调用方用）
  *   + contextInjectHook（UserPromptSubmit）
  *   + permissionHook、logHook（PreToolUse）
  *   + largeOutputHook（PostToolUse）
@@ -102,6 +104,13 @@ export interface HookSystem {
   logRegistration(): void;
   // 触发一个 event，跑其所有 hook
   trigger(event: HookEvent, ...args: any[]): Promise<string | null>;
+  // 跳过 permissionHook 触发一个 event：调用方已经自己判过权限，
+  // 且没有终端可以问用户。对应 code.py 的
+  // trigger_hooks(..., skip_permission=True)，s13 的队友工具通道用它。
+  triggerSkippingPermission(
+    event: HookEvent,
+    ...args: any[]
+  ): Promise<string | null>;
 }
 
 export function createHooks(logger: SessionLogger): HookSystem {
@@ -111,19 +120,35 @@ export function createHooks(logger: SessionLogger): HookSystem {
     PostToolUse: [],
     Stop: [],
   };
+  async function run(
+    event: HookEvent,
+    skipPermission: boolean,
+    args: any[],
+  ): Promise<string | null> {
+    for (const callback of registry[event]) {
+      if (skipPermission && isPermissionHook(callback)) continue;
+      const result = await callback(logger, ...args);
+      // 拦截记录集中在这里，而不是散落进每个 hook。
+      logHookResult(logger, event, callback.name, args, result);
+      if (result != null) return result; // hook 返回非 null 即拦截这次 tool call
+    }
+    return null;
+  }
+
   return {
     register(event: HookEvent, callback: Hook): void {
       registry[event].push(callback);
     },
 
-    async trigger(event: HookEvent, ...args: any[]): Promise<string | null> {
-      for (const callback of registry[event]) {
-        const result = await callback(logger, ...args);
-        // 拦截记录集中在这里，而不是散落进每个 hook。
-        logHookResult(logger, event, callback.name, args, result);
-        if (result != null) return result; // hook 返回非 null 即拦截这次 tool call
-      }
-      return null;
+    trigger(event: HookEvent, ...args: any[]): Promise<string | null> {
+      return run(event, false, args);
+    },
+
+    triggerSkippingPermission(
+      event: HookEvent,
+      ...args: any[]
+    ): Promise<string | null> {
+      return run(event, true, args);
     },
 
     // 注册完一次性把各 event 的 hook 名单写进 transcript（按最长 event 名对齐）。
@@ -171,8 +196,17 @@ export function logHookResult(
 // 关卡 1（checkDenyList）和关卡 2（checkRules）连同名单本身都留在 s03，
 // 这里只负责把「判定结果」翻译成 hook 的返回值：非 null 即拦截。
 // 工厂函数：闭包捕获 confirm，返回真正的 hook（这就是给回调注入依赖的标准手法）。
+// code.py 用 `callback is permission_hook` 认出要跳过的 hook；这里的 hook 由工厂
+// 生成，没有模块级的那一份可比，所以把产出登记进 WeakSet，同样按身份识别
+//（不看函数名，改名不会悄悄失效）。
+const permissionHooks = new WeakSet<Hook>();
+
+export function isPermissionHook(callback: Hook): boolean {
+  return permissionHooks.has(callback);
+}
+
 export function makePermissionHook(confirm: Confirm): Hook {
-  return async function permissionHook(
+  const hook: Hook = async function permissionHook(
     logger: SessionLogger,
     call: Anthropic.ToolUseBlock,
   ): Promise<string | null> {
@@ -191,6 +225,8 @@ export function makePermissionHook(confirm: Confirm): Hook {
     }
     return null;
   };
+  permissionHooks.add(hook);
+  return hook;
 }
 
 // PreToolUse：记录每一次工具调用。

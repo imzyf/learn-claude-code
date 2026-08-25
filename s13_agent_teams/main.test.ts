@@ -7,9 +7,12 @@
  *   - owner 维度的 claimTask / completeTask：占用中不能再认领、非 owner 不能完成、
  *     计划闸门未放行不能完成、完成后汇报解除阻塞
  *   - assignment 与工作目录：无 assignment 回退仓库目录、worktree 绑定坏了 fail closed
+ *   - 工作区工具：按 assignment 的目录读写、拦住越界路径、glob 排序与截断
  *   - 任务发现：scanUnclaimedTasks 过滤 + claimNextTask 原子认领
  *   - 协议：shutdown 与 plan_approval 的 request_id 关联、错配与过期审批被忽略
- *   - runTeammateTool：闸门拦住 bash / write_file，read_file 仍可用
+ *   - runTeammateTool：闸门拦住 bash / write_file，read_file 仍可用，
+ *     权限规则按命令 / 路径给不同指引；hook 照跑但跳过 permissionHook，
+ *     且它的返回值不拦截工具
  *   - spawnTeammateThread：重名 / 保留名 / 认领失败拒绝；队友跑完发 result +
  *     idle_notification 并转 IDLE；IDLE 自动认领任务板上的 ready task；关机握手退出
  *   - 工具集：Lead 带团队工具，队友工具集不含 create_task / spawn_teammate
@@ -30,7 +33,8 @@ import {
   textBlock,
   toolUseBlock,
 } from "../lib/testing";
-import { createHooks } from "../s04_hooks/main";
+import type { Handlers } from "../s02_tool_use/main";
+import { createHooks, makePermissionHook } from "../s04_hooks/main";
 import { TaskStore } from "../s10_task_system/main";
 import {
   agentLoop,
@@ -44,6 +48,8 @@ import {
   formatTeamEvents,
   MessageBus,
   makeTeamHandlers,
+  makeWorkspaceHandlers,
+  removeWorktree,
   runTeammateTool,
   scanUnclaimedTasks,
   spawnTeammateThread,
@@ -73,6 +79,9 @@ const newTeam = () =>
     path.join(dir, ".worktrees"),
     20,
   );
+
+// 队友和 Lead 共用一份 hook；多数用例只要一个没注册任何 hook 的空实例。
+const newHooks = () => createHooks(noopLogger);
 
 const waitFor = async (cond: () => boolean, ms = 2000): Promise<void> => {
   const start = Date.now();
@@ -245,6 +254,58 @@ describe("assignmentCwd / worktree binding", () => {
       createWorktree(team, "auth-refactor", task.id, noopLogger),
     ).toContain("must be pending and unowned");
   });
+
+  it("removeWorktree 拒绝非法名称和未注册的 worktree", () => {
+    const team = newTeam();
+    expect(removeWorktree(team, "../escape")).toContain("must be 1-64");
+    expect(removeWorktree(team, "ghost")).toContain("not registered with Git");
+  });
+});
+
+// ── 工作区工具 ─────────────────────────────────────────────
+describe("makeWorkspaceHandlers", () => {
+  it("没有工作目录时不执行工具", () => {
+    const handlers = makeWorkspaceHandlers(() => ({
+      error: "Error: Claim a Task before using workspace tools.",
+    }));
+    expect(handlers.read_file?.({ path: "a.txt" })).toBe(
+      "Error: Claim a Task before using workspace tools.",
+    );
+  });
+
+  it("按 assignment 的目录读写并拦住越界路径", () => {
+    const handlers = makeWorkspaceHandlers(() => ({ cwd: dir }));
+    expect(handlers.write_file?.({ path: "notes.txt", content: "hi" })).toBe(
+      "Wrote 2 bytes to notes.txt",
+    );
+    expect(fs.readFileSync(path.join(dir, "notes.txt"), "utf8")).toBe("hi");
+    expect(handlers.read_file?.({ path: "notes.txt" })).toBe("hi");
+    expect(handlers.read_file?.({ path: "../escape.txt" })).toContain(
+      "Path escapes workspace",
+    );
+  });
+
+  it("glob 结果排序，超出上限时说明已截断", () => {
+    for (const name of ["b.txt", "a.txt", "c.txt"]) {
+      fs.writeFileSync(path.join(dir, name), "");
+    }
+    const handlers = makeWorkspaceHandlers(() => ({ cwd: dir }));
+    expect(handlers.glob?.({ pattern: "*.txt" })).toBe("a.txt\nb.txt\nc.txt");
+    expect(handlers.glob?.({ pattern: "*.md" })).toBe("No files found");
+
+    for (let i = 0; i < 201; i += 1) {
+      fs.writeFileSync(
+        path.join(dir, `f${String(i).padStart(3, "0")}.log`),
+        "",
+      );
+    }
+    const capped = (handlers.glob?.({ pattern: "*.log" }) ?? "").split("\n");
+    expect(capped).toHaveLength(201);
+    expect(capped[0]).toBe("f000.log");
+    expect(capped.at(-1)).toBe(
+      "... (more matches omitted; narrow the pattern)",
+    );
+  });
 });
 
 // ── 任务发现 ───────────────────────────────────────────────
@@ -276,7 +337,12 @@ describe("team protocols", () => {
   it("将关闭响应匹配回对应请求", () => {
     const team = newTeam();
     team.activeTeammates.set("alice", "working");
-    const handlers = makeTeamHandlers(team, fakeClient(), noopLogger);
+    const handlers = makeTeamHandlers(
+      team,
+      fakeClient(),
+      noopLogger,
+      newHooks(),
+    );
     const requested = handlers.request_shutdown?.({ teammate: "alice" }) ?? "";
     const requestId = requested.match(/req_\d{6}/)?.[0] ?? "";
     expect(requestId).not.toBe("");
@@ -307,7 +373,12 @@ describe("team protocols", () => {
     expect(team.gateOf("alice")).toBe("pending");
     expect(team.bus.readInbox("lead")[0].type).toBe("plan_approval_request");
 
-    const handlers = makeTeamHandlers(team, fakeClient(), noopLogger);
+    const handlers = makeTeamHandlers(
+      team,
+      fakeClient(),
+      noopLogger,
+      newHooks(),
+    );
     expect(
       handlers.review_plan?.({ request_id: requestId, approve: true }),
     ).toContain("Plan approved");
@@ -326,7 +397,12 @@ describe("team protocols", () => {
       submitPlan(team, "alice", "plan").match(/req_\d{6}/)?.[0] ?? "";
     team.bus.readInbox("lead");
 
-    const handlers = makeTeamHandlers(team, fakeClient(), noopLogger);
+    const handlers = makeTeamHandlers(
+      team,
+      fakeClient(),
+      noopLogger,
+      newHooks(),
+    );
     // 队友换了任务：审批仍指向上一份 assignment。
     team.planGates.set("alice", "approved");
     completeTask(team, task.id, "alice", noopLogger);
@@ -356,64 +432,103 @@ describe("runTeammateTool", () => {
   const block = (name: string, input: unknown) =>
     toolUseBlock("tu_1", name, input);
 
-  it("计划获批前拦截修改类工具", () => {
+  const run = (
+    team: TeamState,
+    call: Anthropic.ToolUseBlock,
+    handlers: Handlers,
+    hooks = newHooks(),
+  ) => runTeammateTool(team, "alice", call, handlers, noopLogger, hooks);
+
+  it("计划获批前拦截修改类工具", async () => {
     const team = newTeam();
     team.planGates.set("alice", "required");
     const handlers = { bash: () => "ran", read_file: () => "contents" };
 
     expect(
-      runTeammateTool(
-        team,
-        "alice",
-        block("bash", { command: "ls" }),
-        handlers,
-        noopLogger,
-      ),
+      await run(team, block("bash", { command: "ls" }), handlers),
     ).toContain("Blocked: plan status is required");
     // 只读工具不受闸门限制。
     expect(
-      runTeammateTool(
-        team,
-        "alice",
-        block("read_file", { path: "a.txt" }),
-        handlers,
-        noopLogger,
-      ),
+      await run(team, block("read_file", { path: "a.txt" }), handlers),
     ).toBe("contents");
 
     team.planGates.set("alice", "approved");
-    expect(
-      runTeammateTool(
-        team,
-        "alice",
-        block("bash", { command: "ls" }),
-        handlers,
-        noopLogger,
-      ),
-    ).toBe("ran");
+    expect(await run(team, block("bash", { command: "ls" }), handlers)).toBe(
+      "ran",
+    );
   });
 
-  it("返回权限错误而不是读取终端", () => {
+  it("返回权限错误而不是读取终端", async () => {
     const team = newTeam();
     const handlers = { bash: () => "ran" };
     expect(
-      runTeammateTool(
-        team,
-        "alice",
-        block("bash", { command: "sudo rm x" }),
-        handlers,
-        noopLogger,
-      ),
-    ).toContain("Permission denied by deny list");
+      await run(team, block("bash", { command: "sudo rm x" }), handlers),
+    ).toContain("is on the deny list");
     expect(
-      runTeammateTool(
-        team,
-        "alice",
-        block("bash", { command: "rm notes.txt" }),
-        handlers,
-        noopLogger,
-      ),
+      await run(team, block("bash", { command: "rm notes.txt" }), handlers),
     ).toBe("Permission required: ask Lead to run this command.");
+  });
+
+  it("越界路径的写入给出路径指引而不是命令指引", async () => {
+    const team = newTeam();
+    const handlers = { write_file: () => "wrote" };
+    expect(
+      await run(
+        team,
+        block("write_file", { path: "../../etc/hosts", content: "x" }),
+        handlers,
+      ),
+    ).toBe("Permission required: path is outside the workspace.");
+  });
+
+  it("触发 PreToolUse / PostToolUse，但跳过 permissionHook", async () => {
+    const team = newTeam();
+    const hooks = newHooks();
+    const fired: string[] = [];
+    // permissionHook 会问用户，队友这侧不能触发它：confirm 一旦被调用就记下来。
+    hooks.register(
+      "PreToolUse",
+      makePermissionHook(async () => {
+        fired.push("confirm");
+        return true;
+      }),
+    );
+    hooks.register("PreToolUse", () => {
+      fired.push("pre");
+      return null;
+    });
+    hooks.register("PostToolUse", (_logger, _call, output: string) => {
+      fired.push(`post:${output}`);
+      return null;
+    });
+
+    // read_file 不在闸门名单里，越界路径会命中 checkRules 的规则 1：
+    // permissionHook 跑起来就会 await confirm，而队友这侧没有终端可问。
+    expect(
+      await run(
+        team,
+        block("read_file", { path: "../../etc/hosts" }),
+        { read_file: () => "contents" },
+        hooks,
+      ),
+    ).toBe("contents");
+    expect(fired).toEqual(["pre", "post:contents"]);
+  });
+
+  it("PreToolUse hook 的返回值不拦截队友工具", async () => {
+    const team = newTeam();
+    const hooks = newHooks();
+    hooks.register("PreToolUse", () => "blocked by hook");
+
+    // 对齐 code.py：队友这侧的 trigger 只做记录，拦截由闸门和权限判定负责。
+    expect(
+      await run(
+        team,
+        block("bash", { command: "ls" }),
+        { bash: () => "ran" },
+        hooks,
+      ),
+    ).toBe("ran");
   });
 });
 
@@ -425,16 +540,41 @@ describe("spawnTeammateThread", () => {
     const client = fakeClient();
 
     expect(
-      spawnTeammateThread(team, client, noopLogger, "alice", "dev", "x"),
+      spawnTeammateThread(
+        team,
+        client,
+        noopLogger,
+        newHooks(),
+        "alice",
+        "dev",
+        "x",
+      ),
     ).toContain("already exists");
     expect(
-      spawnTeammateThread(team, client, noopLogger, "lead", "dev", "x"),
+      spawnTeammateThread(
+        team,
+        client,
+        noopLogger,
+        newHooks(),
+        "lead",
+        "dev",
+        "x",
+      ),
     ).toContain("reserved by the runtime");
 
     const task = team.tasks.create("auth");
     claimTask(team, task.id, "alice", noopLogger);
     expect(
-      spawnTeammateThread(team, client, noopLogger, "bob", "dev", "x", task.id),
+      spawnTeammateThread(
+        team,
+        client,
+        noopLogger,
+        newHooks(),
+        "bob",
+        "dev",
+        "x",
+        task.id,
+      ),
     ).toContain("Cannot spawn teammate 'bob'");
     expect(team.activeTeammates.has("bob")).toBe(false);
   });
@@ -449,6 +589,7 @@ describe("spawnTeammateThread", () => {
       team,
       client,
       noopLogger,
+      newHooks(),
       "alice",
       "dev",
       "refactor auth",
@@ -461,7 +602,7 @@ describe("spawnTeammateThread", () => {
       ["idle_notification", "Waiting for more work."],
     ]);
 
-    makeTeamHandlers(team, client, noopLogger).request_shutdown?.({
+    makeTeamHandlers(team, client, noopLogger, newHooks()).request_shutdown?.({
       teammate: "alice",
     });
     await waitFor(() => !team.activeTeammates.has("alice"));
@@ -482,6 +623,7 @@ describe("spawnTeammateThread", () => {
       team,
       client,
       noopLogger,
+      newHooks(),
       "bob",
       "writer",
       "wait for work",
@@ -490,7 +632,7 @@ describe("spawnTeammateThread", () => {
     expect(team.tasks.load(task.id).owner).toBe("bob");
 
     await waitFor(() => team.activeTeammates.get("bob") === "idle");
-    makeTeamHandlers(team, client, noopLogger).request_shutdown?.({
+    makeTeamHandlers(team, client, noopLogger, newHooks()).request_shutdown?.({
       teammate: "bob",
     });
     await waitFor(() => !team.activeTeammates.has("bob"));
@@ -514,6 +656,7 @@ describe("spawnTeammateThread", () => {
       team,
       client,
       noopLogger,
+      newHooks(),
       "carol",
       "dev",
       "do it",
@@ -529,7 +672,7 @@ describe("spawnTeammateThread", () => {
       "idle_notification",
     ]);
 
-    makeTeamHandlers(team, client, noopLogger).request_shutdown?.({
+    makeTeamHandlers(team, client, noopLogger, newHooks()).request_shutdown?.({
       teammate: "carol",
     });
     await waitFor(() => !team.activeTeammates.has("carol"));
@@ -542,7 +685,12 @@ describe("makeTeamHandlers", () => {
     const team = newTeam();
     team.activeTeammates.set("bob", "idle");
     team.activeTeammates.set("alice", "working");
-    const handlers = makeTeamHandlers(team, fakeClient(), noopLogger);
+    const handlers = makeTeamHandlers(
+      team,
+      fakeClient(),
+      noopLogger,
+      newHooks(),
+    );
 
     expect(handlers.list_teammates?.({})).toBe("alice: working\nbob: idle");
     expect(handlers.send_message?.({ to: "dave", content: "hi" })).toBe(
@@ -560,7 +708,12 @@ describe("makeTeamHandlers", () => {
   it("request_plan 在工作区发生任何更改前关闭门禁", () => {
     const team = newTeam();
     team.activeTeammates.set("alice", "working");
-    const handlers = makeTeamHandlers(team, fakeClient(), noopLogger);
+    const handlers = makeTeamHandlers(
+      team,
+      fakeClient(),
+      noopLogger,
+      newHooks(),
+    );
 
     expect(
       handlers.request_plan?.({ teammate: "alice", task: "refactor auth" }),

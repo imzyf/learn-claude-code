@@ -18,9 +18,10 @@
  *     .worktrees/   可选的、绑定到任务的工作目录
  *
  * 相比 s10 的变化：
- *   工具层、hook 层、任务存储继续直接复用，不再内联：基础 dispatch 表复用 s03，
- *   hook 系统（loadHooks / HookSystem）复用 s04，TaskStore / canStart /
- *   incompleteDependencies / runCreateTask / getTask 与 tools / TOOL_SCHEMAS 复用 s10。
+ *   工具层、hook 层、任务存储继续直接复用，不再内联：权限判定（checkDenyList /
+ *   checkRules）复用 s03，hook 系统（loadHooks / HookSystem）复用 s04，
+ *   TaskStore / canStart / incompleteDependencies / runCreateTask / runUpdateTask /
+ *   getTask 与 tools / TOOL_SCHEMAS 复用 s10。
  *   s11 的后台任务与 s12 的 cron 不带进本章：它们不参与队友通信、任务认领和计划审批。
  *   本文件只新增团队这一层：
  *   + MessageBus：文件邮箱（.mailboxes/*.jsonl），读取即消费；消息带 type + metadata；
@@ -48,6 +49,13 @@
  *   - 模块级全局（teammate_assignments / plan_gates / pending_requests 等）收进
  *     TeamState，入口用 createTeamState(import.meta.dirname) 落到自己的 session 目录，
  *     测试传临时目录做隔离（对齐 s10 的 tasksDir）。
+ *   - 队友工具和 Lead 走同一个 HookSystem：runTeammateTool 先用
+ *     checkDenyList / checkRules 自己判权限（等同 check_permission(prompt_user=False)，
+ *     队友没有终端可以问用户），再用 triggerSkippingPermission("PreToolUse")
+ *     跳过 permissionHook 触发其余 hook，工具跑完触发 PostToolUse。
+ *     s04 的 HookSystem 为此加了 triggerSkippingPermission：code.py 按
+ *     `callback is permission_hook` 判身份，TS 那侧的 hook 出自工厂，改成把
+ *     产物登记进 WeakSet 再比身份。
  *   - Python 的 input() + select 轮询 -> readline 的 line 事件 + 250ms 轮询，
  *     共用一个事件队列，单消费者：agentLoop 跑着时新输入只排队，不会并发跑两轮。
  *
@@ -72,7 +80,11 @@ import { errMsg, type Handlers } from "../s02_tool_use/main";
 // 来自 s03：拒绝名单与规则匹配（队友那侧不问用户，命中规则直接回权限错误）+ makeConfirm。
 import { checkDenyList, checkRules, makeConfirm } from "../s03_permission/main";
 // 来自 s04：hook 系统（装配 + 触发）与 Deps（client + logger + hooks）。
-import { loadHooks, type Deps as S04Deps } from "../s04_hooks/main";
+import {
+  type HookSystem,
+  loadHooks,
+  type Deps as S04Deps,
+} from "../s04_hooks/main";
 // 来自 s10：任务存储与依赖判定、两个纯展示型 handler、工具集与 schema 表。
 import {
   canStart,
@@ -797,6 +809,9 @@ function resolveIn(base: string, p: string): string {
   return resolved;
 }
 
+// glob 结果上限，与 s02 相同。
+const GLOB_MAX_MATCHES = 200;
+
 // cwd 解析器：Lead 用「有 assignment 就用它，否则仓库目录」，
 // 队友用「必须先认领任务」。解析失败一律回错误文案，不静默换目录。
 export type CwdResolver = () => { cwd?: string; error?: string };
@@ -871,11 +886,17 @@ export function makeWorkspaceHandlers(resolveCwd: CwdResolver): Handlers {
       }),
     glob: ({ pattern }) =>
       withCwd((cwd) => {
+        // 与 s02 的 runGlob 一致：排序 + 截到 GLOB_MAX_MATCHES，超出时明说被截断，
+        // 免得模型把 200 条当成全部结果。
         const matches = fs
           .globSync(pattern, { cwd })
           .filter((m) => path.resolve(cwd, m).startsWith(cwd + path.sep))
-          .slice(0, 200);
-        return matches.length ? matches.join("\n") : "No files found";
+          .sort();
+        const shown = matches.slice(0, GLOB_MAX_MATCHES);
+        if (matches.length > GLOB_MAX_MATCHES) {
+          shown.push("... (more matches omitted; narrow the pattern)");
+        }
+        return shown.length ? shown.join("\n") : "No files found";
       }),
   };
 }
@@ -1096,13 +1117,14 @@ const GATED_TOOLS = new Set(["bash", "write_file", "edit_file"]);
 
 // 队友的工具分发：先过计划闸门，再过权限检查（队友不读终端，命中规则就回错误
 // 让 Lead 和用户处理），最后才查表执行。
-export function runTeammateTool(
+export async function runTeammateTool(
   team: TeamState,
   name: string,
   block: Anthropic.ToolUseBlock,
   handlers: Handlers,
   logger: SessionLogger,
-): string {
+  hooks: HookSystem,
+): Promise<string> {
   const gate = team.gateOf(name);
   if (GATED_TOOLS.has(block.name)) {
     if (gate !== "approved" && gate !== "not_required") {
@@ -1114,16 +1136,26 @@ export function runTeammateTool(
     const input = block.input as any;
     if (block.name === "bash") {
       const denied = checkDenyList(input.command ?? "");
-      if (denied) return `Permission denied by deny list: ${denied}`;
+      // checkDenyList 已经给出完整句子（`Blocked: 'rm -rf ' is on the deny list`），
+      // 原样回给模型，不再包一层 "Permission denied by deny list:"。
+      if (denied) return denied;
     }
+    // 队友不问用户，规则命中就回错误。两类规则给两种指引：命令交给 Lead 跑，
+    // 越界路径要队友自己改回工作目录内。
     if (checkRules(block.name, input)) {
-      return "Permission required: ask Lead to run this command.";
+      return block.name === "bash"
+        ? "Permission required: ask Lead to run this command."
+        : "Permission required: path is outside the workspace.";
     }
   }
 
   const handler = handlers[block.name];
   const schema = TOOL_SCHEMAS[block.name];
   if (!handler || !schema) return `Unknown tool: ${block.name}`;
+  // 队友走同一套 hook，只跳过 permissionHook：权限上面已经判过，而且队友这侧
+  // 没有终端可以问用户。返回值不用来拦截（对齐 code.py：这两次触发只是记录），
+  // 拦截仍由上面的闸门与权限判定负责。
+  await hooks.triggerSkippingPermission("PreToolUse", block);
   let output: string;
   try {
     output = handler(schema.parse(block.input));
@@ -1131,6 +1163,7 @@ export function runTeammateTool(
     output = `Error: ${errMsg(e)}`;
   }
   logger.toolResult(block.name, output);
+  await hooks.trigger("PostToolUse", block, output);
   return output;
 }
 
@@ -1155,6 +1188,7 @@ export class TeammateRuntime {
     private team: TeamState,
     private client: ModelClient,
     logger: SessionLogger,
+    private hooks: HookSystem,
     readonly name: string,
     role: string,
     prompt: string,
@@ -1276,12 +1310,13 @@ export class TeammateRuntime {
         results.push({
           type: "tool_result",
           tool_use_id: block.id,
-          content: runTeammateTool(
+          content: await runTeammateTool(
             this.team,
             this.name,
             block,
             this.handlers,
             this.logger,
+            this.hooks,
           ),
         });
       }
@@ -1375,6 +1410,7 @@ export function spawnTeammateThread(
   team: TeamState,
   client: ModelClient,
   logger: SessionLogger,
+  hooks: HookSystem,
   name: string,
   role: string,
   prompt: string,
@@ -1416,6 +1452,7 @@ export function spawnTeammateThread(
     team,
     client,
     logger,
+    hooks,
     name,
     role,
     prompt,
@@ -1480,6 +1517,7 @@ export function makeTeamHandlers(
   team: TeamState,
   client: ModelClient,
   logger: SessionLogger,
+  hooks: HookSystem,
 ): Handlers {
   return {
     spawn_teammate: ({ name, role, prompt, task_id, require_plan }) =>
@@ -1487,6 +1525,7 @@ export function makeTeamHandlers(
         team,
         client,
         logger,
+        hooks,
         name,
         role,
         prompt,
@@ -1670,10 +1709,10 @@ export const TOOL_SCHEMAS: Partial<Record<string, z.ZodObject>> = {
 export const PROMPT_SECTIONS: Record<string, string> = {
   identity: "You are a coding agent. Act, don't explain.",
   tools:
-    "Available tools: bash, read_file, write_file, edit_file, glob, get_task, " +
-    "create_task, update_task, list_tasks, claim_task, complete_task, " +
-    "spawn_teammate, list_teammates, send_message, request_shutdown, " +
-    "request_plan, review_plan, create_worktree.",
+    "Available tools: bash, read_file, write_file, edit_file, glob, " +
+    "create_task, update_task, list_tasks, get_task, claim_task, " +
+    "complete_task, spawn_teammate, list_teammates, send_message, " +
+    "request_shutdown, request_plan, review_plan, create_worktree.",
   tasks:
     "Create all task nodes first. Only after create_task returns " +
     "runtime-generated IDs, use update_task with those exact IDs to add " +
@@ -1723,7 +1762,7 @@ export async function agentLoop(
   const handlers: Handlers = {
     ...makeWorkspaceHandlers(leadCwdResolver(team)),
     ...makeLeadTaskHandlers(team, logger),
-    ...makeTeamHandlers(team, client, logger),
+    ...makeTeamHandlers(team, client, logger, hooks),
   };
 
   while (true) {

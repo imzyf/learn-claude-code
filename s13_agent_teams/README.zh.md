@@ -46,6 +46,8 @@ s13 复用 s10 的基础工具、Hooks、Permission 和 Task System，并增加�
 - **可选 worktree** 在需要时把任务绑定到另一个工作目录；未绑定任务仍使用仓库目录。
 - **类型化协议和计划闸门** 显式记录关机与审批状态，并在计划获批前阻止修改型工具。
 
+任务图继续采用 s10 的两阶段契约。Lead 先为所有节点调用 `create_task`，再使用返回的运行时 ID 调用 `update_task(addBlockedBy=...)`，最后才分配 ready task。只有 Lead 能使用 `update_task`；队友只能列举、认领和完成任务，团队运行期间不能改写任务图结构。
+
 s11 的后台任务和 s12 的定时任务没有被带入本章。它们不参与队友通信、任务认领或计划审批。
 
 这些机制都属于 Team 这一层。任务发现不需要另一套 Agent Loop，worktree 也不会产生另一种 Agent。
@@ -443,4 +445,4 @@ Lead 和队友目前只能调用直接写在 `code.py` 里的工具。接入 Jir
 
 s14 MCP Tools → 通过统一的发现与调用协议，在运行时连接外部服务并把它们的工具加入工具池。
 
-<!-- translation-sync: zh@v11, en@v11, ja@v11 -->
+<!-- translation-sync: zh@v12, en@v12, ja@v12 -->
