@@ -2,7 +2,7 @@
  * s15_integrated_harness/main.test.ts
  *
  * s15 只做集成，测试也只覆盖集成层新增的东西：
- *   - 工具池：25 个内置工具 + s14 的 MCP 工具合并、schema 覆盖、callTool 分发
+ *   - 工具池：26 个内置工具 + s14 的 MCP 工具合并、schema 覆盖、callTool 分发
  *   - system prompt：固定段 + 每轮变化的 skills / 记忆 / MCP 段
  *   - 错误恢复：错误分类、退避重试、连续 529 切 fallback、超限后放弃
  *   - agentLoop：工具轮、hook 拦截、compact 拦截、后台派发与通知回收、
@@ -110,10 +110,10 @@ const toolResults = (
 
 // ── 工具池 ────────────────────────────────────────────────
 describe("工具池", () => {
-  it("内置工具是 code.py 的那 25 个，名字不重复", () => {
+  it("内置工具是 code.py 的那 26 个，名字不重复", () => {
     const names = BUILTIN_TOOLS.map((tool) => tool.name);
-    expect(names).toHaveLength(25);
-    expect(new Set(names).size).toBe(25);
+    expect(names).toHaveLength(26);
+    expect(new Set(names).size).toBe(26);
     // 各章的代表工具都在：s05 / s06 / s07 / s08 / s10 / s12 / s13 / s14。
     expect(names).toEqual(
       expect.arrayContaining([
@@ -121,6 +121,8 @@ describe("工具池", () => {
         "task",
         "load_skill",
         "compact",
+        "create_task",
+        "update_task",
         "claim_task",
         "schedule_cron",
         "spawn_teammate",
@@ -145,7 +147,7 @@ describe("工具池", () => {
 
   it("连接后把 mcp__server__tool 叠到内置工具之上", async () => {
     const mcp = createMcpState();
-    expect(assembleToolPool(mcp, {}).tools).toHaveLength(25);
+    expect(assembleToolPool(mcp, {}).tools).toHaveLength(26);
 
     connectMcp("docs", mcp);
     const pool = assembleToolPool(mcp, { bash: () => "builtin" });
@@ -179,6 +181,37 @@ describe("工具池", () => {
     );
   });
 
+  it("任务图两阶段构建：create_task 的运行时 ID 再交给 update_task", async () => {
+    const handlers = makeHarnessHandlers(makeDeps(harnessClient().client));
+    const created = await callTool(
+      toolUseBlock("t1", "create_task", { subject: "重构登录页" }),
+      handlers,
+    );
+    const blocker = await callTool(
+      toolUseBlock("t2", "create_task", { subject: "先抽出认证模块" }),
+      handlers,
+    );
+    const taskId = created.replace("Created ", "").split(":")[0];
+    const blockerId = blocker.replace("Created ", "").split(":")[0];
+
+    expect(
+      await callTool(
+        toolUseBlock("t3", "update_task", {
+          task_id: taskId,
+          addBlockedBy: [blockerId],
+        }),
+        handlers,
+      ),
+    ).toBe(`Updated ${taskId} blockedBy: ${blockerId}`);
+    // 被依赖挡住的任务认领不了，依赖边确实进了任务板。
+    expect(
+      await callTool(
+        toolUseBlock("t4", "claim_task", { task_id: taskId }),
+        handlers,
+      ),
+    ).toContain(blockerId);
+  });
+
   it("callTool 校验参数、并对未知工具回可读文本", async () => {
     const handlers = makeHarnessHandlers(makeDeps(harnessClient().client));
     expect(await callTool(toolUseBlock("t", "list_tasks", {}), handlers)).toBe(
@@ -204,6 +237,7 @@ describe("assembleSystemPrompt", () => {
       mcp,
     });
     expect(base).toContain("You are a coding agent. Act, don't explain.");
+    expect(base).toContain("Create all task nodes first.");
     expect(base).toContain("Working directory: ");
     expect(base).toContain("Skills catalog:");
     expect(base).not.toContain("Memory catalog:");
@@ -234,6 +268,9 @@ describe("错误恢复", () => {
     expect(classifyApiError(new Error("Overloaded"))).toBe("overloaded");
     expect(classifyApiError(new Error("prompt is too long"))).toBe("too_long");
     expect(classifyApiError(new Error("prompt_too_long"))).toBe("too_long");
+    expect(classifyApiError(new Error("max_context_window exceeded"))).toBe(
+      "too_long",
+    );
     expect(classifyApiError(new Error("boom"))).toBe("other");
   });
 
@@ -325,7 +362,7 @@ describe("agentLoop", () => {
       /^Created task_/,
     );
     expect(String(mainCalls()[0].system)).toContain("Available tools: bash");
-    expect(mainCalls()[0].tools).toHaveLength(25);
+    expect(mainCalls()[0].tools).toHaveLength(26);
   });
 
   it("PreToolUse hook 拦截时把拦截文案当成 tool_result", async () => {

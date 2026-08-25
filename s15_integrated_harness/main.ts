@@ -20,11 +20,11 @@
  *   本章不新增单独机制，只做集成，所有能力都从前面各章 import：
  *   工具与 dispatch 复用 s02/s03，hook 与权限复用 s04（MCP 权限层复用 s14），
  *   todo + nag 复用 s05，一次性 subagent 复用 s06，技能复用 s07，
- *   四层压缩 + reactive 复用 s08，记忆复用 s09，任务图复用 s10，
+ *   五层压缩 + reactive 复用 s08，记忆复用 s09，任务图复用 s10，
  *   后台 bash 复用 s11，cron 复用 s12，团队 / worktree / 队友运行时复用 s13，
  *   MCP 动态工具池复用 s14。
  *   本文件只写「集成」这一层：
- *   + BUILTIN_TOOLS：25 个内置工具装成一份工具池（bash 用 s11 的
+ *   + BUILTIN_TOOLS：26 个内置工具装成一份工具池（bash 用 s11 的
  *     run_in_background 版本）
  *   + assembleToolPool：内置工具 + s14 组装出的 mcp__server__tool，每轮重算
  *   + assembleSystemPrompt：身份 / 工具 / 团队 / workspace / 时间 /
@@ -93,11 +93,13 @@ import {
   type SkillRegistry,
   tools as s07Tools,
 } from "../s07_skill_loading/main";
-// 来自 s08：四层压缩流水线 + reactive 应急压缩 + 阈值。
+// 来自 s08：五层压缩流水线 + reactive 应急压缩 + 阈值。
 import {
+  COMPACT_TARGET_CHARS,
   CONTEXT_LIMIT,
   compactHistory,
   estimateSize,
+  fitToolResults,
   microCompact,
   reactiveCompact,
   replaceMessages,
@@ -122,6 +124,7 @@ import {
   TOOL_SCHEMAS as S11_TOOL_SCHEMAS,
   tools as s11Tools,
   shouldRunBackground,
+  stopBackgroundProcesses,
 } from "../s11_background_tasks/main";
 // 来自 s12：cron 调度器（定时器 + 队列 + 至少一次交付）。
 import {
@@ -189,7 +192,7 @@ export type Deps = {
 };
 
 // ═══════════════════════════════════════════════════════════
-//  s15 集成：25 个内置工具装成一份工具池
+//  s15 集成：26 个内置工具装成一份工具池
 // ═══════════════════════════════════════════════════════════
 
 const pick = (tools: Anthropic.Tool[], ...names: string[]): Anthropic.Tool[] =>
@@ -205,6 +208,7 @@ export const BUILTIN_TOOLS: Anthropic.Tool[] = [
   ...pick(
     s13Tools,
     "create_task",
+    "update_task",
     "list_tasks",
     "get_task",
     "claim_task",
@@ -246,7 +250,7 @@ export function makeHarnessHandlers(deps: Deps): AsyncHandlers {
   return {
     ...makeWorkspaceHandlers(leadCwdResolver(team)),
     ...makeLeadTaskHandlers(team, logger),
-    ...makeTeamHandlers(team, client, logger),
+    ...makeTeamHandlers(team, client, logger, hooks),
     ...makeCronHandlers(cron, logger),
     todo_write: ({ todos }) => runTodoWrite(todos, logger),
     task: ({ prompt }) => spawnSubagent(prompt, { client, logger, hooks }),
@@ -308,11 +312,16 @@ export const PROMPT_SECTIONS: Record<string, string> = {
   identity: "You are a coding agent. Act, don't explain.",
   tools:
     "Available tools: bash, read_file, write_file, edit_file, glob, " +
-    "todo_write, task, load_skill, compact, create_task, list_tasks, " +
-    "get_task, claim_task, complete_task, schedule_cron, list_crons, " +
-    "cancel_cron, spawn_teammate, list_teammates, send_message, " +
+    "todo_write, task, load_skill, compact, create_task, update_task, " +
+    "list_tasks, get_task, claim_task, complete_task, schedule_cron, " +
+    "list_crons, cancel_cron, spawn_teammate, list_teammates, send_message, " +
     "request_shutdown, request_plan, review_plan, create_worktree, " +
     "connect_mcp. MCP tools are prefixed mcp__{server}__{tool}.",
+  // 任务图两阶段构建（同 s10 / s13）：先建节点，拿到运行时 ID 再连依赖。
+  tasks:
+    "Create all task nodes first. Only after create_task returns " +
+    "runtime-generated IDs, use update_task with those exact IDs to add " +
+    "dependencies. Only the Lead changes task dependencies.",
   teams:
     "When parallel work would help, first propose a small team with clear " +
     "responsibilities and wait for the user's confirmation. Do not call " +
@@ -345,6 +354,7 @@ export function assembleSystemPrompt(context: {
   const sections = [
     PROMPT_SECTIONS.identity,
     PROMPT_SECTIONS.tools,
+    PROMPT_SECTIONS.tasks,
     PROMPT_SECTIONS.teams,
     PROMPT_SECTIONS.workspace,
     PROMPT_SECTIONS.memory,
@@ -423,7 +433,8 @@ export function classifyApiError(e: unknown): ApiErrorKind {
     message.includes("prompt_too_long") ||
     message.includes("too many tokens") ||
     (message.includes("prompt") && message.includes("long")) ||
-    message.includes("context_length_exceeded")
+    message.includes("context_length_exceeded") ||
+    message.includes("max_context_window")
   ) {
     return "too_long";
   }
@@ -517,7 +528,7 @@ export async function agentLoop(
     // 1) 后台任务通知：上一轮派发、现在跑完的命令在这里回到对话。
     injectBackgroundResults(messages, background, logger);
 
-    // 2) 压缩流水线：budget -> snip -> micro，仍超阈值才做 LLM 摘要。
+    // 2) 压缩流水线：budget -> snip 每轮都跑，超阈值才依次 micro -> fit -> LLM 摘要。
     replaceMessages(
       messages,
       toolResultBudget(messages, TOOL_RESULT_BUDGET, logger, sessionDir),
@@ -526,13 +537,23 @@ export async function agentLoop(
       messages,
       snipCompact(messages, SNIP_MAX_MESSAGES, logger, sessionDir),
     );
-    replaceMessages(messages, microCompact(messages, logger));
     if (estimateSize(messages) > CONTEXT_LIMIT) {
-      logger.console("[COMPACT L4] auto compact", "yellow");
       replaceMessages(
         messages,
-        await compactHistory(messages, { ...deps, activeRequest }),
+        microCompact(messages, logger, sessionDir, COMPACT_TARGET_CHARS),
       );
+      if (estimateSize(messages) > CONTEXT_LIMIT)
+        replaceMessages(
+          messages,
+          fitToolResults(messages, COMPACT_TARGET_CHARS, logger, sessionDir),
+        );
+      if (estimateSize(messages) > CONTEXT_LIMIT) {
+        logger.console("[COMPACT L4] auto compact", "yellow");
+        replaceMessages(
+          messages,
+          await compactHistory(messages, { ...deps, activeRequest }),
+        );
+      }
     }
 
     // 3) cron 注入放在调用之前：模型没接收就能原样撤回（同 s12）。
@@ -753,7 +774,7 @@ if (import.meta.main) {
   const skills = loadSkills(SKILLS_DIR, logger);
   // 团队状态（邮箱 + 任务板 + worktree）、cron、后台登记簿都跨轮复用，
   // 前两者落在 s15 自己的 session 目录。
-  const team = createTeamState(import.meta.dirname);
+  const team = createTeamState(import.meta.dirname, logger);
   const cron = createCronState(import.meta.dirname);
   const background = new BackgroundManager();
   fs.mkdirSync(MEMORY_DIR, { recursive: true });
@@ -761,7 +782,7 @@ if (import.meta.main) {
   logger.config({ model: MODEL_ID, tools: BUILTIN_TOOLS });
 
   print("s15: Integrated Harness — 多种机制，一个循环", "cyan");
-  print("🔮 输入问题，回车发送。输入 q 退出。\n", "green");
+  print("输入问题，回车发送。输入 q 退出。\n", "green");
 
   const rl = readline.createInterface({
     input: process.stdin,
@@ -886,4 +907,7 @@ if (import.meta.main) {
   prompt.hide();
   prompt.detach();
   rl.close();
+  // 未完成的后台命令会 ref 住事件循环，退出前主动停掉，不然 q 要等它跑完
+  //（或 120s 超时）才回到 shell（同 s11）。
+  stopBackgroundProcesses();
 }
