@@ -264,7 +264,7 @@ L4_COMPACT_CONTEXT_LIMIT=8000 L1_COMPACT_SNIP_MAX_MESSAGES=8 pnpm dev s15_integr
 
 升到 16000 还截断的话，会追加一条 `Continue from the previous response. Do not repeat completed work.` 要求续写，最多两次（`MAX_RECOVERY_RETRIES`）。这一步靠模型真的写满配额，写不满就撞不出来，不算运行时有问题。
 
-fallback model 那条能半造：设一个存在的备用模型，再让主模型报 529。529 按需触发不了，但可以先确认配置读到了：
+fallback model 那条能半造：设一个存在的备用模型，再让主模型报 529。529 按需触发不了，但可以先确认配置读到了（默认值和写死的那几个上限见 `defaults.env`，一份参考清单，程序不加载它）：
 
 ```sh
 FALLBACK_MODEL_ID=glm-4.5 pnpm dev s15_integrated_harness/main.ts

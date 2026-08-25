@@ -515,7 +515,7 @@ TOOLS = [
     },
     {
         "name": "glob",
-        "description": "Find files matching a glob pattern.",
+        "description": "Find files matching a glob pattern; ** matches recursively.",
         "input_schema": {
             "type": "object",
             "properties": {"pattern": {"type": "string"}},
@@ -797,12 +797,16 @@ class AgentSession:
             return f"Edited {path.relative_to(self.workdir)}"
 
         if name == "glob":
-            matches = [
+            matches = sorted({
                 match
-                for match in glob.glob(str(arguments["pattern"]), root_dir=self.workdir)
+                for match in glob.glob(
+                    str(arguments["pattern"]), root_dir=self.workdir, recursive=True)
                 if (self.workdir / match).resolve().is_relative_to(self.workdir)
-            ]
-            return "\n".join(matches[:200]) if matches else "(no matches)"
+            })
+            shown = matches[:200]
+            if len(matches) > 200:
+                shown.append("... (more matches omitted; narrow the pattern)")
+            return "\n".join(shown) if shown else "(no matches)"
 
         raise GoalError(f"unknown tool '{name}'")
 

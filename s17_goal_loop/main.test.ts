@@ -7,6 +7,7 @@
  *   - PromptGoalEvaluator：一次无工具调用，把对话与条件作为数据传入
  *   - GoalController：设置 / 替换 / 清除 / 查看，以及 Stop 位置的七种决定
  *   - GoalSession：未完成回到同一个循环、达成即返回、两道出口、后台任务先不判断
+ *   - goal 与 Stop hook 的次序：放行时 hook 可以强制续轮，终态不被 hook 推翻
  * 判断器一律走注入的 GoalEvaluator，工作模型走 fake client，不碰真实 API。
  */
 import * as fs from "node:fs";
@@ -22,7 +23,7 @@ import {
   toolUseBlock,
   useTempDir,
 } from "../lib/testing";
-import { createHooks } from "../s04_hooks/main";
+import { createHooks, type HookSystem } from "../s04_hooks/main";
 import {
   CLEAR_ALIASES,
   GoalController,
@@ -68,7 +69,11 @@ const done = (reason = "exit code 0 appears in the conversation") => ({
 function makeSession(
   responses: Anthropic.Message[],
   evaluator: GoalEvaluator,
-  options: { maxTurns?: number; backgroundRunning?: () => boolean } = {},
+  options: {
+    maxTurns?: number;
+    backgroundRunning?: () => boolean;
+    hooks?: HookSystem;
+  } = {},
 ): GoalSession {
   return new GoalSession({
     client: fakeClient(...responses),
@@ -77,6 +82,13 @@ function makeSession(
     goal: new GoalController(evaluator, 2),
     ...options,
   });
+}
+
+// 每次触发都返回同一条消息的 Stop hook：s04 的强制续轮走这个返回值。
+function forcingHooks(message = "再列一下你改过的文件"): HookSystem {
+  const hooks = createHooks(noopLogger);
+  hooks.register("Stop", () => message);
+  return hooks;
 }
 
 const endTurn = (text: string) => fakeMessage([textBlock(text)], "end_turn");
@@ -187,6 +199,16 @@ describe("PromptGoalEvaluator", () => {
       impossible: false,
     });
     expect(create).toHaveBeenCalledOnce();
+  });
+
+  it("传了 logger 就把这次收发记进日志", async () => {
+    const logger = { ...noopLogger, request: vi.fn(), response: vi.fn() };
+    const client = fakeClient(
+      fakeMessage([textBlock('{"ok": true, "reason": "done"}')], "end_turn"),
+    );
+    await new PromptGoalEvaluator(client, "m", 512, logger).evaluate("c", []);
+    expect(logger.request).toHaveBeenCalledOnce();
+    expect(logger.response).toHaveBeenCalledOnce();
   });
 });
 
@@ -394,14 +416,61 @@ describe("GoalSession", () => {
     expect(session.goal.active).not.toBeNull();
   });
 
-  it("maxTurns 用尽时返回，goal 不被当成完成", async () => {
+  it("maxTurns 用尽时返回，goal 不被当成完成，Stop hook 照常触发一次", async () => {
+    const hooks = createHooks(noopLogger);
+    const stop = vi.fn(() => null);
+    hooks.register("Stop", stop);
     const session = makeSession([endTurn("第一轮")], fakeEvaluator(notDone()), {
       maxTurns: 1,
+      hooks,
     });
     const result = await session.submit("/goal pytest exits 0");
     expect(result.status).toBe("max_turns");
     expect(result.reason).toContain("the goal remains active");
     expect(session.goal.active).not.toBeNull();
+    expect(stop).toHaveBeenCalledOnce();
+  });
+
+  it("goal 放行时 Stop hook 照常可以强制再来一轮", async () => {
+    let fired = false;
+    const hooks = createHooks(noopLogger);
+    hooks.register("Stop", () => {
+      if (fired) return null;
+      fired = true;
+      return "再列一下你改过的文件";
+    });
+    const session = makeSession(
+      [endTurn("第一轮"), endTurn("第二轮")],
+      fakeEvaluator(notDone()),
+      { hooks },
+    );
+    const result = await session.submit("看看这个仓库");
+    expect(result).toEqual({ text: "第二轮", status: "allow", reason: "" });
+    expect(String(session.messages[2].content)).toBe("再列一下你改过的文件");
+  });
+
+  it("goal 给出终态后，Stop hook 的强制续轮不生效", async () => {
+    // 达成：再来一轮会把结论覆盖成 allow，也会多花一次模型调用。
+    const achieved = makeSession(
+      [endTurn("exit_code=0")],
+      fakeEvaluator(done()),
+      {
+        hooks: forcingHooks(),
+      },
+    );
+    const result = await achieved.submit("/goal pytest exits 0");
+    expect(result.status).toBe("achieved");
+    expect(result.text).toBe("exit_code=0");
+
+    // 连续阻止到上限：再来一轮只会重复调用判断器，计数也降不下来。
+    const evaluator = fakeEvaluator(notDone());
+    const limited = makeSession(
+      [endTurn("第一轮"), endTurn("第二轮"), endTurn("第三轮")],
+      evaluator,
+      { hooks: forcingHooks() },
+    );
+    expect((await limited.submit("/goal pytest exits 0")).status).toBe("limit");
+    expect(evaluator.calls).toHaveLength(3);
   });
 
   it("后台任务未结束时先不判断，结果回来后继续同一个 goal", async () => {
