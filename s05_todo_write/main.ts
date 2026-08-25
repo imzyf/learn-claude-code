@@ -40,9 +40,6 @@
  * 一个 in_progress。dispatch 处的 try/catch 与 code.py 的 execute_tool 对应：
  * 工具异常（含 schema 校验失败）都是一条 tool_result，不打断循环。
  *
- * 基于 s04（hooks）构建。Usage:
- *
- *     pnpm dev s05_todo_write/main.ts
  */
 
 import * as readline from "node:readline/promises";

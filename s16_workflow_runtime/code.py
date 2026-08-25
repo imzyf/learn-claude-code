@@ -96,7 +96,7 @@ def workflow_run_lock(run_id: str):
     handle = None
     try:
         STORE.mkdir(parents=True, exist_ok=True)
-        handle = (STORE / f"{run_id}.lock").open("a+")
+        handle = (STORE / f"{run_id}.lock").open("a+", encoding="utf-8")
         try:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
@@ -331,7 +331,7 @@ class WorkflowJournal:
         if resume:
             if not self.path.exists():
                 raise WorkflowInputError(f"resume journal not found for {run_id}")
-            for line_number, line in enumerate(self.path.read_text().splitlines(), start=1):
+            for line_number, line in enumerate(self.path.read_text(encoding="utf-8").splitlines(), start=1):
                 try:
                     rec = json.loads(line)
                     if (
@@ -345,9 +345,9 @@ class WorkflowJournal:
                         f"invalid resume journal record at line {line_number}"
                     ) from exc
                 self.cache[rec["key"]] = rec["value"]
-            self._f = self.path.open("a")
+            self._f = self.path.open("a", encoding="utf-8")
         else:
-            self._f = self.path.open("w")             # fresh run truncates
+            self._f = self.path.open("w", encoding="utf-8")             # fresh run truncates
 
     def key(self, kind, label, prompt, schema):
         # Deterministic semantic key, independent of concurrency order, so a
@@ -613,7 +613,7 @@ class WorkflowTool:
 def _write_json(path, value):
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(value, indent=2, default=str))
+    temporary.write_text(json.dumps(value, indent=2, default=str), encoding="utf-8")
     os.replace(temporary, path)
 
 
@@ -622,7 +622,7 @@ def _read_snapshot(run_id):
     if not path.exists():
         raise WorkflowInputError(f"resume snapshot not found for {run_id}")
     try:
-        snapshot = json.loads(path.read_text())
+        snapshot = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         raise WorkflowInputError(f"invalid resume snapshot for {run_id}") from exc
     if not isinstance(snapshot, dict):
@@ -631,12 +631,12 @@ def _read_snapshot(run_id):
 
 
 def _save_last_run(run_id):
-    (STORE / "last_run.txt").write_text(run_id)
+    (STORE / "last_run.txt").write_text(run_id, encoding="utf-8")
 
 
 def _read_last_run():
     p = STORE / "last_run.txt"
-    return p.read_text().strip() if p.exists() else None
+    return p.read_text(encoding="utf-8").strip() if p.exists() else None
 
 
 # -- Sample Workflow --

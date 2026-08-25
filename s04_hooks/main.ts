@@ -33,9 +33,6 @@
  *   - 循环自身的 `> toolName` 日志被移除——改由 logHook 负责；
  *     工具输出的预览仍由循环打印（和 s02/s03 一致）
  *
- * 基于 s03（权限）构建。Usage:
- *
- *     pnpm dev s04_hooks/main.ts
  */
 
 import * as readline from "node:readline/promises";

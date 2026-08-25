@@ -59,9 +59,6 @@
  *   - Python 的 input() + select 轮询 -> readline 的 line 事件 + 250ms 轮询，
  *     共用一个事件队列，单消费者：agentLoop 跑着时新输入只排队，不会并发跑两轮。
  *
- * 基于 s10（任务系统）构建。Usage:
- *
- *     pnpm dev s13_agent_teams/main.ts
  */
 
 import { spawnSync } from "node:child_process";

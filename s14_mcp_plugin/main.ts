@@ -31,9 +31,6 @@
  * 课程中的 docs / deploy 是进程内模拟 server，只展示 tools/list、tools/call
  * 与动态工具池；真实 MCP transport 留给产品级实现。
  *
- * Usage:
- *
- *     pnpm dev s14_mcp_plugin/main.ts
  */
 
 import * as readline from "node:readline/promises";

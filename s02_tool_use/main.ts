@@ -25,8 +25,6 @@
  * messages.create 依然不会自己执行工具，只会把 tool_use 块交还给我们，
  * 所以循环的控制权还在这份代码里。
  *
- * Usage:
- *     pnpm dev s02_tool_use/main.ts
  */
 
 import * as fs from "node:fs";

@@ -208,9 +208,9 @@ cat s15_integrated_harness/.scheduled_tasks.json
    Allow? [y/N]
 ```
 
-命中的是 s03 的规则 2（bash 命令含 `rm `），不是拒绝名单。这里和 `README.zh.md` 的说法有出入：README 描述的是 `code.py`，那边每条 bash 都问；TS 版复用 s03 的三关，只有命中关键字的 bash 才问，拒绝名单（`sudo`、`shutdown`、`mkfs` 等）直接拦，不问。
+命中的是 s03 的规则 2（bash 命令含 `rm`），不是拒绝名单。这里和 `README.zh.md` 的说法有出入：README 描述的是 `code.py`，那边每条 bash 都问；TS 版复用 s03 的三关，只有命中关键字的 bash 才问，拒绝名单（`sudo`、`shutdown`、`mkfs` 等）直接拦，不问。
 
-Lead 收件箱那一路用团队场景验：spawn 一个队友，队友说完一轮话会发 `result` 和 `idle_notification`，主循环消费收件箱后起新一轮，期望黄字 `  [team auto] 2 event(s)`。队友、计划闸门、worktree 的完整验证在 s13 的清单里，这里只确认事件确实回流成新一轮。
+Lead 收件箱那一路用团队场景验：spawn 一个队友，队友说完一轮话会发 `result` 和 `idle_notification`，主循环消费收件箱后起新一轮，期望黄字 `[team auto] 2 event(s)`。队友、计划闸门、worktree 的完整验证在 s13 的清单里，这里只确认事件确实回流成新一轮。
 
 ## 8. 压缩排在工具批次末尾
 
@@ -270,7 +270,7 @@ fallback model 那条能半造：设一个存在的备用模型，再让主模�
 FALLBACK_MODEL_ID=glm-4.5 pnpm dev s15_integrated_harness/main.ts
 ```
 
-真撞上连续两次 529 时的输出是 `  [529] switching to glm-4.5`，之后这一轮用备用模型重试。429 同理，只有被真限流时才出现 `  [429] retry 1/3 after 0.5s`。这两条和 prompt 超长触发 reactive compact 都由 `main.test.ts` 的「错误恢复」和「prompt 超长触发一次 reactive compact 后重试」覆盖，手工验证只确认真撞上时的输出格式对得上。
+真撞上连续两次 529 时的输出是 `[529] switching to glm-4.5`，之后这一轮用备用模型重试。429 同理，只有被真限流时才出现 `[429] retry 1/3 after 0.5s`。这两条和 prompt 超长触发 reactive compact 都由 `main.test.ts` 的「错误恢复」和「prompt 超长触发一次 reactive compact 后重试」覆盖，手工验证只确认真撞上时的输出格式对得上。
 
 其他错误不重试，直接收尾：把 `.env` 里的 `MODEL_ID` 改成一个不存在的模型名再启动，随便问一句，期望一轮就结束并打出 `[Error] ...`，transcript 里对应的是一节 `ERROR <trace_id> <ms>ms`，正文是错误名、HTTP 状态和原文。
 
@@ -295,7 +295,7 @@ cat .memory/MEMORY.md
 
 ## 11. 提示符与退出
 
-整个过程里提示符 `s15 >> ` 始终在最下面一行：`[background]`、`[inject cron]`、`[team auto]`、`[HOOK]` 的输出都从它上方流过，输入到一半的字不会被吃掉。
+整个过程里提示符 `s15 >>` 始终在最下面一行：`[background]`、`[inject cron]`、`[team auto]`、`[HOOK]` 的输出都从它上方流过，输入到一半的字不会被吃掉。
 
 让它在后台跑 `sleep 300`，再注册一个 recurring cron，然后直接输入 `q`。期望进程立刻退回 shell，不是卡在那里等 300 秒：cron 的 1s 定时器和 250ms 轮询都调了 `unref()`，还在跑的后台命令由退出前的 `stopBackgroundProcesses()` 连同进程组一起停掉。另一个终端确认没留下孤儿进程：
 
@@ -305,24 +305,6 @@ pgrep -f "sleep 300"   # 期望没有输出
 
 `Ctrl+D` 走 `rl` 的 close 事件，推一个 quit 事件，走同一条退出路径；`Ctrl+C` 是 `process.exit(0)`，进程组清理挂在 `process.on("exit")` 上，同样不留孤儿。
 
-这样退出不会等后台命令跑完，它的结果也就不会再回到任何一段对话。`durable: true` 的 cron 任务留在 `.scheduled_tasks.json` 里，下次启动时 `loadDurableJobs` 会打一行 `  [cron] loaded N durable job(s)`，上次退出时还挂着 `pendingDelivery` 的任务重新进队列，重启后立刻触发一轮。这是至少一次交付的代价，不是 bug。
+这样退出不会等后台命令跑完，它的结果也就不会再回到任何一段对话。`durable: true` 的 cron 任务留在 `.scheduled_tasks.json` 里，下次启动时 `loadDurableJobs` 会打一行 `[cron] loaded N durable job(s)`，上次退出时还挂着 `pendingDelivery` 的任务重新进队列，重启后立刻触发一轮。这是至少一次交付的代价，不是 bug。
 
 留着 `in_progress` 任务的队友直接退出时，任务会带着 owner 留在 `.tasks/` 里，下次启动没人能完成它，清任务板见下一节。
-
-## 清场
-
-```sh
-rm -rf s15_integrated_harness/.tasks s15_integrated_harness/.mailboxes \
-       s15_integrated_harness/.transcripts s15_integrated_harness/.task_outputs \
-       s15_integrated_harness/.scheduled_tasks.json .tmp/s15-check
-```
-
-第 3 节如果真建了 worktree，Git 数据要手工清，本章有意不替用户删：
-
-```sh
-git worktree list
-git worktree remove s15_integrated_harness/.worktrees/<name>
-git branch -D wt/<name>
-```
-
-`.memory/` 按需处理：它是仓库根那一份，和 s09 共用。日志留着不影响下次运行，要清就删 `s15_integrated_harness/.log/`。

@@ -30,9 +30,6 @@
  *   - 关卡 3（Confirm）做成可注入依赖：入口用 makeConfirm 接真实 readline，
  *     测试用 fake；s04 也复用同一个 Confirm / makeConfirm
  *
- * 基于 s02（多工具）构建。Usage:
- *
- *     pnpm dev s03_permission/main.ts
  */
 
 import { spawnSync } from "node:child_process";

@@ -60,9 +60,6 @@
  *   - CronState 的 durablePath 必填：入口用 createCronState(import.meta.dirname)
  *     落到各自的 session 目录，测试传临时路径做隔离。
  *
- * 基于 s04（hooks）构建。Usage:
- *
- *     pnpm dev s12_cron_scheduler/main.ts
  */
 
 import { randomBytes } from "node:crypto";

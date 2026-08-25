@@ -47,9 +47,6 @@
  *   2. 压缩后的消息把「当前用户请求」和「历史摘要」分成两段，摘要段
  *      JSON 转义后标注 reference only，SYSTEM 里也写明只服从前者。
  *
- * 基于 s07（skill loading）构建。Usage:
- *
- *     pnpm dev s08_context_compact/main.ts
  */
 
 import * as fs from "node:fs";
@@ -885,7 +882,6 @@ export async function agentLoop(
 }
 
 // ── 入口 ──────────────────────────────────────────
-// Prompt example: Read the s01~s05 main.ts files README.md, then read code.py, then read s01_agent_loop/README.md
 if (import.meta.main) {
   const client: ModelClient = createClient();
   const logger: SessionLogger = createLogger(import.meta.dirname);

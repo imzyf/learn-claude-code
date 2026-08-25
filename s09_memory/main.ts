@@ -32,9 +32,6 @@
  * 记忆目录作为参数传入（analogous to s07 的 scanSkills(dir)）：入口用 .memory/，
  * 测试用临时目录，各函数不依赖模块级全局。
  *
- * 基于 s08（context compact）构建。Usage:
- *
- *     pnpm dev s09_memory/main.ts
  */
 
 import * as fs from "node:fs";
@@ -914,7 +911,6 @@ export async function agentLoop(
 }
 
 // ── 入口 ──────────────────────────────────────────
-// Prompt example: I prefer using tabs for indentation, not spaces. Remember that.
 if (import.meta.main) {
   const client: ModelClient = createClient();
   const logger: SessionLogger = createLogger(import.meta.dirname);

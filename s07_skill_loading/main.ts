@@ -30,9 +30,6 @@
  * 才能正确处理 `description: |` 这类多行块标量——手写的逐行 `key: value` 解析
  * 会把 `|` 当成值、把缩进续行误当新 key。
  *
- * 基于 s06（subagent）构建。Usage:
- *
- *     pnpm dev s07_skill_loading/main.ts
  */
 
 import * as fs from "node:fs";
@@ -330,7 +327,6 @@ export async function agentLoop(
 }
 
 // ── 入口 ──────────────────────────────────────────
-// Prompt example: Use the code-review skill to review the last commit.
 if (import.meta.main) {
   const client: ModelClient = createClient();
   const logger: SessionLogger = createLogger(import.meta.dirname);

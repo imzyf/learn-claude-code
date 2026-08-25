@@ -25,9 +25,6 @@
  *   主循环几乎没变：task 通过 TOOL_HANDLERS 自动分发，唯一区别是
  *   `await handler(...)`，因为 spawnSubagent 是异步的。
  *
- * 基于 s05（todo_write）构建。Usage:
- *
- *     pnpm dev s06_subagent/main.ts
  */
 
 import * as readline from "node:readline/promises";
@@ -272,7 +269,6 @@ export async function agentLoop(
 }
 
 // ── 入口 ──────────────────────────────────────────
-// Prompt example: Use a subtask to find what testing framework this project uses
 if (import.meta.main) {
   const client = createClient();
   const logger = createLogger(import.meta.dirname);

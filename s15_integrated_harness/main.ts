@@ -34,8 +34,8 @@
  *     prompt too long 触发一次 reactive compact
  *   + agentLoop：一轮里依次做后台通知注入 -> 压缩流水线 -> cron 注入 ->
  *     组装 system + 工具池 -> 带恢复的模型调用 -> 工具轮 + todo nag
- *   + 入口事件队列：用户输入 / cron 队列 / Lead 收件箱 / 后台完成，
- *     四种唤醒源共用一个队列，单消费者
+ *   + runHostCli：用户输入 / cron 队列 / Lead 收件箱 / 后台完成，
+ *     四种唤醒源共用一个事件队列，单消费者；s16 传 extraPool 复用同一份宿主循环
  *
  * TS 特有说明：
  *   - code.py 用守护线程 + 各种锁；这里是单线程事件循环，队友、后台命令、
@@ -50,10 +50,6 @@
  *     前台文件 / shell 工具的 cwd。
  *   - 跨轮状态（team / cron / mcp / background）由入口持有并经 deps 传入，
  *     落在 s15 自己的 session 目录，测试各建各的做隔离。
- *
- * 基于 s14（MCP）构建。Usage:
- *
- *     pnpm dev s15_integrated_harness/main.ts
  */
 
 import * as fs from "node:fs";
@@ -765,23 +761,39 @@ export async function agentLoop(
   }
 }
 
-// ── 入口 ──────────────────────────────────────────
-// Prompt example: 在后台安装依赖，同时继续阅读 README.md。
-if (import.meta.main) {
+// ── 宿主 CLI ──────────────────────────────────────
+// 事件队列 + 四路唤醒的那套宿主循环。s15 自己的入口调它，s16 也调它，
+// 只是多传一个 extraPool 把 Workflow 挂进工具池（对应 code.py 里 s16 的
+// load_integrated_host + install_workflow_tool + async_event_loop）。
+export type HostCliOptions = {
+  // 日志、team、cron 的落盘位置，各章传自己的目录。
+  sessionDir: string;
+  banner: string;
+  promptLabel: string;
+  // 宿主自己的工具层。client / logger 在这里才建好，所以用工厂拿。
+  extraPool?: (client: ModelClient, logger: SessionLogger) => ToolPool;
+};
+
+export async function runHostCli(options: HostCliOptions): Promise<void> {
+  const { sessionDir } = options;
   const client = createClient();
-  const logger = createLogger(import.meta.dirname);
+  const logger = createLogger(sessionDir);
   const mcp = createMcpState();
   const skills = loadSkills(SKILLS_DIR, logger);
   // 团队状态（邮箱 + 任务板 + worktree）、cron、后台登记簿都跨轮复用，
-  // 前两者落在 s15 自己的 session 目录。
-  const team = createTeamState(import.meta.dirname, logger);
-  const cron = createCronState(import.meta.dirname);
+  // 前两者落在宿主自己的 session 目录。
+  const team = createTeamState(sessionDir, logger);
+  const cron = createCronState(sessionDir);
   const background = new BackgroundManager();
   fs.mkdirSync(MEMORY_DIR, { recursive: true });
+  const extraPool = options.extraPool?.(client, logger);
 
-  logger.config({ model: MODEL_ID, tools: BUILTIN_TOOLS });
+  logger.config({
+    model: MODEL_ID,
+    tools: [...BUILTIN_TOOLS, ...(extraPool?.tools ?? [])],
+  });
 
-  print("s15: Integrated Harness — 多种机制，一个循环", "cyan");
+  print(options.banner, "cyan");
   print("输入问题，回车发送。输入 q 退出。\n", "green");
 
   const rl = readline.createInterface({
@@ -838,7 +850,7 @@ if (import.meta.main) {
   const hasFinishedBackground = (): boolean =>
     Object.values(background.tasks).some((task) => task.status !== "running");
 
-  const prompt = createPrompt(rl, "s15 >> ");
+  const prompt = createPrompt(rl, options.promptLabel);
   rl.on("line", (line) => {
     pushEvent("user", line);
     prompt.show();
@@ -894,8 +906,9 @@ if (import.meta.main) {
           mcp,
           background,
           memoryDir: MEMORY_DIR,
-          sessionDir: import.meta.dirname,
+          sessionDir,
           activeRequest,
+          extraPool,
         }),
       );
     } catch (e) {
@@ -910,4 +923,13 @@ if (import.meta.main) {
   // 未完成的后台命令会 ref 住事件循环，退出前主动停掉，不然 q 要等它跑完
   //（或 120s 超时）才回到 shell（同 s11）。
   stopBackgroundProcesses();
+}
+
+// ── 入口 ──────────────────────────────────────────
+if (import.meta.main) {
+  await runHostCli({
+    sessionDir: import.meta.dirname,
+    banner: "s15: Integrated Harness — 多种机制，一个循环",
+    promptLabel: "s15 >> ",
+  });
 }

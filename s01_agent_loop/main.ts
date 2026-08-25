@@ -26,8 +26,6 @@
  * Anthropic SDK 的 messages.create 本来就只返回 tool_use 块、不执行工具，
  * 循环控制权天然在这份代码里——这就是 s01 要讲的道理。
  *
- * Usage:
- *     pnpm dev s01_agent_loop/main.ts
  */
 
 import { spawnSync } from "node:child_process";

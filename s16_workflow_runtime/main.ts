@@ -37,43 +37,30 @@
  *   - code.py 用 asyncio.to_thread 把同步 runner 挪出事件循环；这里 runner 本身就是
  *     async，agent() 直接 await，并发上限由 ExecutionLimits 里的信号量控制。
  *   - code.py 用 threading.Lock + fcntl.flock 串行化同一次运行；这里是单线程事件循环，
- *     进程内用一个 activeRuns 集合，跨进程用 `wx` 独占创建 <runId>.lock（结束即删除）。
+ *     进程内用一个 active 集合，跨进程用 `wx` 独占创建 <runId>.lock（结束即删除）。
+ *     flock 在进程被杀时由内核释放，文件锁不会，所以锁文件里写 pid：
+ *     撞上已存在的锁先看那个 pid 还在不在，不在就当残留清掉。
  *   - 模块级 STORE / RUNNER_FACTORY 全局收进 WorkflowRuntime：入口用
  *     createWorkflowRuntime(import.meta.dirname, ...) 落到本章目录，测试传临时目录做隔离。
  *   - code.py 靠 monkeypatch 往 s15 宿主的工具池里塞 Workflow；这里走 s15 Deps 上的
  *     extraPool，agentLoop 每轮组装工具池时把它叠在内置 + MCP 工具之后。
- *   - 本章入口只保留用户轮的读-跑-打印循环，cron / 团队 / 后台四路唤醒仍留在 s15。
- *
- * 基于 s15（集成 harness）构建。Usage:
- *
- *     pnpm dev s16_workflow_runtime/main.ts          # 主模型与 workflow 子 agent 都用真实 API
- *     pnpm dev s16_workflow_runtime/main.ts demo     # 固定 runner 数据，观察事件流与 journal
- *     pnpm dev s16_workflow_runtime/main.ts resume   # 用上次 runId 续跑，全部命中缓存
+ *   - 交互模式直接调 s15 导出的 runHostCli，cron / 团队 / 后台四路唤醒照旧
+ *     （对应 code.py 里 load_integrated_host + start_runtime_services + async_event_loop）。
  */
 
 import { createHash, randomBytes } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import * as readline from "node:readline/promises";
 import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
 import { createLogger, type SessionLogger } from "../lib/logger";
-import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
-import { createPrompt, print, printError, printFinal } from "../lib/terminal";
+import { MODEL_ID, type ModelClient } from "../lib/model";
+import { print, printError } from "../lib/terminal";
 import { zodTool } from "../lib/tools";
 // 来自 s02：错误转文本（工具异常统一收敛成 tool_result）。
 import { errMsg } from "../s02_tool_use/main";
-// 来自 s03：权限确认抽象。
-import { makeConfirm } from "../s03_permission/main";
-// 来自 s07 / s09 / s11 / s12 / s13 / s14：入口要给 s15 agentLoop 备齐的跨轮状态。
-import { loadSkills, SKILLS_DIR } from "../s07_skill_loading/main";
-import { MEMORY_DIR } from "../s09_memory/main";
-import { BackgroundManager } from "../s11_background_tasks/main";
-import { createCronState } from "../s12_cron_scheduler/main";
-import { createTeamState } from "../s13_agent_teams/main";
-import { createMcpState, loadMcpHooks } from "../s14_mcp_plugin/main";
-// 来自 s15：主循环与工具池类型，本章不改循环，只往池子里加一个工具。
-import { agentLoop, type ToolPool } from "../s15_integrated_harness/main";
+// 来自 s15：宿主 CLI 与工具池类型，本章不改循环，只往池子里加一个工具。
+import { runHostCli, type ToolPool } from "../s15_integrated_harness/main";
 
 // ═══════════════════════════════════════════════════════════
 //  运行时守卫
@@ -898,6 +885,37 @@ export function readLastRun(store: string): string | null {
   return fs.existsSync(file) ? fs.readFileSync(file, "utf8").trim() : null;
 }
 
+function openLockFile(file: string): number | null {
+  try {
+    return fs.openSync(file, "wx");
+  } catch {
+    return null;
+  }
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0); // 信号 0 只做存在性检查，不真的发信号
+    return true;
+  } catch (e) {
+    // EPERM：进程在，只是不归当前用户管。
+    return (e as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+// 锁文件里的 pid 已经没了，说明上一次运行是被杀掉的，锁没来得及删。
+function clearStaleLock(file: string): boolean {
+  let pid = Number.NaN;
+  try {
+    pid = Number.parseInt(fs.readFileSync(file, "utf8").trim(), 10);
+  } catch {
+    return false; // 读不到就当锁还有效，宁可拒绝也不抢
+  }
+  if (Number.isInteger(pid) && pid > 0 && isProcessAlive(pid)) return false;
+  fs.rmSync(file, { force: true });
+  return true;
+}
+
 // 整次执行加最终落盘都握着这把锁：另一个进程不能同时 resume 同一次运行。
 function acquireRunLock(runtime: WorkflowRuntime, runId: string): () => void {
   const busy = new WorkflowInputError(
@@ -906,12 +924,14 @@ function acquireRunLock(runtime: WorkflowRuntime, runId: string): () => void {
   if (runtime.active.has(runId)) throw busy;
   fs.mkdirSync(runtime.store, { recursive: true });
   const lockFile = path.join(runtime.store, `${runId}.lock`);
-  let fd: number;
-  try {
-    fd = fs.openSync(lockFile, "wx");
-  } catch {
-    throw busy;
+  // 上一次运行崩了会留下锁文件；持有者还活着才是真的冲突。
+  let opened = openLockFile(lockFile);
+  if (opened === null && clearStaleLock(lockFile)) {
+    opened = openLockFile(lockFile);
   }
+  if (opened === null) throw busy;
+  const fd = opened;
+  fs.writeSync(fd, String(process.pid));
   runtime.active.add(runId);
   return () => {
     runtime.active.delete(runId);
@@ -1266,13 +1286,12 @@ export async function runDemo(
 }
 
 // ── 入口 ──────────────────────────────────────────
-// Prompt example: 读一下 s16 的 code.py，把内容作为 changes 跑 review-changes workflow。
 if (import.meta.main) {
   const mode = process.argv[2];
-  const logger = createLogger(import.meta.dirname);
 
   if (mode === "demo" || mode === "resume") {
     // demo / resume 用确定性 runner：不需要 API key，事件流和 journal 可重复观察。
+    const logger = createLogger(import.meta.dirname);
     const runtime = createWorkflowRuntime(import.meta.dirname, { logger });
     let resumeId: string | undefined;
     if (mode === "resume") {
@@ -1282,75 +1301,28 @@ if (import.meta.main) {
         process.exit(0);
       }
     }
-    await runDemo(runtime, resumeId);
-  } else {
-    const client = createClient();
-    const mcp = createMcpState();
-    const skills = loadSkills(SKILLS_DIR, logger);
-    const team = createTeamState(import.meta.dirname);
-    const cron = createCronState(import.meta.dirname);
-    const background = new BackgroundManager();
-    fs.mkdirSync(MEMORY_DIR, { recursive: true });
-    // 交互模式下 workflow 的子 agent 与宿主用同一个真实 client。
-    const runtime = createWorkflowRuntime(import.meta.dirname, {
-      logger,
-      createRunner: () => new AnthropicAgentRunner(client, MODEL_ID),
-    });
-
-    logger.config({ model: MODEL_ID, tools: [WORKFLOW_TOOL] });
-    print("s16: Workflow Runtime — 一次 tool_use，跑完一整套编排", "cyan");
-    print("🔮 输入问题，回车发送。输入 q 退出。\n", "green");
-
-    const rl = readline.createInterface({
-      input: process.stdin,
-      output: process.stdout,
-    });
-    rl.on("SIGINT", () => {
-      rl.close();
-      process.exit(0);
-    });
-    const hooks = loadMcpHooks(logger, makeConfirm(rl, logger), mcp);
-    const prompt = createPrompt(rl, "s16 >> ");
-    const history: Anthropic.MessageParam[] = [];
-
-    while (true) {
-      let query: string;
-      try {
-        query = await prompt.ask();
-      } catch {
-        break;
-      }
-      const q = query.trim().toLowerCase();
-      if (q === "" || q === "q" || q === "exit") break;
-      logger.userInput(query);
-      await hooks.trigger("UserPromptSubmit", query);
-      history.push({ role: "user", content: query });
-
-      try {
-        printFinal(
-          await agentLoop(history, {
-            client,
-            logger,
-            hooks,
-            skills,
-            team,
-            cron,
-            mcp,
-            background,
-            memoryDir: MEMORY_DIR,
-            sessionDir: import.meta.dirname,
-            activeRequest: query,
-            // s16 唯一的接入点：Workflow 叠在 s15 的内置 + MCP 工具之后。
-            extraPool: workflowToolPool(runtime),
-          }),
-        );
-      } catch (e) {
-        printError(e);
-      }
-      print();
+    try {
+      await runDemo(runtime, resumeId);
+    } catch (e) {
+      // 快照 / journal / 锁的问题在这里收成一行，不甩一整段 Node 栈。
+      printError(e);
+      process.exitCode = 1;
     }
-
-    prompt.detach();
-    rl.close();
+  } else {
+    // 交互模式整套复用 s15 的宿主循环（含 cron / 团队 / 后台四路唤醒），
+    // s16 只多传一个 extraPool 把 Workflow 叠在内置 + MCP 工具之后。
+    await runHostCli({
+      sessionDir: import.meta.dirname,
+      banner: "s16: Workflow Runtime — 一次 tool_use，跑完一整套编排",
+      promptLabel: "s16 >> ",
+      // workflow 的子 agent 与宿主用同一个真实 client 和同一份日志。
+      extraPool: (client, logger) =>
+        workflowToolPool(
+          createWorkflowRuntime(import.meta.dirname, {
+            logger,
+            createRunner: () => new AnthropicAgentRunner(client, MODEL_ID),
+          }),
+        ),
+    });
   }
 }

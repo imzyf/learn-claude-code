@@ -547,6 +547,33 @@ describe("运行生命周期", () => {
     expect((await running).result).toBe("ok");
   });
 
+  it("上一次运行崩掉留下的锁文件不挡住 resume", async () => {
+    const runtime = makeRuntime({ createRunner: () => echoRunner() });
+    const first = await runScript(async (ctx) => ctx.agent("x"), { runtime });
+    const runId = first.task.runId;
+    const lockFile = path.join(dir, RUNTIME_DIR, `${runId}.lock`);
+
+    // 持有者还活着（当前进程）：拒绝。
+    fs.writeFileSync(lockFile, String(process.pid));
+    await expect(
+      runScript(async () => "second", {
+        runtime,
+        args: null,
+        resumeFromRunId: runId,
+      }),
+    ).rejects.toThrow("is already active");
+
+    // 持有者已经没了：当作残留清掉，续跑照常。
+    fs.writeFileSync(lockFile, "2147483647");
+    const resumed = await runScript(async () => "second", {
+      runtime,
+      args: null,
+      resumeFromRunId: runId,
+    });
+    expect(resumed.result).toBe("second");
+    expect(fs.existsSync(lockFile)).toBe(false);
+  });
+
   it("示例 workflow 跑完 pipeline，确认过的发现按严重程度排序", async () => {
     const runtime = makeRuntime();
     const out = await runWorkflow(runtime, {

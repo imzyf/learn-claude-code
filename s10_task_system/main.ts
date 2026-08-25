@@ -43,9 +43,6 @@
  *   - ID 用 crypto.randomBytes(4) 生成 8 位十六进制；写文件用 "wx" 排他标志，
  *     撞到已存在的 ID 就重试，对应 Python 的 open(..., "x")。
  *
- * 基于 s04（hooks）构建。Usage:
- *
- *     pnpm dev s10_task_system/main.ts
  */
 
 import { randomBytes } from "node:crypto";

@@ -36,9 +36,6 @@
  *   - tool_result 块和文本通知可以放进同一条 user 消息（content 是数组，
  *     可以混装多种 block），和 Python 的 inject_background_results 一致。
  *
- * 基于 s04（hooks）构建。Usage:
- *
- *     pnpm dev s11_background_tasks/main.ts
  */
 
 import { type ChildProcess, spawn } from "node:child_process";
