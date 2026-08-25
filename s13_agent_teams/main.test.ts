@@ -3,7 +3,7 @@
  *
  * s13 的新增点是团队运行时，测试只聚焦这一层：
  *   - MessageBus：send / readInbox 往返 + 即读即消费、顺序、peek 非破坏、
- *     metadata 透传、waitForMessages 的唤醒与超时
+ *     metadata 透传、waitForMessages 的唤醒与超时、投递写 transcript 一节
  *   - owner 维度的 claimTask / completeTask：占用中不能再认领、非 owner 不能完成、
  *     计划闸门未放行不能完成、完成后汇报解除阻塞
  *   - assignment 与工作目录：无 assignment 回退仓库目录、worktree 绑定坏了 fail closed
@@ -25,6 +25,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type Anthropic from "@anthropic-ai/sdk";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import type { SessionLogger } from "../lib/logger";
 import {
   fakeClient,
   fakeMessage,
@@ -135,6 +136,26 @@ describe("MessageBus", () => {
     expect(bus.peek("lead")).toBe(true);
     expect(bus.peek("lead")).toBe(true); // 还在
     expect(bus.readInbox("lead")).toHaveLength(1);
+  });
+
+  it("传入 logger 时每次投递在 transcript 里单独记一节", () => {
+    const sections: Array<[string, string]> = [];
+    const logger: SessionLogger = {
+      ...noopLogger,
+      section: (title, body) => sections.push([title, body]),
+    };
+    const bus = new MessageBus(dir, logger);
+    bus.send("lead", "alice", "review the plan", "plan_approval", {
+      request_id: "req_000001",
+    });
+
+    expect(sections).toHaveLength(1);
+    const [title, body] = sections[0];
+    expect(title).toBe("BUS SEND lead -> alice");
+    expect(body).toContain("<inbox>alice.jsonl</inbox>");
+    expect(body).toContain("<type>plan_approval</type>");
+    expect(body).toContain('<metadata>{"request_id":"req_000001"}</metadata>');
+    expect(body).toContain("<content>review the plan</content>");
   });
 
   it("waitForMessages 在发送消息时唤醒并在超时后返回空结果", async () => {

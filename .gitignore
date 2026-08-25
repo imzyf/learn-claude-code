@@ -22,5 +22,7 @@ lib/.cache/
 .scheduled_tasks.json
 # s13_agent_teams 的文件邮箱目录
 .mailboxes/
+# s13_agent_teams 的 git worktree 目录
+.worktrees/
 # s16_workflow_runtime 的运行快照、输出、journal 和锁文件目录
 .runtime/

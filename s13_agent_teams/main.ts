@@ -25,7 +25,7 @@
  *   s11 的后台任务与 s12 的 cron 不带进本章：它们不参与队友通信、任务认领和计划审批。
  *   本文件只新增团队这一层：
  *   + MessageBus：文件邮箱（.mailboxes/*.jsonl），读取即消费；消息带 type + metadata；
- *     waitForMessages 让 IDLE 队友等消息或超时
+ *     waitForMessages 让 IDLE 队友等消息或超时；每次投递在 transcript 里单独记一节
  *   + TeamState：bus + tasks + 队友状态 + assignment + 计划闸门 + pendingRequests，
  *     由 session 持有、跨轮复用（对齐 s10 的 TaskStore 注入风格）
  *   + 任务绑定的工作目录：Task.worktree 可选，claimTask 解析出 cwd 写进 assignment，
@@ -144,7 +144,10 @@ export class MessageBus {
   // 挂在 waitForMessages 上的等待者，send 时全部唤醒。
   private waiters = new Set<() => void>();
 
-  constructor(public mailboxDir: string) {
+  constructor(
+    public mailboxDir: string,
+    private logger?: SessionLogger,
+  ) {
     fs.mkdirSync(mailboxDir, { recursive: true });
   }
 
@@ -171,11 +174,22 @@ export class MessageBus {
       ts: Date.now() / 1000,
       metadata,
     };
-    fs.appendFileSync(this.inboxPath(to), `${JSON.stringify(msg)}\n`);
+    const inbox = this.inboxPath(to);
+    fs.appendFileSync(inbox, `${JSON.stringify(msg)}\n`);
     for (const wake of [...this.waiters]) wake();
     print(
       `  [bus] ${from} -> ${to}: (${type}) ${content.slice(0, 50)}`,
       "gray",
+    );
+    // 终端只打一行摘要；transcript 单独记一节，留下完整正文与 metadata。
+    this.logger?.section(
+      `BUS SEND ${from} -> ${to}`,
+      `  <inbox>${path.basename(inbox)}</inbox>\n` +
+        `  <type>${type}</type>\n` +
+        (Object.keys(metadata).length > 0
+          ? `  <metadata>${JSON.stringify(metadata)}</metadata>\n`
+          : "") +
+        `  <content>${content}</content>`,
     );
   }
 
@@ -291,9 +305,12 @@ export function worktreesDirFor(sessionDir: string): string {
 }
 
 // <session>/ 下的 .mailboxes/、.tasks/、.worktrees/ 组成一份团队状态。
-export function createTeamState(sessionDir: string): TeamState {
+export function createTeamState(
+  sessionDir: string,
+  logger?: SessionLogger,
+): TeamState {
   return new TeamState(
-    new MessageBus(mailboxDirFor(sessionDir)),
+    new MessageBus(mailboxDirFor(sessionDir), logger),
     new TaskStore(tasksDirFor(sessionDir)),
     worktreesDirFor(sessionDir),
   );
@@ -1827,7 +1844,7 @@ if (import.meta.main) {
   logger.config({ model: MODEL_ID, system: SYSTEM, tools });
 
   print("s13: Agent Teams — 持久队友 + 共享任务板 + 协作协议", "cyan");
-  print("🔮 输入问题，回车发送。输入 q 退出。\n", "green");
+  print("输入问题，回车发送。输入 q 退出。\n", "green");
 
   const rl = readline.createInterface({
     input: process.stdin,
@@ -1841,7 +1858,7 @@ if (import.meta.main) {
   const hooks = loadHooks(logger, makeConfirm(rl, logger));
   const history: Anthropic.MessageParam[] = [];
   // 团队状态（邮箱 + 任务板 + 队友注册表）跨轮复用，落在 s13 自己的 session 目录。
-  const team = createTeamState(import.meta.dirname);
+  const team = createTeamState(import.meta.dirname, logger);
 
   // 两种唤醒来源：用户输入一行 / Lead 收件箱来了团队事件（stdin 关闭则退出）。
   type AgentEvent = ["quit" | "user" | "wake", string | null];
