@@ -36,3 +36,11 @@ make s01 debug  # debug any session from s01 through s17 on port 9229, attach VS
 - **Dependency injection**, not module mocking: `agentLoop(messages, { client, logger })` takes fakes in tests, the real code at runtime; fakes must satisfy the same type signature as the real client, so a mismatch shows up at compile time.
 - An `import.meta.main` guard sits on the entry point, so importing `main.ts` from a test never starts the REPL or writes log files.
 - Beyond Vitest, each `sXX_*` directory has a `manual-check.md` with prompts and expected behavior for runs against the real API, covering terminal output and log content that only show up when you actually run the session.
+
+---
+
+*Agency comes from the model. The harness gives agency a place to land. Build the harness well, and the model will do the rest.*
+
+*Bash is all you need. Real agents are all the universe needs.*
+
+*This is not "copy the source code." This is "grasp the key designs and build it yourself."*

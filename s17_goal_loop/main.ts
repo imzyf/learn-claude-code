@@ -290,7 +290,7 @@ export type StopDecision = { action: StopAction; reason: string };
 const DECISION_COLORS: Record<StopAction, Color> = {
   allow: "gray",
   block: "yellow",
-  achieved: "green",
+  achieved: "magenta",
   failed: "red",
   limit: "yellow",
   defer: "yellow",
@@ -299,25 +299,38 @@ const DECISION_COLORS: Record<StopAction, Color> = {
 
 // 宿主保存的事件；GoalController.restore() 只认这一种记录。
 export type GoalStatusEvent = {
+  // 事件类型标记：restore() 靠它从混杂的事件流里挑出 goal 记录。
   type: "goal_status";
+  // 这条事件对应的完成条件；goal 已被清除时为空字符串。
   condition: string;
+  // 写下这条事件之后 goal 是否仍然活跃，也是 restore() 的恢复依据。
   active: boolean;
+  // 判断器判定完成。
   met: boolean;
+  // 判断器判定不可能完成。
   failed: boolean;
+  // 这次状态变化的理由：判断器的结论，或 set / cleared / replaced 这类操作说明。
   reason: string;
+  // 到此为止判断器被调用的次数。
   iterations: number;
+  // 从 setGoal 到这条事件经过的秒数。
   duration: number;
 };
 
+// 会话级的 goal 状态机：设置 / 清除 / 查看，以及主循环准备返回时的那次判断。
 export class GoalController {
+  // 当前活跃的 goal；null 表示没有 goal，退出条件回到 s01 的样子。
   active: GoalState | null = null;
+  // 最后一条事件：goal 结束后 status() 靠它回答上一个 goal 是成还是败。
   lastStatus: GoalStatusEvent | null = null;
+  // 本次用户请求内连续阻止结束的次数，超过 blockCap 就把控制权还给用户。
   consecutiveBlocks = 0;
 
   constructor(
     readonly evaluator: GoalEvaluator,
     readonly blockCap: number = DEFAULT_STOP_HOOK_BLOCK_CAP,
     readonly events: GoalStatusEvent[] = [],
+    private readonly logger?: SessionLogger,
   ) {
     if (blockCap < 1) throw new GoalError("blockCap must be at least 1");
   }
@@ -327,6 +340,7 @@ export class GoalController {
     this.consecutiveBlocks = 0;
   }
 
+  // 设置新的完成条件；tokensAtStart 记下起点，status() 用它算这个 goal 花了多少 token。
   setGoal(condition: string, tokensAtStart = 0): GoalState {
     const trimmed = condition.trim();
     if (!trimmed) throw new GoalError("goal condition cannot be empty");
@@ -338,16 +352,35 @@ export class GoalController {
     // 一个会话同时只有一个活跃 goal：新的直接替换旧的，替换本身也记一条事件。
     if (this.active !== null) {
       this.record(false, false, false, "replaced by a new goal");
+      this.logger?.console(
+        `[goal] replaced: ${this.active.condition} -> ${trimmed}`,
+        "yellow",
+      );
     }
+    // 计数与时间都从这一刻重新开始，替换掉的旧 goal 不带任何数据过来。
     this.active = {
+      // 判断器每次拿到的完成条件。
       condition: trimmed,
+      // 判断器被调用的次数。
       iterations: 0,
+      // 起始时间戳，status() 用它算已经过去多久。
       setAt: Date.now(),
+      // 起始 token 用量，status() 减出这个 goal 的花费。
       tokensAtStart,
+      // 判断器最近一次给的理由，还没判断过所以是 null。
       lastReason: null,
     };
     this.consecutiveBlocks = 0;
     this.record(true, false, false, "goal set");
+    this.logger?.console(`[goal] set: ${trimmed}`, "cyan");
+    // 终端只打一行摘要；transcript 单独记一节，留下完整条件与这次计量的起点，
+    // 事后翻日志时能对上 status() 里的 Tokens 是从哪个数减出来的。
+    this.logger?.section(
+      "GOAL SET",
+      `  <condition>${trimmed}</condition>\n` +
+        `  <tokens-at-start>${tokensAtStart}</tokens-at-start>\n` +
+        `  <block-cap>${this.blockCap}</block-cap>`,
+    );
     return this.active;
   }
 
@@ -355,6 +388,7 @@ export class GoalController {
     if (this.active === null) return "No goal set";
     const { condition } = this.active;
     this.record(false, false, false, reason);
+    this.logger?.console(`[goal] cleared: ${condition} (${reason})`, "yellow");
     this.active = null;
     this.consecutiveBlocks = 0;
     return `Goal cleared: ${condition}`;
@@ -380,9 +414,8 @@ export class GoalController {
       0,
       Math.floor((Date.now() - this.active.setAt) / 1000),
     );
+    // 只算这个 goal 开始之后的用量；恢复的 goal 起点重置，所以结果可能小于会话总量。
     const spent = Math.max(0, currentTokens - this.active.tokensAtStart);
-    // Tokens 只算工作模型这一路（和 code.py 的 total_tokens 一致）；判断器自己的用量
-    // 记在 logger.child("evaluator") 的日志里。
     const lines = [
       `Goal active: ${this.active.condition}`,
       `Elapsed: ${elapsed}s`,
@@ -400,6 +433,7 @@ export class GoalController {
     messages: Anthropic.MessageParam[],
     backgroundRunning = false,
   ): Promise<StopDecision> {
+    // 没有活跃 goal 就不调判断器，直接放行。
     if (this.active === null) return { action: "allow", reason: "" };
     // 关键结果还没回到对话，这时判断没有意义：保留 goal，也不花判断器的调用。
     if (backgroundRunning) {
@@ -477,8 +511,14 @@ export class GoalController {
     evaluator: GoalEvaluator,
     events: GoalStatusEvent[],
     blockCap: number = DEFAULT_STOP_HOOK_BLOCK_CAP,
+    logger?: SessionLogger,
   ): GoalController {
-    const controller = new GoalController(evaluator, blockCap, [...events]);
+    const controller = new GoalController(
+      evaluator,
+      blockCap,
+      [...events],
+      logger,
+    );
     for (const event of [...events].reverse()) {
       if (event.type !== "goal_status") continue;
       controller.lastStatus = { ...event };
@@ -630,8 +670,15 @@ export class GoalSession {
         this.backgroundRunning(),
       );
       if (decision.action !== "allow") {
+        // defer 之外都由 record() 更新过 lastStatus：附上判断次数与耗时，
+        // 这样终端就能看出 goal 跑了多久、判断器被问了几次，不用另外敲 /goal。
+        const status = this.goal.lastStatus;
+        const detail =
+          status && decision.action !== "defer"
+            ? ` (iteration ${status.iterations}, ${status.duration.toFixed(1)}s)`
+            : "";
         this.logger.console(
-          `[goal] ${decision.action}: ${decision.reason}`,
+          `[goal] ${decision.action}: ${decision.reason}${detail}`,
           DECISION_COLORS[decision.action],
         );
       }
@@ -739,17 +786,21 @@ if (import.meta.main) {
   });
 
   const hooks = loadHooks(logger, makeConfirm(rl, logger));
+
+  // 入口在这里注入真实判断器；测试换成假判断器，不碰真实 API。
   const goal = new GoalController(
+    // 判断器单独用一路 logger 与模型，收发和花费在 transcript 里和主循环分开看。
     new PromptGoalEvaluator(
       client,
       evaluatorModelId(),
       EVALUATOR_MAX_TOKENS,
-      // 子 scope 让判断器的收发在日志里带 [evaluator] 前缀。定价表由 logger.config()
-      // 按主模型加载一次，判断器换成别的模型时，日志里的金额仍按主模型的价算。
       logger.child("evaluator"),
     ),
     positiveEnv("CLAUDE_CODE_STOP_HOOK_BLOCK_CAP", DEFAULT_STOP_HOOK_BLOCK_CAP),
+    [],
+    logger,
   );
+  // 负责整个会话的 goal 状态、Stop 位置的判断、maxTurns 全局出口。
   const session = new GoalSession({
     client,
     logger,
@@ -758,6 +809,7 @@ if (import.meta.main) {
     // 0 或非法值都表示不限轮数。
     maxTurns: positiveEnv("MAX_TURNS", 0) || null,
   });
+
   logger.config({ model: MODEL_ID, system: SYSTEM, tools });
 
   const argv = process.argv.slice(2);
