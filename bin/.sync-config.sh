@@ -28,6 +28,12 @@ SYNC_DIRS=(
   skills
 )
 
+# SYNC_DIRS 内的顶级条目改名规则，格式 "上游名:本地名"。
+# 每个同步目录都套用同一套规则，给同名的本地化文件让位。
+SYNC_DIR_RENAMES=(
+  "README.zh.md:README.zh.upstream.md"
+)
+
 # 要从上游拉取的独立文件。格式 "上游路径" 或 "上游路径:本地路径"（改名落地）。
 SYNC_FILES=(
   ".env.example:.env.example.upstream"

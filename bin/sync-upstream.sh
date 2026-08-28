@@ -58,6 +58,17 @@ for glob in "${EXCLUDE_GLOBS[@]:-}"; do
   [[ -n "${glob}" ]] && exclude_args+=( --exclude="${glob}" )
 done
 
+# 查 SYNC_DIR_RENAMES，命中则输出本地名，否则原样输出上游名。
+rename_of() {
+  local name="$1" rule
+  for rule in "${SYNC_DIR_RENAMES[@]:-}"; do
+    [[ -n "${rule}" && "${name}" == "${rule%%:*}" ]] || continue
+    printf '%s\n' "${rule#*:}"
+    return
+  done
+  printf '%s\n' "${name}"
+}
+
 for dir in "${SYNC_DIRS[@]}"; do
   src="${clone_dir}/${dir}"
   if [[ ! -d "${src}" ]]; then
@@ -69,10 +80,18 @@ for dir in "${SYNC_DIRS[@]}"; do
   # 逐个刷新上游拥有的条目；仅本地存在的条目不受影响。
   for entry in "${src}"/*; do
     name="$(basename "${entry}")"
-    rm -rf "${ROOT_DIR:?}/${dir}/${name}"
+    dest_name="$(rename_of "${name}")"
+    rm -rf "${ROOT_DIR:?}/${dir}/${name}" "${ROOT_DIR:?}/${dir}/${dest_name}"
     # -q：抑制被排除顶级条目的 "skipping excluded file" 警告。
+    # 目标始终是目录，被排除的条目才不会被 rsync 建成同名空目录。
     rsync -aq "${exclude_args[@]}" "${entry}" "${ROOT_DIR}/${dir}/"
-    echo "  - ${dir}/${name}"
+    if [[ "${name}" == "${dest_name}" ]]; then
+      echo "  - ${dir}/${name}"
+    elif [[ -e "${ROOT_DIR}/${dir}/${name}" ]]; then
+      # 落地后改名，给同名的本地化文件让位。
+      mv "${ROOT_DIR}/${dir}/${name}" "${ROOT_DIR}/${dir}/${dest_name}"
+      echo "  - ${dir}/${name} -> ${dir}/${dest_name}"
+    fi
   done
 done
 

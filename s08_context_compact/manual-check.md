@@ -49,12 +49,12 @@ L2_COMPACT_KEEP_RECENT=1 L4_COMPACT_CONTEXT_LIMIT=12000 pnpm dev s08_context_com
 
 连着问三轮，每轮都产生一次文件读取：
 
-1. `Read s01_agent_loop/README.zh.md and give me its top-level headings.`
-   读 s01_agent_loop/README.zh.md，给我它的一级标题。
-2. `Now do the same for s02_tool_use/README.zh.md.`
-   对 s02_tool_use/README.zh.md 做同样的事。
-3. `Same for s03_permission/README.zh.md.`
-   s03_permission/README.zh.md 也一样。
+1. `Read s01_agent_loop/README.zh.upstream.md and give me its top-level headings.`
+   读 s01_agent_loop/README.zh.upstream.md，给我它的一级标题。
+2. `Now do the same for s02_tool_use/README.zh.upstream.md.`
+   对 s02_tool_use/README.zh.upstream.md 做同样的事。
+3. `Same for s03_permission/README.zh.upstream.md.`
+   s03_permission/README.zh.upstream.md 也一样。
 
 越线之后应该出现：
 

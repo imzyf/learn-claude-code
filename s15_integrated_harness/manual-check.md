@@ -208,7 +208,7 @@ cat s15_integrated_harness/.scheduled_tasks.json
    Allow? [y/N]
 ```
 
-命中的是 s03 的规则 2（bash 命令含 `rm`），不是拒绝名单。这里和 `README.zh.md` 的说法有出入：README 描述的是 `code.py`，那边每条 bash 都问；TS 版复用 s03 的三关，只有命中关键字的 bash 才问，拒绝名单（`sudo`、`shutdown`、`mkfs` 等）直接拦，不问。
+命中的是 s03 的规则 2（bash 命令含 `rm`），不是拒绝名单。这里和 `README.zh.upstream.md` 的说法有出入：README 描述的是 `code.py`，那边每条 bash 都问；TS 版复用 s03 的三关，只有命中关键字的 bash 才问，拒绝名单（`sudo`、`shutdown`、`mkfs` 等）直接拦，不问。
 
 Lead 收件箱那一路用团队场景验：spawn 一个队友，队友说完一轮话会发 `result` 和 `idle_notification`，主循环消费收件箱后起新一轮，期望黄字 `[team auto] 2 event(s)`。队友、计划闸门、worktree 的完整验证在 s13 的清单里，这里只确认事件确实回流成新一轮。
 

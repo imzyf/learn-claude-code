@@ -3,7 +3,7 @@
 ## 项目定位
 
 - 本仓库是 [shareAI-lab/learn-claude-code](https://github.com/shareAI-lab/learn-claude-code) 的 TypeScript 移植版，课程从 `s01` 到 `s17` 逐步演进。
-- `main.ts` 是 TypeScript 实现；上游拥有的文件不要改，包括各章的 `code.py`、`README.zh.md`、`images/`，以及 `skills/`、`README-zh.upstream.md`、`.env.example.upstream`、`requirements.txt`。同步入口是 `make sync`（配置见 `bin/.sync-config.sh`）。
+- `main.ts` 是 TypeScript 实现；上游拥有的文件不要改，包括各章的 `code.py`、`README.zh.upstream.md`、`images/`，以及 `skills/`、`README-zh.upstream.md`、`.env.example.upstream`、`requirements.txt`。同步入口是 `make sync`（配置见 `bin/.sync-config.sh`）。
 - 公共能力放在 `lib/`；章节特有逻辑留在对应的 `sXX_*` 目录。
 
 ## 目录约定
