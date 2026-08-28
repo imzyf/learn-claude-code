@@ -167,6 +167,16 @@ export function checkDenyList(command: string): string | null {
 }
 
 // 关卡 2：规则匹配 —— 依赖上下文的检查
+
+// 处在命令位置上的删除命令：行首或命令分隔符之后，且是完整的词。
+// 只做子串匹配会漏掉分隔符后面的 `ls; rm x`，也漏掉 Windows 的 del；
+// 而把 del 当子串又会把 model、delimiter 判成破坏性命令。
+const DESTRUCTIVE_COMMAND_WORD =
+  /(?:^|[;&|()\n])\s*(?:rm|del|unlink)(?=\s|$|[;&|()])/i;
+
+// 靠命令名分不出来的破坏性写法，继续按子串匹配。
+const DESTRUCTIVE = ["> /etc/", "chmod 777"];
+
 const PERMISSION_RULES: {
   tools: string[];
   check: (args: any) => boolean;
@@ -182,12 +192,15 @@ const PERMISSION_RULES: {
     message: "Access outside workspace",
   },
   {
-    // 规则 2：bash 命令含破坏性关键字（rm、写入 /etc、chmod 777）
+    // 规则 2：bash 命令含破坏性关键字（rm/del/unlink、写入 /etc、chmod 777）
     tools: ["bash"],
-    check: (args) =>
-      ["rm ", "unlink ", "> /etc/", "chmod 777"].some((kw) =>
-        (args.command ?? "").includes(kw),
-      ),
+    check: (args) => {
+      const command: string = args.command ?? "";
+      return (
+        DESTRUCTIVE_COMMAND_WORD.test(command) ||
+        DESTRUCTIVE.some((kw) => command.includes(kw))
+      );
+    },
     message: "Potentially destructive command",
   },
 ];

@@ -79,8 +79,34 @@ describe("checkRules", () => {
     );
   });
 
+  it("标记命令分隔符后面的删除命令", () => {
+    expect(checkRules("bash", { command: "ls; rm foo" })).toBe(
+      "Potentially destructive command",
+    );
+    expect(checkRules("bash", { command: "cat a.txt && unlink a.txt" })).toBe(
+      "Potentially destructive command",
+    );
+  });
+
+  it("标记 Windows 的 del，大小写不敏感", () => {
+    expect(checkRules("bash", { command: "del test.txt" })).toBe(
+      "Potentially destructive command",
+    );
+    expect(checkRules("bash", { command: "DEL test.txt" })).toBe(
+      "Potentially destructive command",
+    );
+  });
+
   it("安全的 bash 命令返回 null", () => {
     expect(checkRules("bash", { command: "echo hi" })).toBeNull();
+  });
+
+  // 词边界的意义：删除命令的名字出现在别的词里，或者出现在参数位置上，都不算。
+  it("不把含删除命令名的词判成破坏性命令", () => {
+    expect(checkRules("bash", { command: "python model.py" })).toBeNull();
+    expect(checkRules("bash", { command: "cat delimiter.txt" })).toBeNull();
+    expect(checkRules("bash", { command: "echo del test.txt" })).toBeNull();
+    expect(checkRules("bash", { command: "git rm-cached" })).toBeNull();
   });
 
   it("没有匹配规则的工具返回 null", () => {
