@@ -60,7 +60,7 @@ def run_bash(command: str) -> str:
             shell=True,
             cwd=WORKDIR,
             capture_output=True,
-            text=True,
+            text=True, errors="replace",
             timeout=120,
         )
         output = (result.stdout + result.stderr).strip()
@@ -369,7 +369,14 @@ def assemble_system_prompt() -> str:
 
 HOOKS = {"UserPromptSubmit": [], "PreToolUse": [], "PostToolUse": [], "Stop": []}
 DENY_LIST = ["rm -rf /", "sudo", "shutdown", "reboot", "mkfs", "dd if="]
+DESTRUCTIVE_COMMAND_WORD = re.compile(
+    r"(?i)(?:^|[;&|()\n])\s*(?:rm|del)(?=\s|$|[;&|()])"
+)
 DESTRUCTIVE = ["rm ", "> /etc/", "chmod 777"]
+
+
+def contains_destructive_command(command: str) -> bool:
+    return bool(DESTRUCTIVE_COMMAND_WORD.search(command))
 
 
 def register_hook(event: str, callback):
@@ -390,7 +397,9 @@ def permission_hook(block):
         for pattern in DENY_LIST:
             if pattern in command:
                 return f"Permission denied by deny list: {pattern}"
-        if any(keyword in command for keyword in DESTRUCTIVE):
+        if contains_destructive_command(command) or any(
+            keyword in command for keyword in DESTRUCTIVE
+        ):
             print(f"\n[permission] {block.name}({block.input})")
             if input("Allow? [y/N] ").strip().lower() not in {"y", "yes"}:
                 return "Permission denied by user"

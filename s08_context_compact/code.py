@@ -79,7 +79,7 @@ def run_bash(command: str) -> str:
     try:
         result = subprocess.run(
             command, shell=True, cwd=WORKDIR,
-            capture_output=True, text=True, timeout=120,
+            capture_output=True, text=True, errors="replace", timeout=120,
         )
         output = (result.stdout + result.stderr).strip()
         return output[:50000] if output else "(no output)"
@@ -178,7 +178,14 @@ def trigger_hooks(event: str, *args):
 
 
 DENY_LIST = ["rm -rf /", "sudo", "shutdown", "reboot", "mkfs", "dd if="]
+DESTRUCTIVE_COMMAND_WORD = re.compile(
+    r"(?i)(?:^|[;&|()\n])\s*(?:rm|del)(?=\s|$|[;&|()])"
+)
 DESTRUCTIVE = ["rm ", "> /etc/", "chmod 777"]
+
+
+def contains_destructive_command(command: str) -> bool:
+    return bool(DESTRUCTIVE_COMMAND_WORD.search(command))
 
 
 def permission_hook(block):
@@ -187,7 +194,9 @@ def permission_hook(block):
         for pattern in DENY_LIST:
             if pattern in command:
                 return f"Permission denied by deny list: {pattern}"
-        if any(keyword in command for keyword in DESTRUCTIVE):
+        if contains_destructive_command(command) or any(
+            keyword in command for keyword in DESTRUCTIVE
+        ):
             print("\n\033[33m[permission] Potentially destructive command\033[0m")
             print(f"   Tool: {block.name}({block.input})")
             if input("   Allow? [y/N] ").strip().lower() not in ("y", "yes"):
@@ -570,7 +579,8 @@ if __name__ == "__main__":
     history = []
     while True:
         try:
-            query = input("\033[36ms08 >> \033[0m")
+            # \001/\002 tell Readline the ANSI escapes have zero display width.
+            query = input("\001\033[36m\002s08 >> \001\033[0m\002")
         except (EOFError, KeyboardInterrupt):
             break
         if query.strip().lower() in ("q", "exit", ""):

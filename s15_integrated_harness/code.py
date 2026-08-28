@@ -72,6 +72,8 @@ KEEP_RECENT_TOOL_RESULTS = 3
 PERSIST_THRESHOLD = 30000
 CONTINUATION_PROMPT = "Continue from the previous response. Do not repeat completed work."
 PROMPT = "\033[36ms15 >> \033[0m"
+# \001/\002 tell Readline the ANSI escapes have zero display width.
+READLINE_PROMPT = "\001\033[36m\002s15 >> \001\033[0m\002"
 CLI_ACTIVE = False
 
 
@@ -102,10 +104,17 @@ class ConsoleBroker:
     def __init__(self):
         self._lock = threading.Lock()
         self.reader = None
+        self.display_prompt = PROMPT
+        self.readline_prompt = READLINE_PROMPT
 
-    def ask(self, prompt: str) -> str:
+    def set_prompt(self, display_prompt: str, readline_prompt: str):
+        self.display_prompt = display_prompt
+        self.readline_prompt = readline_prompt
+
+    def ask(self, prompt: str | None = None) -> str:
         with self._lock:
-            return (self.reader or input)(prompt)
+            active_prompt = self.readline_prompt if prompt is None else prompt
+            return (self.reader or input)(active_prompt)
 
 
 CONSOLE = ConsoleBroker()
@@ -122,7 +131,7 @@ def terminal_print(text: str):
         except Exception:
             line = ""
     print(f"\r\033[K{text}")
-    print(PROMPT + line, end="", flush=True)
+    print(CONSOLE.display_prompt + line, end="", flush=True)
 
 # -- Task System --
 
@@ -445,7 +454,7 @@ def _run_git(args: list[str], cwd: Path | None = None) -> tuple[bool, str]:
     try:
         result = subprocess.run(
             ["git", *args], cwd=cwd or WORKDIR,
-            capture_output=True, text=True, timeout=30,
+            capture_output=True, text=True, errors="replace", timeout=30,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         return False, f"{type(exc).__name__}: {exc}"
@@ -894,7 +903,7 @@ def _run_bash_process(command: str, cwd: Path | None = None) -> tuple[str, int |
         process = subprocess.Popen(
             command, shell=True, cwd=cwd or WORKDIR,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, start_new_session=True,
+            text=True, errors="replace", start_new_session=True,
         )
         with _shell_process_lock:
             _shell_processes.add(process)
@@ -3266,7 +3275,7 @@ if __name__ == "__main__":
                      args=(history, context, session_state), daemon=True).start()
     while True:
         try:
-            query = CONSOLE.ask(PROMPT)
+            query = CONSOLE.ask()
         except (EOFError, KeyboardInterrupt):
             break
         if query.strip().lower() in ("q", "exit", ""):

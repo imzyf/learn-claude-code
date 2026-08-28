@@ -16,6 +16,7 @@ s12_cron_scheduler.py - Cron Scheduler
 import glob
 import json
 import os
+import re
 import secrets
 import subprocess
 import threading
@@ -60,7 +61,7 @@ def run_bash(command: str) -> str:
             shell=True,
             cwd=WORKDIR,
             capture_output=True,
-            text=True,
+            text=True, errors="replace",
             timeout=120,
         )
         output = (result.stdout + result.stderr).strip()
@@ -173,7 +174,14 @@ def trigger_hooks(event: str, *args):
 
 
 DENY_LIST = ["rm -rf /", "sudo", "shutdown", "reboot", "mkfs", "dd if="]
+DESTRUCTIVE_COMMAND_WORD = re.compile(
+    r"(?i)(?:^|[;&|()\n])\s*(?:rm|del)(?=\s|$|[;&|()])"
+)
 DESTRUCTIVE = ["rm ", "> /etc/", "chmod 777"]
+
+
+def contains_destructive_command(command: str) -> bool:
+    return bool(DESTRUCTIVE_COMMAND_WORD.search(command))
 
 
 def request_permission(block, reason: str) -> str | None:
@@ -195,7 +203,9 @@ def permission_hook(block):
             if pattern in command:
                 print(f"\n\033[31m[blocked] '{pattern}'\033[0m")
                 return "Permission denied by deny list"
-        if any(keyword in command for keyword in DESTRUCTIVE):
+        if contains_destructive_command(command) or any(
+            keyword in command for keyword in DESTRUCTIVE
+        ):
             return request_permission(block, "Potentially destructive command")
 
     if block.name in ("read_file", "write_file", "edit_file"):
@@ -761,7 +771,8 @@ if __name__ == "__main__":
     try:
         while True:
             try:
-                query = input("\033[36ms12 >> \033[0m")
+                # \001/\002 tell Readline the ANSI escapes have zero display width.
+                query = input("\001\033[36m\002s12 >> \001\033[0m\002")
             except (EOFError, KeyboardInterrupt):
                 break
             if query.strip().lower() in ("q", "exit", ""):

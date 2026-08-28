@@ -833,10 +833,16 @@ async def run_demo(argv):
           f"tokens={usage['tokens']}  journal=.runtime/{task['runId']}.journal.jsonl")
 
 
+PROMPT = "\033[36ms16 >> \033[0m"
+# \001/\002 tell Readline the ANSI escapes have zero display width.
+READLINE_PROMPT = "\001\033[36m\002s16 >> \001\033[0m\002"
+
+
 def run_cli():
     """Run the cumulative s15 host with Workflow added to its tool pool."""
     host = load_integrated_host()
     install_workflow_tool(host)
+    host.CONSOLE.set_prompt(PROMPT, READLINE_PROMPT)
     host.CLI_ACTIVE = True
     host.start_runtime_services()
     print("s16: workflow runtime")
@@ -851,7 +857,7 @@ def run_cli():
     ).start()
     while True:
         try:
-            query = host.CONSOLE.ask("\033[36ms16 >> \033[0m")
+            query = host.CONSOLE.ask()
         except (EOFError, KeyboardInterrupt):
             break
         if query.strip().lower() in ("q", "exit", ""):

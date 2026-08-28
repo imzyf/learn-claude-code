@@ -372,7 +372,7 @@ def _run_git(args: list[str], cwd: Path | None = None) -> tuple[bool, str]:
     try:
         result = subprocess.run(
             ["git", *args], cwd=cwd or WORKDIR,
-            capture_output=True, text=True, timeout=30,
+            capture_output=True, text=True, errors="replace", timeout=30,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         return False, f"{type(exc).__name__}: {exc}"
@@ -670,7 +670,7 @@ def run_bash(command: str, cwd: Path | None = None) -> str:
             shell=True,
             cwd=cwd or WORKDIR,
             capture_output=True,
-            text=True,
+            text=True, errors="replace",
             timeout=120,
         )
         output = (result.stdout + result.stderr).strip()
@@ -1663,7 +1663,14 @@ TOOL_HANDLERS = {
 
 HOOKS = {"UserPromptSubmit": [], "PreToolUse": [], "PostToolUse": [], "Stop": []}
 DENY_LIST = ["rm -rf /", "sudo", "shutdown", "reboot", "mkfs", "dd if="]
+DESTRUCTIVE_COMMAND_WORD = re.compile(
+    r"(?i)(?:^|[;&|()\n])\s*(?:rm|del)(?=\s|$|[;&|()])"
+)
 DESTRUCTIVE = ["rm ", "> /etc/", "chmod 777"]
+
+
+def contains_destructive_command(command: str) -> bool:
+    return bool(DESTRUCTIVE_COMMAND_WORD.search(command))
 
 
 def register_hook(event: str, callback):
@@ -1686,7 +1693,9 @@ def check_permission(block, prompt_user: bool = True) -> str | None:
         for pattern in DENY_LIST:
             if pattern in command:
                 return f"Permission denied by deny list: {pattern}"
-        if any(keyword in command for keyword in DESTRUCTIVE):
+        if contains_destructive_command(command) or any(
+            keyword in command for keyword in DESTRUCTIVE
+        ):
             if not prompt_user:
                 return "Permission required: ask Lead to run this command."
             print(f"\n[permission] {block.name}({block.input})")
