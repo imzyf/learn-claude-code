@@ -290,7 +290,7 @@ function registerDefaultHooks(hooks: HookSystem, confirm: Confirm): void {
   hooks.register("PostToolUse", largeOutputHook);
   hooks.register("Stop", summaryHook);
 
-  // 仅用于 manual-check.md 第 6 节演示「Stop hook 强制续轮」：默认不注册，
+  // 仅用于 README.md 第 6 节演示「Stop hook 强制续轮」：默认不注册，
   // 避免干扰其余场景；跑那节验证时设 S04_FORCE_STOP_HOOK=1。
   if (process.env.S04_FORCE_STOP_HOOK) {
     let fired = false;

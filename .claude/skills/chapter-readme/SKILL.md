@@ -1,15 +1,15 @@
 ---
-name: manual-check
-description: 'Write a chapter manual-check (手动验证清单) in this repo: sXX_*/manual-check.md, the prompts a reader pastes into the REPL to see the chapter mechanism work against a real model API. Use when adding one for a new chapter, or updating one after the chapter source changed. Not for writing main.test.ts cases.'
+name: chapter-readme
+description: 'Write a chapter README in this repo: sXX_*/README.md, whose main content is the 手动验证清单, the prompts a reader pastes into the REPL to see the chapter mechanism work against a real model API. Use when adding a README for a new chapter, or updating one after the chapter source changed. Not for writing main.test.ts cases.'
 ---
 
-这份清单让读者用真实 prompt 把本章新增的机制亲手跑一遍，看见它在真实模型、真实上下文里是什么样子。读者是坐在终端前一条条粘 prompt 的人，判据要他用眼睛看终端，以及打开 `.log/`、`.transcripts/` 等目录下本次运行的输出文件。他读得懂代码也会翻日志，不用当小白带：只讲重点，指个方向就够。
+章节 README（`sXX_*/README.md`）当前的主要内容就是这份手动验证清单。它让读者用真实 prompt 把本章新增的机制亲手跑一遍，看见它在真实模型、真实上下文里是什么样子。读者是坐在终端前一条条粘 prompt 的人，判据要他用眼睛看终端，以及打开 `.log/`、`.transcripts/` 等目录下本次运行的输出文件。他读得懂代码也会翻日志，不用当小白带：只讲重点，指个方向就够。
 
 写清单时不跑真实 API。期望输出照着 `main.ts` 和 `lib/` 里的字面量推，推不出来的值用占位符，不编。跑的是读者。
 
 覆盖范围按本章机制定，不按 `main.test.ts` 覆盖与否定。`main.test.ts` 单测证明代码分支能走通，清单要让人看见终端输出、hook 时序、落盘产物和模型的实际反应。
 
-清单正文用中文，prompt 原文、日志文案、标识符保持原样。写完的样子参考 `s01_agent_loop/manual-check.md`。
+清单正文用中文，prompt 原文、日志文案、标识符保持原样。写完的样子参考 `s01_agent_loop/README.md`。
 
 ## 步骤
 

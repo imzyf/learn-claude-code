@@ -35,7 +35,7 @@ make s01 debug  # 在 9229 端口调试 s01–s17 中的任意一课，VS Code �
 - **Vitest**（`make test`）跑得快、免费、不需要任何凭证，从不调用真实的 Claude API。
 - 用 **Dependency injection**，而不是 mock 模块：`agentLoop(messages, { client, logger })` 在测试里接收假对象，在运行时接收真实实现，假对象要满足和真实 client 一样的类型签名，编译期就能查出不匹配。
 - 入口文件上有 `import.meta.main` 守卫，所以测试中 import `main.ts` 不会启动 REPL，也不会写日志文件。
-- Vitest 之外，每个 `sXX_*` 目录下的 `manual-check.md` 给出对着真实 API 跑的验证 prompt 和期望现象，补终端输出、日志内容这些跑起来才能看到的行为。
+- Vitest 之外，每个 `sXX_*` 目录下的 `README.md` 给出对着真实 API 跑的验证 prompt 和期望现象，补终端输出、日志内容这些跑起来才能看到的行为。
 
 ---
 

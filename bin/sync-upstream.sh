@@ -58,6 +58,16 @@ for glob in "${EXCLUDE_GLOBS[@]:-}"; do
   [[ -n "${glob}" ]] && exclude_args+=( --exclude="${glob}" )
 done
 
+# 顶级条目名是否命中 EXCLUDE_GLOBS。命中的条目整个跳过，不删也不同步，
+# 否则同名的本地文件会先被 rm 掉，再因为 --exclude 无法从上游补回。
+is_excluded() {
+  local name="$1" glob
+  for glob in "${EXCLUDE_GLOBS[@]:-}"; do
+    [[ -n "${glob}" && "${name}" == ${glob} ]] && return 0
+  done
+  return 1
+}
+
 # 查 SYNC_DIR_RENAMES，命中则输出本地名，否则原样输出上游名。
 rename_of() {
   local name="$1" rule
@@ -80,6 +90,7 @@ for dir in "${SYNC_DIRS[@]}"; do
   # 逐个刷新上游拥有的条目；仅本地存在的条目不受影响。
   for entry in "${src}"/*; do
     name="$(basename "${entry}")"
+    is_excluded "${name}" && continue
     dest_name="$(rename_of "${name}")"
     rm -rf "${ROOT_DIR:?}/${dir}/${name}" "${ROOT_DIR:?}/${dir}/${dest_name}"
     # -q：抑制被排除顶级条目的 "skipping excluded file" 警告。

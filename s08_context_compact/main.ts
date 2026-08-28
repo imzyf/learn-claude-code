@@ -113,7 +113,7 @@ const toolResultsDir = (sessionDir: string) =>
 
 // 十个阈值启动时可用 L{n}_COMPACT_* 环境变量覆盖（前缀是它属于哪一层压缩）。
 // defaults.env 是这十个默认值的参考清单（不参与加载）；要试某一层，按
-// manual-check.md 的做法在命令行内联，
+// README.md 的做法在命令行内联，
 // 只对这一次运行生效：L1_COMPACT_SNIP_MAX_MESSAGES=8 pnpm dev s08_context_compact/main.ts
 // L1 裁剪阈值：消息数超过它就裁掉中间部分。
 export const SNIP_MAX_MESSAGES = Number(

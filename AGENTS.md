@@ -8,7 +8,7 @@
 
 ## 目录约定
 
-- 每章包含 `main.ts`（可运行入口）、`main.test.ts`（vitest 用例）、`manual-check.md`（需要真实 API 的人工验证清单），其余文件来自上游。
+- 每章包含 `main.ts`（可运行入口）、`main.test.ts`（vitest 用例）、`README.md`（需要真实 API 的人工验证清单），其余文件来自上游。
 - `lib/` 模块分工：`model.ts` 提供 client 和 `MODEL_ID`，`tools.ts` 定义工具与解析回复，`logger.ts` 写 JSON 与 transcript 双日志，`pricing.ts` 取价计费，`terminal.ts` 管终端上色与提示符，`testing.ts` 只被 `*.test.ts` 引用，提供 fake client 与临时目录工厂。
 - `lib/terminal.ts` 顶部的配色约定对全项目生效，新增输出按那套颜色走。
 

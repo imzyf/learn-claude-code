@@ -35,7 +35,7 @@ make s01 debug  # debug any session from s01 through s17 on port 9229, attach VS
 - **Vitest** (`make test`) is fast, free, and needs no credentials; it never calls the real Claude API.
 - **Dependency injection**, not module mocking: `agentLoop(messages, { client, logger })` takes fakes in tests, the real code at runtime; fakes must satisfy the same type signature as the real client, so a mismatch shows up at compile time.
 - An `import.meta.main` guard sits on the entry point, so importing `main.ts` from a test never starts the REPL or writes log files.
-- Beyond Vitest, each `sXX_*` directory has a `manual-check.md` with prompts and expected behavior for runs against the real API, covering terminal output and log content that only show up when you actually run the session.
+- Beyond Vitest, each `sXX_*` directory has a `README.md` with prompts and expected behavior for runs against the real API, covering terminal output and log content that only show up when you actually run the session.
 
 ---
 
