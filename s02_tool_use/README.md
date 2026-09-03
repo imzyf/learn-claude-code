@@ -91,7 +91,6 @@ Use glob to find every file matching **/* in this workspace
 ```plaintext
 🔧 glob({"pattern":"**/*"})
 AGENTS.md
-CLAUDE.md
 ...
 ... (<N> more chars)
 ```

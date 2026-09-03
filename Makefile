@@ -1,5 +1,5 @@
-.PHONY: help setup sync sync-force smoke test typecheck lint lint-check open \
-	reset debug \
+.PHONY: help setup sync smoke test lint open-upstream open-repo \
+	debug \
 	s01 s02 s03 s04 s05 s06 s07 s08 s09 s10 \
 	s11 s12 s13 s14 s15 s16 s17
 
@@ -11,12 +11,15 @@ help: ## Show this help
 
 ##@ Setup
 
-open: ## Open the upstream repo in the browser
+open-upstream: ## Open the upstream repo in the browser
 	open https://github.com/shareAI-lab/learn-claude-code
 
-setup: ## Install deps and create .env from .env.example.upstream
+open-repo: ## Open this repo's GitHub page in the browser
+	open https://github.com/imzyf/learn-claude-code
+
+setup: ## Install deps and create .env from .upstream.env.example
 	pnpm install
-	[ -f .env ] || cp .env.example.upstream .env
+	[ -f .env ] || cp .upstream.env.example .env
 
 smoke: ## One-shot API call to verify the setup
 	pnpm smoke
@@ -29,31 +32,13 @@ CLEAN_TMP = find . -type d -name .tmp -not -path '*/node_modules/*' -exec rm -rf
 test: ## Run the test suite once, then remove leftover .tmp/ dirs
 	pnpm test; status=$$?; $(CLEAN_TMP); exit $$status
 
-typecheck: ## Type-check without emitting
-	pnpm typecheck
-
 lint: ## Lint and auto-fix with Biome, then remove leftover .tmp/ dirs
 	pnpm lint:fix; status=$$?; $(CLEAN_TMP); exit $$status
 
-lint-check: ## Check lint and formatting without writing (used by CI)
-	pnpm lint
-
-reset: ## Preview untracked files (git clean -n), remove after confirmation
-	@git clean -n -d
-	@read -p "Remove the untracked files/dirs listed above? [y/N] " ans; \
-	if [ "$$ans" = "y" ] || [ "$$ans" = "Y" ]; then \
-		git clean -f -d; \
-	else \
-		echo "Aborted."; \
-	fi
-
 ##@ Sync
 
-sync: ## Sync Python reference sources from upstream (cached)
-	bin/sync-upstream.sh
-
-sync-force: ## Sync from upstream, ignoring the clone cache
-	LCC_SYNC_CACHE_TTL=0 make sync
+sync: ## Sync Python reference sources from upstream (cached); set LCC_SYNC_CACHE_TTL=0 to ignore the clone cache
+	.github/scripts/sync-upstream.sh
 
 ##@ Sessions
 

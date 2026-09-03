@@ -21,7 +21,7 @@ make s01 debug  # debug any session from s01 through s17 on port 9229, attach VS
 ### Architecture
 
 - **pnpm** manages dependencies at the repo root. LLM calls go through the official **`@anthropic-ai/sdk`**.
-- Sync scripts live in `bin/`: `sync-upstream.sh` runs via `make sync` and pulls fresh Python reference sources from upstream; the upstream repo URL, synced directories, and localization excludes are configured in `.sync-config.sh`. Run `git diff` afterward to see the latest upstream changes.
+- Sync scripts live in `.github/scripts/`: `sync-upstream.sh` runs via `make sync` and pulls fresh Python reference sources from upstream; the upstream repo URL, synced directories, and localization excludes are configured in `.sync-config.sh`. Run `git diff` afterward to see the latest upstream changes.
 - Shared helpers live in `lib/`: `model.ts` sets up the client and model id, `tools.ts` defines tools and parses replies, `logger.ts` writes logs, `pricing.ts` tracks call cost, `terminal.ts` handles terminal output, `testing.ts` provides test stubs.
 
 ### Observability

@@ -21,7 +21,7 @@ make s01 debug  # 在 9229 端口调试 s01–s17 中的任意一课，VS Code �
 ### 架构
 
 - 依赖由 **pnpm** 在仓库根目录统一管理。LLM 调用走官方的 **`@anthropic-ai/sdk`**。
-- 同步脚本放在 `bin/`：`sync-upstream.sh` 通过 `make sync` 调用，从上游拉取最新的 Python 参考源码；仓库地址、同步目录范围、本地化排除项配在 `.sync-config.sh` 里。执行后跑 `git diff` 查看上游最新变化。
+- 同步脚本放在 `.github/scripts/`：`sync-upstream.sh` 通过 `make sync` 调用，从上游拉取最新的 Python 参考源码；仓库地址、同步目录范围、本地化排除项配在 `.sync-config.sh` 里。执行后跑 `git diff` 查看上游最新变化。
 - 公共辅助代码放在 `lib/`：`model.ts` 管 client 和 model id，`tools.ts` 定义工具并解析回复，`logger.ts` 写日志，`pricing.ts` 算调用成本，`terminal.ts` 管终端输出，`testing.ts` 提供测试用的桩对象。
 
 ### 可观测性

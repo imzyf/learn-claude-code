@@ -1,7 +1,7 @@
 # npm/pnpm 依赖安装目录，靠 package.json 重新生成
 node_modules/
-# bin/sync-upstream.sh 的上游同步缓存，机器本地产物
-bin/.cache/
+# .github/scripts/sync-upstream.sh 的上游同步缓存，机器本地产物
+.github/scripts/.cache/
 # lib/pricing.ts 的价格缓存（7 天有效期），机器本地产物
 lib/.cache/
 # lib/logger.ts 写的运行日志，各章共用

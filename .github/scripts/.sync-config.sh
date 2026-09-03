@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# bin/sync-upstream.sh 的共享配置（被 source 引入，而非执行）。
+# .github/scripts/sync-upstream.sh 的共享配置（被 source 引入，而非执行）。
 
 # 按需修改以下变量以匹配你的上游仓库。
 UPSTREAM_REPO="https://github.com/shareAI-lab/learn-claude-code.git"
@@ -31,13 +31,13 @@ SYNC_DIRS=(
 # SYNC_DIRS 内的顶级条目改名规则，格式 "上游名:本地名"。
 # 每个同步目录都套用同一套规则，给同名的本地化文件让位。
 SYNC_DIR_RENAMES=(
-  "README.zh.md:README.zh.upstream.md"
+  "README.zh.md:upstream.README.zh.md"
 )
 
 # 要从上游拉取的独立文件。格式 "上游路径" 或 "上游路径:本地路径"（改名落地）。
 SYNC_FILES=(
-  ".env.example:.env.example.upstream"
-  "README-zh.md:README-zh.upstream.md"
+  ".env.example:.upstream.env.example"
+  "README-zh.md:.github/upstream.README-zh.md"
   requirements.txt
 )
 

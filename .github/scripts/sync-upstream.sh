@@ -6,12 +6,11 @@
 # 同步后可用 `git diff` 查看上游更改并手动移植。
 #
 # 上游是稀疏克隆（仅 SYNC_DIRS + SYNC_FILES），缓存于 CACHE_DIR，
-# 有效期 CACHE_TTL_SECONDS（默认 1 天）；删 CACHE_DIR 或设
+# 有效期 CACHE_TTL_SECONDS（默认 1 小时）；删 CACHE_DIR 或设
 # LCC_SYNC_CACHE_TTL=0 强制重新克隆。
 #
-# 用法：bin/sync-upstream.sh
+# 用法：.github/scripts/sync-upstream.sh
 # 环境变量：
-#   LCC_SYNC_CACHE_DIR   缓存克隆的位置
 #   LCC_SYNC_CACHE_TTL   缓存有效期（秒，0 = 始终重新克隆）
 
 set -euo pipefail
@@ -20,8 +19,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 ROOT_DIR="$(dirname "${SCRIPT_DIR}")"
 source "${SCRIPT_DIR}/.sync-config.sh"
 
-CACHE_DIR="${LCC_SYNC_CACHE_DIR:-${SCRIPT_DIR}/.cache/upstream}"
-CACHE_TTL_SECONDS="${LCC_SYNC_CACHE_TTL:-86400}"
+CACHE_DIR="${SCRIPT_DIR}/.cache/upstream"
+CACHE_TTL_SECONDS="${LCC_SYNC_CACHE_TTL:-3600}"
 CACHE_MARKER="${CACHE_DIR}.last-clone"
 clone_dir="${CACHE_DIR}"
 
