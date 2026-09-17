@@ -676,7 +676,9 @@ describe("Workflow 工具", () => {
     });
 
     expect(final).toBe("审查完成");
-    const names = (seen[0].tools ?? []).map((tool) => tool.name);
+    const names = (seen[0].tools ?? []).flatMap((tool) =>
+      "name" in tool ? [tool.name] : [],
+    );
     expect(names).toHaveLength(BUILTIN_TOOLS.length + 1);
     expect(names.at(-1)).toBe("Workflow");
 

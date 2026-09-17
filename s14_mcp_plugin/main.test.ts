@@ -214,10 +214,12 @@ describe("agentLoop", () => {
     const calls = vi.mocked(client.messages.create).mock.calls;
     const firstTools = calls[0][0].tools ?? [];
     const secondTools = calls[1][0].tools ?? [];
-    expect(firstTools.map((tool) => tool.name)).not.toContain(
-      "mcp__docs__search",
-    );
-    expect(secondTools.map((tool) => tool.name)).toContain("mcp__docs__search");
+    expect(
+      firstTools.flatMap((tool) => ("name" in tool ? [tool.name] : [])),
+    ).not.toContain("mcp__docs__search");
+    expect(
+      secondTools.flatMap((tool) => ("name" in tool ? [tool.name] : [])),
+    ).toContain("mcp__docs__search");
     expect(calls[1][0].system).toContain("Connected MCP servers: docs");
 
     const resultMessage = messages[4];
