@@ -1,5 +1,5 @@
 {
-  "$schema": "https://biomejs.dev/schemas/2.5.3/schema.json",
+  "$schema": "https://biomejs.dev/schemas/2.5.14/schema.json",
   // 接入 git：读取 .gitignore，被忽略的文件不参与格式化/检查
   "vcs": { "enabled": true, "clientKind": "git", "useIgnoreFile": true },
   // 处理范围：包含全部，但排除 bin 目录和所有 .svg 文件（! 为排除）
