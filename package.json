@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "packageManager": "pnpm@12.4.2",
+  "packageManager": "pnpm@12.5.1",
   "description": "TypeScript port of learn-claude-code, built on @anthropic-ai/sdk",
   "scripts": {
     "dev": "env -u ANTHROPIC_AUTH_TOKEN tsx --env-file-if-exists=.env",
