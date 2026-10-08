@@ -32,6 +32,7 @@ import * as path from "node:path";
 import * as readline from "node:readline/promises";
 import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
+import { TOOL_ENVIRONMENT } from "../lib/environment";
 import { createLogger } from "../lib/logger";
 import { createClient, MODEL_ID } from "../lib/model";
 import { colorize, print } from "../lib/terminal";
@@ -39,7 +40,7 @@ import { hasToolUse, preview, printProse, textOf, zodTool } from "../lib/tools";
 import { bashSchema, type Deps, runBash } from "../s01_agent_loop/main";
 
 const WORKDIR = process.cwd();
-const SYSTEM = `You are a coding agent at ${WORKDIR}. Use tools to solve tasks. Act, don't explain.`;
+const SYSTEM = `You are a coding agent at ${WORKDIR}. Environment: ${TOOL_ENVIRONMENT}. Use tools to solve tasks. Act, don't explain.`;
 
 export const errMsg = (e: unknown) =>
   e instanceof Error ? e.message : String(e);

@@ -42,6 +42,7 @@ import { type ChildProcess, spawn } from "node:child_process";
 import * as readline from "node:readline/promises";
 import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
+import { TOOL_ENVIRONMENT } from "../lib/environment";
 import { createLogger, type SessionLogger } from "../lib/logger";
 import { createClient, MODEL_ID } from "../lib/model";
 import { colorize, print } from "../lib/terminal";
@@ -59,7 +60,7 @@ import { loadHooks, type Deps as S04Deps } from "../s04_hooks/main";
 
 const WORKDIR = process.cwd();
 const SYSTEM =
-  `You are a coding agent at ${WORKDIR}. Use tools to solve tasks. ` +
+  `You are a coding agent at ${WORKDIR}. Environment: ${TOOL_ENVIRONMENT}. Use tools to solve tasks. ` +
   `Set run_in_background to true only for independent Bash commands.`;
 
 // deps 与 s04 一致，另加 background：后台状态由 session 持有并跨轮传入。
@@ -90,7 +91,7 @@ export const TOOL_SCHEMAS: Partial<Record<string, z.ZodObject>> = {
 //  s11 新增：后台 bash 执行
 // ═══════════════════════════════════════════════════════════
 
-// 命令在独立进程组里启动（detached），这样超时或退出时能连同它派生的子进程一起停掉。
+// POSIX 上命令在独立进程组里启动，这样超时或退出时能连同子进程一起停掉。
 // 这只是生命周期清理，不是沙箱：另建 session 的进程仍可能离开该进程组。
 const liveProcesses = new Set<ChildProcess>();
 let cleanupInstalled = false;
@@ -99,6 +100,10 @@ let cleanupInstalled = false;
 function stopProcessGroup(child: ChildProcess): void {
   const { pid } = child;
   if (pid === undefined) return;
+  if (process.platform === "win32") {
+    child.kill();
+    return;
+  }
   if (!killGroup(pid, "SIGTERM")) return;
   // 定时器 unref，避免这条清理路径把进程的退出时间拖长。
   setTimeout(() => killGroup(pid, "SIGKILL"), 50).unref();
@@ -120,7 +125,9 @@ function killGroup(pid: number, signal: NodeJS.Signals): boolean {
 // daemon 线程「主线程退出即结束」的语义。
 export function stopBackgroundProcesses(): void {
   for (const child of liveProcesses) {
-    if (child.pid !== undefined) {
+    if (process.platform === "win32") {
+      child.kill();
+    } else if (child.pid !== undefined) {
       killGroup(child.pid, "SIGTERM");
       killGroup(child.pid, "SIGKILL");
     }
@@ -154,11 +161,11 @@ export async function runBashAsync(
   installShellCleanup();
   return new Promise((resolve) => {
     // 用 spawn 而不是 exec：exec 的 timeout 只杀 shell 自己，
-    // detached + 进程组信号才能把它派生出来的子进程一并停掉。
+    // POSIX 上用 detached + 进程组信号停掉它派生的子进程。
     const child = spawn(command, {
       shell: true,
       cwd: WORKDIR,
-      detached: true,
+      detached: process.platform !== "win32",
     });
     liveProcesses.add(child);
 

@@ -69,6 +69,7 @@ import * as readline from "node:readline/promises";
 import type Anthropic from "@anthropic-ai/sdk";
 import { Cron } from "croner";
 import { z } from "zod";
+import { TOOL_ENVIRONMENT } from "../lib/environment";
 import { createLogger, type SessionLogger } from "../lib/logger";
 import { createClient, MODEL_ID } from "../lib/model";
 import { createPrompt, print, printError } from "../lib/terminal";
@@ -91,7 +92,7 @@ import { loadHooks, type Deps as S04Deps } from "../s04_hooks/main";
 
 const WORKDIR = process.cwd();
 const SYSTEM =
-  `You are a coding agent at ${WORKDIR}. Use tools to solve tasks. ` +
+  `You are a coding agent at ${WORKDIR}. Environment: ${TOOL_ENVIRONMENT}. Use tools to solve tasks. ` +
   `Use schedule_cron for work that should start at a future local time.`;
 
 // deps 与 s04 一致，另加 cron：调度状态由 session 持有并跨轮传入。

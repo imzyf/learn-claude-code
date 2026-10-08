@@ -37,6 +37,7 @@
 
 import * as readline from "node:readline/promises";
 import type Anthropic from "@anthropic-ai/sdk";
+import { TOOL_ENVIRONMENT } from "../lib/environment";
 import { createLogger, type SessionLogger } from "../lib/logger";
 import { createClient, MODEL_ID } from "../lib/model";
 import { colorize, print } from "../lib/terminal";
@@ -56,7 +57,7 @@ import {
 } from "../s03_permission/main";
 
 const WORKDIR = process.cwd();
-const SYSTEM = `You are a coding agent at ${WORKDIR}. Use tools to solve tasks. Act, don't explain.`;
+const SYSTEM = `You are a coding agent at ${WORKDIR}. Environment: ${TOOL_ENVIRONMENT}. Use tools to solve tasks. Act, don't explain.`;
 
 // ═══════════════════════════════════════════════════════════
 //  来自 s02-s03：工具层直接复用，s04 不再重复定义

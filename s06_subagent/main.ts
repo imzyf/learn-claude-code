@@ -30,6 +30,7 @@
 import * as readline from "node:readline/promises";
 import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
+import { TOOL_ENVIRONMENT } from "../lib/environment";
 import { createLogger } from "../lib/logger";
 import { createClient, MODEL_ID } from "../lib/model";
 import { colorize, print } from "../lib/terminal";
@@ -53,12 +54,12 @@ import { BASE_HANDLERS, loadHooks } from "../s05_todo_write/main";
 const WORKDIR = process.cwd();
 
 const SYSTEM =
-  `You are a coding agent at ${WORKDIR}. ` +
+  `You are a coding agent at ${WORKDIR}. Environment: ${TOOL_ENVIRONMENT}. ` +
   "Use task for focused exploration or a self-contained subtask.";
 
 // s06: subagent 自己的 system prompt。
 const SUB_SYSTEM =
-  `You are a coding agent at ${WORKDIR}. ` +
+  `You are a coding agent at ${WORKDIR}. Environment: ${TOOL_ENVIRONMENT}. ` +
   "Complete the given task, then return a concise final answer.";
 
 // ═══════════════════════════════════════════════════════════

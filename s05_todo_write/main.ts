@@ -45,6 +45,7 @@
 import * as readline from "node:readline/promises";
 import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
+import { TOOL_ENVIRONMENT } from "../lib/environment";
 import { createLogger, type SessionLogger } from "../lib/logger";
 import { createClient, MODEL_ID } from "../lib/model";
 import { colorize, print } from "../lib/terminal";
@@ -78,7 +79,7 @@ const WORKDIR = process.cwd();
 
 // s05 改动：SYSTEM prompt 加入「先计划再执行」的指引。
 const SYSTEM =
-  `You are a coding agent at ${WORKDIR}. ` +
+  `You are a coding agent at ${WORKDIR}. Environment: ${TOOL_ENVIRONMENT}. ` +
   "Before starting any multi-step task, use todo_write to plan your steps. " +
   "Update status as you go.";
 

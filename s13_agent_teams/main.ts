@@ -68,6 +68,7 @@ import * as path from "node:path";
 import * as readline from "node:readline/promises";
 import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
+import { TOOL_ENVIRONMENT } from "../lib/environment";
 import { createLogger, type SessionLogger } from "../lib/logger";
 import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
 import { createPrompt, print, printFinal } from "../lib/terminal";
@@ -1721,7 +1722,7 @@ export const TOOL_SCHEMAS: Partial<Record<string, z.ZodObject>> = {
 // ═══════════════════════════════════════════════════════════
 
 export const PROMPT_SECTIONS: Record<string, string> = {
-  identity: "You are a coding agent. Act, don't explain.",
+  identity: `You are a coding agent. Act, don't explain. Environment: ${TOOL_ENVIRONMENT}.`,
   tools:
     "Available tools: bash, read_file, write_file, edit_file, glob, " +
     "create_task, update_task, list_tasks, get_task, claim_task, " +

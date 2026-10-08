@@ -53,6 +53,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
+import { WORKFLOW_ENVIRONMENT } from "../lib/environment";
 import { createLogger, type SessionLogger } from "../lib/logger";
 import { MODEL_ID, type ModelClient } from "../lib/model";
 import { print, printError } from "../lib/terminal";
@@ -334,6 +335,7 @@ function tokensOf(prompt: string, result: unknown): number {
 
 const RUNNER_SYSTEM =
   "You are a focused workflow agent. Complete only the supplied step. " +
+  `${WORKFLOW_ENVIRONMENT} ` +
   "Do not claim access to files or results not included in the prompt.";
 
 // 真实 runner：workflow 的子 agent 与宿主用同一个 client。

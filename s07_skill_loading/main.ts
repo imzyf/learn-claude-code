@@ -38,6 +38,7 @@ import * as readline from "node:readline/promises";
 import type Anthropic from "@anthropic-ai/sdk";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
+import { TOOL_ENVIRONMENT } from "../lib/environment";
 import { createLogger, type SessionLogger } from "../lib/logger";
 import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
 import { colorize, print } from "../lib/terminal";
@@ -167,7 +168,7 @@ export function listSkills(registry: SkillRegistry): string {
 // s07：SYSTEM 里带上技能目录（便宜——只有名称 + 描述）。
 export function buildSystem(registry: SkillRegistry): string {
   return (
-    `You are a coding agent at ${WORKDIR}. Use tools to solve tasks. ` +
+    `You are a coding agent at ${WORKDIR}. Environment: ${TOOL_ENVIRONMENT}. Use tools to solve tasks. ` +
     "Act, don't explain.\n\n" +
     `Skills available:\n${listSkills(registry)}\n\n` +
     "Use load_skill to read the full instructions when a skill applies."

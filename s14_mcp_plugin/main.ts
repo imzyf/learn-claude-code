@@ -36,6 +36,7 @@
 import * as readline from "node:readline/promises";
 import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
+import { TOOL_ENVIRONMENT } from "../lib/environment";
 import { createLogger, type SessionLogger } from "../lib/logger";
 import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
 import { colorize, print } from "../lib/terminal";
@@ -65,7 +66,7 @@ import {
 const WORKDIR = process.cwd();
 
 export const BASE_SYSTEM =
-  `You are a coding agent at ${WORKDIR}. Use built-in and connected MCP ` +
+  `You are a coding agent at ${WORKDIR}. Environment: ${TOOL_ENVIRONMENT}. Use built-in and connected MCP ` +
   "tools to solve tasks. Call connect_mcp before using a server.";
 
 // ═══════════════════════════════════════════════════════════

@@ -51,6 +51,7 @@ import * as path from "node:path";
 import * as readline from "node:readline/promises";
 import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
+import { TOOL_ENVIRONMENT } from "../lib/environment";
 import { createLogger, type SessionLogger } from "../lib/logger";
 import { createClient, MODEL_ID } from "../lib/model";
 import { colorize, print } from "../lib/terminal";
@@ -72,7 +73,7 @@ import { loadHooks, type Deps as S04Deps } from "../s04_hooks/main";
 
 const WORKDIR = process.cwd();
 const SYSTEM =
-  `You are a coding agent at ${WORKDIR}. ` +
+  `You are a coding agent at ${WORKDIR}. Environment: ${TOOL_ENVIRONMENT}. ` +
   `Use task tools to track dependencies and progress. Create all task nodes ` +
   `first. After create_task returns runtime-generated IDs, use update_task ` +
   `with those exact IDs to add dependencies.`;

@@ -32,12 +32,13 @@ import { spawnSync } from "node:child_process";
 import * as readline from "node:readline/promises";
 import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
+import { BASH_ENVIRONMENT } from "../lib/environment";
 import { createLogger, type SessionLogger } from "../lib/logger";
 import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
 import { colorize, print } from "../lib/terminal";
 import { hasToolUse, preview, printProse, textOf, zodTool } from "../lib/tools";
 
-const SYSTEM = `You are a coding agent at ${process.cwd()}. Use bash to solve tasks. Act, don't explain.`;
+const SYSTEM = `You are a coding agent at ${process.cwd()}. Environment: ${BASH_ENVIRONMENT}. Use bash to solve tasks. Act, don't explain.`;
 
 // ── 工具定义：只有 bash ────────────────────────────
 export const bashSchema = z.object({ command: z.string() });

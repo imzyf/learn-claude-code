@@ -37,6 +37,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as readline from "node:readline/promises";
 import type Anthropic from "@anthropic-ai/sdk";
+import { TOOL_ENVIRONMENT } from "../lib/environment";
 import { createLogger, type SessionLogger } from "../lib/logger";
 import { createClient, MODEL_ID } from "../lib/model";
 import { colorize, print } from "../lib/terminal";
@@ -53,7 +54,7 @@ import {
 } from "../s02_tool_use/main";
 
 const WORKDIR = process.cwd();
-const SYSTEM = `You are a coding agent at ${WORKDIR}. All destructive operations require user approval.`;
+const SYSTEM = `You are a coding agent at ${WORKDIR}. Environment: ${TOOL_ENVIRONMENT}. All destructive operations require user approval.`;
 
 // ═══════════════════════════════════════════════════════════
 //  来自 s02：工具实现（s03 本地版）

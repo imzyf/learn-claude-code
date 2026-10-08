@@ -40,6 +40,7 @@
 
 import * as readline from "node:readline/promises";
 import type Anthropic from "@anthropic-ai/sdk";
+import { TOOL_ENVIRONMENT } from "../lib/environment";
 import { createLogger, type SessionLogger } from "../lib/logger";
 import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
 import {
@@ -63,7 +64,8 @@ const WORKDIR = process.cwd();
 // 对话里没写清楚的结果，它无从确认。
 export const SYSTEM =
   `You are a coding agent at ${WORKDIR}. Use tools to inspect and modify the ` +
-  "current repository. Report concrete command results so an independent " +
+  `current repository. Environment: ${TOOL_ENVIRONMENT}. ` +
+  "Report concrete command results so an independent " +
   "evaluator can judge completion.";
 
 export const DEFAULT_MAX_TOKENS = 8000;

@@ -20,7 +20,6 @@ Need: pip install anthropic python-dotenv pyyaml + .env with ANTHROPIC_API_KEY
 
 import ast
 import atexit
-import fcntl
 import importlib.util
 import json
 import os
@@ -36,6 +35,11 @@ from pathlib import Path
 from datetime import datetime
 from dataclasses import dataclass, asdict, field
 import yaml
+
+try:
+    import fcntl
+except ImportError:  # Windows has no fcntl module.
+    fcntl = None
 
 try:
     import readline
@@ -159,7 +163,10 @@ def task_store_lock():
         if depth == 0:
             TASKS_DIR.mkdir(parents=True, exist_ok=True)
             handle = TASK_LOCK_PATH.open("a+", encoding="utf-8")
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            # fcntl.flock gives cross-process locking on POSIX. Windows has no
+            # fcntl, so it falls back to the in-process threading lock only.
+            if fcntl is not None:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
             _task_store_state.handle = handle
         _task_store_state.depth = depth + 1
         try:
@@ -168,7 +175,8 @@ def task_store_lock():
             _task_store_state.depth -= 1
             if _task_store_state.depth == 0:
                 handle = _task_store_state.handle
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                if fcntl is not None:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
                 handle.close()
                 del _task_store_state.handle
 
@@ -786,8 +794,14 @@ def load_skill(name: str) -> str:
 
 # -- Prompt Assembly --
 
+ENVIRONMENT_PROMPT = (
+    "Windows: the bash tool runs through cmd.exe; use cmd.exe syntax, not Unix "
+    "Bash or PowerShell syntax, and prefer dedicated file tools for file operations"
+    if os.name == "nt"
+    else "Unix-like: the bash tool runs the system shell"
+)
 PROMPT_SECTIONS = {
-    "identity": "You are a coding agent. Act, don't explain.",
+    "identity": f"You are a coding agent. Act, don't explain. Environment: {ENVIRONMENT_PROMPT}.",
     "tools": "Available tools: bash, read_file, write_file, edit_file, glob, "
              "todo_write, task, load_skill, compact, "
              "create_task, update_task, list_tasks, get_task, claim_task, "
@@ -870,8 +884,26 @@ _shell_process_lock = threading.RLock()
 
 
 def _stop_process_group(process: subprocess.Popen):
-    """Stop processes that remain in the command's original process group."""
-    for sig in (signal.SIGTERM, signal.SIGKILL):
+    """Stop a shell process and its children (cross-platform).
+
+    POSIX uses process-group signals (SIGTERM then SIGKILL). Windows has
+    neither ``os.killpg`` nor ``signal.SIGKILL``, so it falls back to
+    ``Popen.terminate()`` / ``Popen.kill()``.
+    """
+    if os.name == "nt":
+        for stop in (process.terminate, process.kill):
+            if process.poll() is not None:
+                return
+            try:
+                stop()
+            except OSError:
+                return
+            try:
+                process.wait(timeout=0.05)
+            except subprocess.TimeoutExpired:
+                continue
+        return
+    for sig in (signal.SIGTERM, getattr(signal, "SIGKILL", signal.SIGTERM)):
         try:
             os.killpg(process.pid, sig)
         except ProcessLookupError:
@@ -900,10 +932,13 @@ signal.signal(signal.SIGTERM, _handle_termination_signal)
 def _run_bash_process(command: str, cwd: Path | None = None) -> tuple[str, int | None]:
     process = None
     try:
+        # start_new_session (setsid) exists only on POSIX; skip it on Windows.
+        popen_kwargs = {} if os.name == "nt" else {"start_new_session": True}
         process = subprocess.Popen(
             command, shell=True, cwd=cwd or WORKDIR,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, errors="replace", start_new_session=True,
+            text=True, errors="replace",
+            **popen_kwargs,
         )
         with _shell_process_lock:
             _shell_processes.add(process)
@@ -1834,7 +1869,7 @@ register_hook("Stop", stop_hook)
 # -- Subagent Tool --
 
 SUB_SYSTEM = (
-    f"You are a coding subagent at {WORKDIR}. "
+    f"You are a coding subagent at {WORKDIR}. Environment: {ENVIRONMENT_PROMPT}. "
     "Complete the task, then return a concise final summary. "
     "Do not spawn more agents."
 )
