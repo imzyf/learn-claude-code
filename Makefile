@@ -1,4 +1,4 @@
-.PHONY: help setup sync smoke test lint open-upstream open-repo \
+.PHONY: help setup sync smoke test fmt open-upstream open-repo \
 	debug \
 	s01 s02 s03 s04 s05 s06 s07 s08 s09 s10 \
 	s11 s12 s13 s14 s15 s16 s17
@@ -32,8 +32,8 @@ CLEAN_TMP = find . -type d -name .tmp -not -path '*/node_modules/*' -exec rm -rf
 test: ## Run the test suite once, then remove leftover .tmp/ dirs
 	pnpm test; status=$$?; $(CLEAN_TMP); exit $$status
 
-lint: ## Lint and auto-fix with Biome, then remove leftover .tmp/ dirs
-	pnpm lint:fix; status=$$?; $(CLEAN_TMP); exit $$status
+fmt: ## Format with Oxfmt, auto-fix with Oxlint, then remove leftover .tmp/ dirs
+	pnpm fmt:fix && pnpm lint:fix; status=$$?; $(CLEAN_TMP); exit $$status
 
 ##@ Sync
 

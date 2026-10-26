@@ -98,7 +98,13 @@ jq '{runId, workflowName, args: (.args | keys), status: .task.status, usage: .ta
 ```
 
 ```json
-{"runId": "wf_review-changes_...", "workflowName": "review-changes", "args": ["changes"], "status": "completed", "usage": {"agents": 11, "tokens": 862}}
+{
+  "runId": "wf_review-changes_...",
+  "workflowName": "review-changes",
+  "args": ["changes"],
+  "status": "completed",
+  "usage": { "agents": 11, "tokens": 862 }
+}
 ```
 
 journal 一条 `agent()` 一行，行数等于 `agents`：
@@ -177,7 +183,9 @@ cat $S/$R.output.json
 ```
 
 ```json
-{"error": "cached agent output failed schema validation: findings: [0]: missing required key 'severity'"}
+{
+  "error": "cached agent output failed schema validation: findings: [0]: missing required key 'severity'"
+}
 ```
 
 `status=failed agents=0 tokens=0`，但事件流照样走完 `task_notification` —— 失败也要收尾，不是中途消失。

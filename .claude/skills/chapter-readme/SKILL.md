@@ -1,6 +1,6 @@
 ---
 name: chapter-readme
-description: 'Write a chapter README in this repo: sXX_*/README.md, whose main content is the 手动验证清单, the prompts a reader pastes into the REPL to see the chapter mechanism work against a real model API. Use when adding a README for a new chapter, or updating one after the chapter source changed. Not for writing main.test.ts cases.'
+description: "Write a chapter README in this repo: sXX_*/README.md, whose main content is the 手动验证清单, the prompts a reader pastes into the REPL to see the chapter mechanism work against a real model API. Use when adding a README for a new chapter, or updating one after the chapter source changed. Not for writing main.test.ts cases."
 ---
 
 章节 README（`sXX_*/README.md`）当前的主要内容就是这份手动验证清单。它让读者用真实 prompt 把本章新增的机制亲手跑一遍，看见它在真实模型、真实上下文里是什么样子。读者是坐在终端前一条条粘 prompt 的人，判据要他用眼睛看终端，以及打开 `.log/`、`.transcripts/` 等目录下本次运行的输出文件。他读得懂代码也会翻日志，不用当小白带：只讲重点，指个方向就够。
@@ -30,7 +30,7 @@ description: 'Write a chapter README in this repo: sXX_*/README.md, whose main c
 
 - 一章 4 到 7 节。每节一个断言式标题，直接写出这节要验的具体行为或机制（哪个函数、哪条分支、什么条件），不写「验证 X」「检查 X」，也不写「一句话跑遍 X」这类不点名具体行为的花哨概括。
 - 开头只有三样东西：标题、`本章的机制：` 一段、启动命令。启动命令块里不写注释。
-- 一节里 prompt 一到两条，每条一行原文加一行中文翻译。第二条 prompt 只是同一判据的反面时，散文说清即可，不必再配一个 ```plaintext 块。同一 session 要连续发多条 prompt 时，放进同一个 ```prompt 块，每条原文+翻译之间空一行分隔，不要拆成多个 ```prompt 块。
+- 一节里 prompt 一到两条，每条一行原文加一行中文翻译。第二条 prompt 只是同一判据的反面时，散文说清即可，不必再配一个 ` ```plaintext ` 块。同一 session 要连续发多条 prompt 时，放进同一个 ` ```prompt ` 块，每条原文+翻译之间空一行分隔，不要拆成多个 ` ```prompt ` 块。
 - prompt 里的路径按启动命令实际的工作目录写，不要假设「当前目录」等于章节目录。启动命令多数从仓库根目录跑（`pnpm dev sXX_<name>/main.ts`），工作区根就是仓库根，prompt 里涉及章节内文件要带上 `sXX_<name>/` 前缀。
 - 判据写成一到两句散文：期望看到什么、这体现本章的哪一点。不写「看到 X 算过」这种判分口吻。
 - 情况的描述要克制，只讲重点。一节点出一两个最能说明问题的地方就停，读者自己看得出来的细节不复述。
@@ -64,5 +64,4 @@ pnpm dev sXX_<name>/main.ts
 <非必须模块>
 <核心简要 关键输出的期望形态，可变值用占位符>
 ```
-
 ````

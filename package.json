@@ -2,15 +2,16 @@
   "name": "learn-claude-code",
   "version": "0.1.0",
   "private": true,
-  "type": "module",
-  "packageManager": "pnpm@12.15.0",
   "description": "TypeScript port of learn-claude-code, built on @anthropic-ai/sdk",
+  "type": "module",
   "scripts": {
     "dev": "env -u ANTHROPIC_AUTH_TOKEN tsx --env-file-if-exists=.env",
     "smoke": "env -u ANTHROPIC_AUTH_TOKEN tsx --env-file-if-exists=.env lib/smoke.ts",
     "typecheck": "tsc --noEmit",
-    "lint": "biome check .",
-    "lint:fix": "biome check --write .",
+    "fmt:check": "oxfmt --check .",
+    "fmt:fix": "oxfmt --write .",
+    "lint:check": "oxlint --deny-warnings .",
+    "lint:fix": "oxlint --fix --deny-warnings .",
     "test": "vitest run"
   },
   "dependencies": {
@@ -20,10 +21,12 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.5.3",
     "@types/node": "^26.1.0",
+    "oxfmt": "^0.74.0",
+    "oxlint": "^1.89.0",
     "tsx": "^4.23.0",
     "typescript": "^7.0.2",
     "vitest": "^5.0.1"
-  }
+  },
+  "packageManager": "pnpm@12.15.0"
 }

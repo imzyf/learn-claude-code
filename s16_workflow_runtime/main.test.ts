@@ -12,8 +12,10 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
+
 import type Anthropic from "@anthropic-ai/sdk";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
 import type { ModelClient } from "../lib/model";
 import {
   fakeMessage,
@@ -588,7 +590,7 @@ describe("运行生命周期", () => {
     expect(confirmed.length).toBeGreaterThan(0);
     const rank = { high: 0, medium: 1, low: 2 } as Record<string, number>;
     expect(confirmed.map((f) => rank[f.severity])).toEqual(
-      [...confirmed.map((f) => rank[f.severity])].sort((a, b) => a - b),
+      confirmed.map((f) => rank[f.severity]).sort((a, b) => a - b),
     );
     // 两个阶段各播报一次，agent 事件数与 usage.agents 对得上。
     const phases = out.task.progress.filter((p) => p.type === "workflow_phase");

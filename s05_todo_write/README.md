@@ -46,8 +46,8 @@ SYSTEM prompt 那句「Before starting any multi-step task, use todo_write to pl
 
 ## 4. 唠叨提醒：连续 3 轮不更新就补一条
 
-- `Read package.json, then read tsconfig.json, then read biome.json, then list the files in lib/.`
-  依次读 package.json、tsconfig.json、biome.json，然后列出 lib/ 下的文件。（中途别提 todo）
+- `Read package.json, then read tsconfig.json, then read .oxfmtrc.json, then list the files in lib/.`
+  依次读 package.json、tsconfig.json、.oxfmtrc.json，然后列出 lib/ 下的文件。（中途别提 todo）
 
 第三个工具轮次结束时计数到 3，终端打出一行黄字，transcript 里留一节 `CONSOLE PRINT`：
 

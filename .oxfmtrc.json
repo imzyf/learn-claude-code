@@ -1,0 +1,16 @@
+{
+  "$schema": "./node_modules/oxfmt/configuration_schema.json",
+  "tabWidth": 2,
+  "printWidth": 80,
+  "sortImports": {},
+  "ignorePatterns": [
+    "**/*.svg",
+    "**/code.py",
+    "**/upstream.README.zh.md",
+    "**/images/**",
+    "skills/**",
+    ".github/upstream.README-zh.md",
+    ".upstream.env.example",
+    "requirements.txt"
+  ]
+}

@@ -11,8 +11,10 @@
  * 每个用例用临时 .tasks 目录隔离。工具层与 hook 层已在 s02-s04 覆盖，这里不再重复。
  */
 import * as fs from "node:fs";
+
 import type Anthropic from "@anthropic-ai/sdk";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+
 import {
   fakeClient,
   fakeMessage,

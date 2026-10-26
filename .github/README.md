@@ -39,8 +39,8 @@ make s01 debug  # 在 9229 端口调试 s01–s17 中的任意一课，VS Code �
 
 ---
 
-*Agency 来自模型。Harness 让 agency 落地。造好 Harness，模型会完成剩下的。*
+_Agency 来自模型。Harness 让 agency 落地。造好 Harness，模型会完成剩下的。_
 
-*Bash is all you need. Real agents are all the universe needs.*
+_Bash is all you need. Real agents are all the universe needs._
 
-*这不是“照抄源码”，而是“理解核心设计，然后自己构建”。*
+_这不是“照抄源码”，而是“理解核心设计，然后自己构建”。_

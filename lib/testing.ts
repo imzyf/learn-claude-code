@@ -5,8 +5,10 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
+
 import type Anthropic from "@anthropic-ai/sdk";
 import { afterEach, beforeEach, vi } from "vitest";
+
 import type { SessionLogger } from "./logger";
 import type { ModelClient } from "./model";
 
@@ -60,6 +62,7 @@ export function fakeMessage(
     role: "assistant",
     model: "test-model",
     container: null,
+    diagnostics: null,
     content,
     stop_details: null,
     stop_reason: stopReason,
@@ -74,6 +77,7 @@ export function fakeMessage(
       output_tokens_details: null,
       server_tool_use: null,
       service_tier: null,
+      speed: null,
     },
   };
 }

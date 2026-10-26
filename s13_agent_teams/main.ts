@@ -66,8 +66,10 @@ import { randomInt } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as readline from "node:readline/promises";
+
 import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
+
 import { TOOL_ENVIRONMENT } from "../lib/environment";
 import { createLogger, type SessionLogger } from "../lib/logger";
 import { createClient, MODEL_ID, type ModelClient } from "../lib/model";
@@ -174,7 +176,7 @@ export class MessageBus {
     };
     const inbox = this.inboxPath(to);
     fs.appendFileSync(inbox, `${JSON.stringify(msg)}\n`);
-    for (const wake of [...this.waiters]) wake();
+    for (const wake of Array.from(this.waiters)) wake();
     print(
       `  [bus] ${from} -> ${to}: (${type}) ${content.slice(0, 50)}`,
       "gray",

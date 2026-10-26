@@ -39,7 +39,9 @@
  */
 
 import * as readline from "node:readline/promises";
+
 import type Anthropic from "@anthropic-ai/sdk";
+
 import { TOOL_ENVIRONMENT } from "../lib/environment";
 import { createLogger, type SessionLogger } from "../lib/logger";
 import { createClient, MODEL_ID, type ModelClient } from "../lib/model";

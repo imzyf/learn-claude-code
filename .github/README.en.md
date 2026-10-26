@@ -39,8 +39,8 @@ make s01 debug  # debug any session from s01 through s17 on port 9229, attach VS
 
 ---
 
-*Agency comes from the model. The harness gives agency a place to land. Build the harness well, and the model will do the rest.*
+_Agency comes from the model. The harness gives agency a place to land. Build the harness well, and the model will do the rest._
 
-*Bash is all you need. Real agents are all the universe needs.*
+_Bash is all you need. Real agents are all the universe needs._
 
-*This is not "copy the source code." This is "grasp the key designs and build it yourself."*
+_This is not "copy the source code." This is "grasp the key designs and build it yourself."_

@@ -9,8 +9,10 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type * as readline from "node:readline/promises";
+
 import type Anthropic from "@anthropic-ai/sdk";
 import { describe, expect, it, vi } from "vitest";
+
 import {
   fakeClient,
   fakeMessage,

@@ -2,7 +2,9 @@
 import { randomBytes } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
+
 import type Anthropic from "@anthropic-ai/sdk";
+
 import { createCostMeter } from "./pricing";
 import { type Color, print } from "./terminal";
 

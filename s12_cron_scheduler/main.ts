@@ -66,9 +66,11 @@ import { randomBytes } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as readline from "node:readline/promises";
+
 import type Anthropic from "@anthropic-ai/sdk";
 import { Cron } from "croner";
 import { z } from "zod";
+
 import { TOOL_ENVIRONMENT } from "../lib/environment";
 import { createLogger, type SessionLogger } from "../lib/logger";
 import { createClient, MODEL_ID } from "../lib/model";
@@ -223,7 +225,7 @@ export function runCronTick(
   // 由下方每个 job 的 try/catch 兜底（已注册任务都过了校验，实际到不了）。
   const atMinute = new Date(now);
   atMinute.setSeconds(0, 0);
-  for (const job of [...state.scheduledJobs.values()]) {
+  for (const job of Array.from(state.scheduledJobs.values())) {
     try {
       // 还没投递出去的任务不重复入队；同一分钟内也只入队一次。
       if (job.pendingDelivery || job.lastFired === minuteMarker) continue;

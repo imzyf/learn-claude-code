@@ -256,11 +256,11 @@ Permission required: ask Lead to run this command.
 
 命中的是 s03 的规则 2（bash 命令含 `rm`），不是拒绝名单。三类结果各有一条：
 
-| 输入 | 返回 |
-| --- | --- |
-| `rm -f ...` | `Permission required: ask Lead to run this command.` |
+| 输入                                        | 返回                                                  |
+| ------------------------------------------- | ----------------------------------------------------- |
+| `rm -f ...`                                 | `Permission required: ask Lead to run this command.`  |
 | `write_file` 写 `/tmp/x` 这种工作区外的路径 | `Permission required: path is outside the workspace.` |
-| `sudo ls` | `Blocked: 'sudo' is on the deny list` |
+| `sudo ls`                                   | `Blocked: 'sudo' is on the deny list`                 |
 
 拒绝名单那条直接原样回 s03 的文案，不再包一层。
 

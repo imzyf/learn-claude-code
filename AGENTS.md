@@ -15,7 +15,7 @@
 ## 修改原则
 
 - 尊重 Python 原版的教学结构和行为，保持章节简单、可读且渐进；跨章节稳定、重复的 TypeScript 代码应提取到 `lib/` 复用。
-- 使用严格 TypeScript、ES modules 和 `import type`；格式遵循 Biome（2 空格缩进）。
+- 使用严格 TypeScript、ES modules 和 `import type`；使用 Oxfmt 格式化（2 空格缩进）、Oxlint 检查。
 - 可测试逻辑应通过依赖注入隔离。测试使用 fake client，不调用真实模型 API，也不依赖 `.env`。
 - 测试要写文件时，用 `lib/testing.ts` 的 `makeTempDir` / `useTempDir`：工具以 `process.cwd()` 为根，临时目录必须建在仓库内的 `.tmp/` 下。
 - 可执行入口必须保留 `import.meta.main` 守卫，避免导入模块时启动 REPL 或产生日志。
@@ -25,5 +25,5 @@
 ```sh
 make test       # pnpm test，跑完清理残留的 .tmp/
 pnpm typecheck
-make lint       # pnpm lint:fix，CI 用不写盘的 pnpm lint
+make fmt        # 依次运行 pnpm fmt:fix、pnpm lint:fix
 ```

@@ -1,6 +1,7 @@
 // lib/tools.ts - Claude 工具定义与回复文本解析：LLM 工具层
 import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
+
 import { print } from "./terminal";
 
 // zod schema → Claude API 工具定义。
