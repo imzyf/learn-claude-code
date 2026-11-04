@@ -4,7 +4,7 @@
  * 在调用 LLM 之前插入五层压缩流水线：
  *
  *     L3:  toolResultBudget  —— 把最新一轮的大结果持久化到磁盘
- *     L1:  snipCompact       —— 消息数 > 50 时裁剪中间部分（先落盘存档）
+ *     L1:  snipCompact       —— 消息数达到 50 时裁剪中间部分（先落盘存档）
  *     L2:  microCompact      —— 把较早的工具结果换成存档路径
  *     L3b: fitToolResults    —— 仍超限时，最大的结果（含没看过的）换成预览 + 路径
  *     L4:  compactHistory    —— LLM 完整摘要（1 次 API 调用）
@@ -113,15 +113,20 @@ const toolResultsDir = (sessionDir: string) =>
 //  s08 新增：五层压缩流水线
 // ═══════════════════════════════════════════════════════════
 
-// 十个阈值启动时可用 L{n}_COMPACT_* 环境变量覆盖（前缀是它属于哪一层压缩）。
-// defaults.env 是这十个默认值的参考清单（不参与加载）；要试某一层，按
+// 压缩阈值启动时可用 L{n}_COMPACT_* 环境变量覆盖（前缀是它属于哪一层压缩）。
+// defaults.env 是默认值的参考清单（不参与加载）；要试某一层，按
 // README.md 的做法在命令行内联，
 // 只对这一次运行生效：L1_COMPACT_SNIP_MAX_MESSAGES=8 pnpm dev s08_context_compact/main.ts
-// L1 裁剪阈值：消息数超过它就裁掉中间部分。
+// L1 裁剪阈值：消息数达到它就裁掉中间部分。
 export const SNIP_MAX_MESSAGES = Number(
   process.env.L1_COMPACT_SNIP_MAX_MESSAGES ?? 50,
 );
-// L1 裁剪时保留的头部消息数（尾部保留数 = maxMessages - 头部）。
+// 自定义触发阈值时，默认目标仍为其下方留出空间；也可单独覆盖。
+export const SNIP_TARGET_MESSAGES = Number(
+  process.env.L1_COMPACT_SNIP_TARGET_MESSAGES ??
+    Math.min(30, SNIP_MAX_MESSAGES - 1),
+);
+// L1 裁剪时保留的头部消息数（尾部保留数 = targetMessages - 头部 - 1）。
 const SNIP_KEEP_HEAD = Number(process.env.L1_COMPACT_SNIP_KEEP_HEAD ?? 3);
 // L2 保留最近 N 条模型已经看过的工具结果不动，只压缩更早的。
 const KEEP_RECENT = Number(process.env.L2_COMPACT_KEEP_RECENT ?? 3);
@@ -193,19 +198,22 @@ const outputText = (part: Anthropic.ToolResultBlockParam): string =>
     ? part.content
     : JSON.stringify(part.content);
 
-// L1: snipCompact —— 裁剪中间消息，保留头 3 条，尾 (maxMessages - 3 - 1) 条
+// L1: snipCompact —— 达到触发阈值后裁到目标数量，保留头尾和存档标记。
 export function snipCompact(
   messages: Anthropic.MessageParam[],
-  maxMessages: number,
+  triggerMessages: number,
   logger: SessionLogger,
   sessionDir: string,
+  targetMessages = 30,
+  activeRequest?: string,
 ): Anthropic.MessageParam[] {
-  if (messages.length <= maxMessages) return messages;
+  if (!(5 <= targetMessages && targetMessages < triggerMessages))
+    throw new Error("Require 5 <= targetMessages < triggerMessages");
+  if (messages.length < triggerMessages) return messages;
 
   const keepHead = SNIP_KEEP_HEAD;
-  // 尾部少留一条，把位置让给存档标记 —— 否则裁完的长度是 maxMessages + 1，
-  // 下一轮又超上限，每轮都要再裁一次。
-  const keepTail = maxMessages - SNIP_KEEP_HEAD - 1;
+  // 存档标记也占一条。
+  const keepTail = targetMessages - SNIP_KEEP_HEAD - 1;
 
   let headEnd = keepHead;
   let tailStart = messages.length - keepTail;
@@ -262,6 +270,19 @@ export function snipCompact(
     },
     ...messages.slice(tailStart),
   ];
+  const activeRequestMarker = `Current user request:\n${activeRequest}\n\nConversation summary (reference only):`;
+  if (
+    activeRequest !== undefined &&
+    !next.some(
+      (message) =>
+        message.role === "user" &&
+        typeof message.content === "string" &&
+        (message.content === activeRequest ||
+          message.content.includes(activeRequestMarker)),
+    )
+  ) {
+    next.push({ role: "user", content: activeRequest });
+  }
   const before = estimateSize(messages);
   const after = estimateSize(next);
 
@@ -755,7 +776,14 @@ export async function agentLoop(
     // L1: 裁剪中间
     replaceMessages(
       messages,
-      snipCompact(messages, SNIP_MAX_MESSAGES, logger, sessionDir),
+      snipCompact(
+        messages,
+        SNIP_MAX_MESSAGES,
+        logger,
+        sessionDir,
+        SNIP_TARGET_MESSAGES,
+        deps.activeRequest,
+      ),
     );
 
     // 上下文还在阈值内就到此为止：旧结果原样留着，模型手上的信息最全。
@@ -794,7 +822,9 @@ export async function agentLoop(
       const msg = errMsg(e).toLowerCase();
       // 只兜「上下文超长」这一类错误，且有重试上限；其他错误照常抛出。
       if (
-        (msg.includes("prompt_too_long") || msg.includes("too many tokens")) &&
+        (msg.includes("prompt_too_long") ||
+          msg.includes("prompt is too long") ||
+          msg.includes("too many tokens")) &&
         reactiveRetries < MAX_REACTIVE_RETRIES
       ) {
         logger.console("[COMPACT reactive] triggered", "yellow");
@@ -916,7 +946,8 @@ if (import.meta.main) {
       break; // stdin 关闭（Ctrl+D）
     }
     const q = query.trim().toLowerCase();
-    if (q === "" || q === "q" || q === "exit") break;
+    if (q === "") continue;
+    if (q === "q" || q === "exit") break;
 
     logger.userInput(query);
     await hooks.trigger("UserPromptSubmit", query);

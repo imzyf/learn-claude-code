@@ -56,7 +56,7 @@ import {
 } from "../s02_tool_use/main";
 
 const WORKDIR = process.cwd();
-const SYSTEM = `You are a coding agent at ${WORKDIR}. Environment: ${TOOL_ENVIRONMENT}. All destructive operations require user approval.`;
+const SYSTEM = `You are a coding agent at ${WORKDIR}. Environment: ${TOOL_ENVIRONMENT}. Use tools to solve tasks. Do not ask for approval yourself. For destructive operations, still request the tool call; the harness will approve or deny before execution.`;
 
 // ═══════════════════════════════════════════════════════════
 //  来自 s02：工具实现（s03 本地版）
@@ -397,7 +397,8 @@ if (import.meta.main) {
       break; // stdin 关闭（Ctrl+D）
     }
     const q = query.trim().toLowerCase();
-    if (q === "" || q === "q" || q === "exit") break;
+    if (q === "") continue;
+    if (q === "q" || q === "exit") break;
     logger.userInput(query);
 
     history.push({ role: "user", content: query });

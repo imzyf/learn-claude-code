@@ -2105,11 +2105,13 @@ def is_archive_marker(message: dict) -> bool:
             and path.is_file())
 
 
-def snip_compact(messages: list, max_messages: int = 50) -> list:
-    if len(messages) <= max_messages:
+def snip_compact(messages: list, trigger_messages: int = 50, target_messages: int = 30) -> list:
+    if not 5 <= target_messages < trigger_messages:
+        raise ValueError("Require 5 <= target_messages < trigger_messages")
+    if len(messages) < trigger_messages:
         return messages
     head_end = 3
-    tail_start = len(messages) - (max_messages - head_end - 1)
+    tail_start = len(messages) - (target_messages - head_end - 1)
     if head_end > 0 and message_has_tool_use(messages[head_end - 1]):
         while head_end < len(messages) and is_tool_result_message(messages[head_end]):
             head_end += 1
@@ -3313,7 +3315,9 @@ if __name__ == "__main__":
             query = CONSOLE.ask()
         except (EOFError, KeyboardInterrupt):
             break
-        if query.strip().lower() in ("q", "exit", ""):
+        if not query.strip():
+            continue
+        if query.strip().lower() in ("q", "exit"):
             break
         with agent_lock:
             trigger_hooks("UserPromptSubmit", query)

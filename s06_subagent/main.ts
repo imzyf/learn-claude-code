@@ -300,7 +300,8 @@ if (import.meta.main) {
       break; // stdin 关闭（Ctrl+D）
     }
     const q = query.trim().toLowerCase();
-    if (q === "" || q === "q" || q === "exit") break;
+    if (q === "") continue;
+    if (q === "q" || q === "exit") break;
 
     logger.userInput(query);
     await hooks.trigger("UserPromptSubmit", query);

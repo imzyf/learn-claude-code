@@ -176,7 +176,8 @@ if (import.meta.main) {
       break; // stdin 关闭（Ctrl+D）
     }
     const q = query.trim().toLowerCase();
-    if (q === "" || q === "q" || q === "exit") break;
+    if (q === "") continue;
+    if (q === "q" || q === "exit") break;
     logger.userInput(query);
 
     // 保留完整对话，让每一轮都有之前的 context

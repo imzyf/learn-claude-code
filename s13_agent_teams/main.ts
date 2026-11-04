@@ -1905,8 +1905,10 @@ if (import.meta.main) {
     const [kind, payload] = await nextEvent();
     if (kind === "quit") break;
     if (kind === "user") {
-      const q = (payload ?? "").trim().toLowerCase();
-      if (q === "" || q === "q" || q === "exit") break;
+      if (payload === null) break;
+      const q = payload.trim().toLowerCase();
+      if (q === "") continue;
+      if (q === "q" || q === "exit") break;
       logger.userInput(payload ?? "");
       await hooks.trigger("UserPromptSubmit", payload ?? "");
       history.push({ role: "user", content: payload ?? "" });

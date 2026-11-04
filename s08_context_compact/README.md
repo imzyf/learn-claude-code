@@ -9,7 +9,7 @@ pnpm dev s08_context_compact/main.ts
 tail -f "$(find s08_context_compact/.log -name '*_transcript.log' | sort | tail -1)"
 ```
 
-十个阈值的默认值见 `defaults.env`（一份参考清单，程序不加载它），量级按真实会话调（50 条消息、200k、50k 字符），照默认值聊几轮不会触发任何一层。下面每节用命令行内联环境变量把对应那层调到几轮就能撞上，**只调那一节点名的阈值**：多调一个，就说不清触发的是哪一层。L2 和 L3b 例外，它们本来就要先超 `L4_COMPACT_CONTEXT_LIMIT` 才会跑，所以那两节各调两个。
+压缩阈值的默认值见 `defaults.env`（一份参考清单，程序不加载它），量级按真实会话调（50 条消息、200k、50k 字符），照默认值聊几轮不会触发任何一层。下面每节用命令行内联环境变量把对应那层调到几轮就能撞上，**只调那一节点名的阈值**：多调一个，就说不清触发的是哪一层。L2 和 L3b 例外，它们本来就要先超 `L4_COMPACT_CONTEXT_LIMIT` 才会跑，所以那两节各调两个。
 
 ## 1. L3：大结果落盘，消息里只留路径和预览
 
@@ -116,10 +116,10 @@ L4_COMPACT_CONTEXT_LIMIT=12000 L3_COMPACT_TOOL_RESULT_BUDGET=99999999 pnpm dev s
 ## 4. L1：裁掉中间，头尾保留，全文进 `.transcripts/`
 
 ```sh
-L1_COMPACT_SNIP_MAX_MESSAGES=8 pnpm dev s08_context_compact/main.ts
+L1_COMPACT_SNIP_MAX_MESSAGES=12 L1_COMPACT_SNIP_TARGET_MESSAGES=8 pnpm dev s08_context_compact/main.ts
 ```
 
-保留头 3 条、尾 4 条，存档标记自己占掉剩下那一条，裁完正好 8 条。裁完的长度不超过上限，下一轮不该立刻又裁一次。聊四五轮带工具调用的问题就会超过 8 条，期望终端出现：
+消息达到 12 条时向 8 条裁剪：保留头 3 条、尾 4 条和 1 条存档标记。为保护工具调用与结果的配对，实际数量可能略高；若当前请求的全部副本被裁掉，还会补回当前请求。默认配置在 50 条时向 30 条裁剪，为新增消息留出空间。聊几轮带工具调用的问题，期望终端出现：
 
 ```plaintext
 [COMPACT L1] snip compact: N messages removed (…… → …… chars)

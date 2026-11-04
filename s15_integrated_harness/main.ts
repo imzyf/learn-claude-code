@@ -103,6 +103,7 @@ import {
   reactiveCompact,
   replaceMessages,
   SNIP_MAX_MESSAGES,
+  SNIP_TARGET_MESSAGES,
   tools as s08Tools,
   snipCompact,
   TOOL_RESULT_BUDGET,
@@ -534,7 +535,14 @@ export async function agentLoop(
     );
     replaceMessages(
       messages,
-      snipCompact(messages, SNIP_MAX_MESSAGES, logger, sessionDir),
+      snipCompact(
+        messages,
+        SNIP_MAX_MESSAGES,
+        logger,
+        sessionDir,
+        SNIP_TARGET_MESSAGES,
+        activeRequest,
+      ),
     );
     if (estimateSize(messages) > CONTEXT_LIMIT) {
       replaceMessages(
@@ -879,8 +887,10 @@ export async function runHostCli(options: HostCliOptions): Promise<void> {
     let turnHooks: HookSystem = hooks;
     let activeRequest = "(no active user request)";
     if (kind === "user") {
-      const q = (payload ?? "").trim().toLowerCase();
-      if (q === "" || q === "q" || q === "exit") break;
+      if (payload === null) break;
+      const q = payload.trim().toLowerCase();
+      if (q === "") continue;
+      if (q === "q" || q === "exit") break;
       activeRequest = payload ?? "";
       logger.userInput(activeRequest);
       await hooks.trigger("UserPromptSubmit", activeRequest);

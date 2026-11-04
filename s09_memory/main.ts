@@ -74,6 +74,7 @@ import {
   reactiveCompact,
   replaceMessages,
   SNIP_MAX_MESSAGES,
+  SNIP_TARGET_MESSAGES,
   snipCompact,
   TOOL_HANDLERS,
   TOOL_RESULT_BUDGET,
@@ -101,6 +102,7 @@ export type Deps = S04Deps & {
   skills: SkillRegistry;
   memoryDir: string;
   sessionDir: string;
+  activeRequest?: string;
 };
 
 // ═══════════════════════════════════════════════════════════
@@ -783,7 +785,14 @@ export async function agentLoop(
     );
     replaceMessages(
       messages,
-      snipCompact(messages, SNIP_MAX_MESSAGES, logger, sessionDir),
+      snipCompact(
+        messages,
+        SNIP_MAX_MESSAGES,
+        logger,
+        sessionDir,
+        SNIP_TARGET_MESSAGES,
+        deps.activeRequest,
+      ),
     );
     if (estimateSize(messages) > CONTEXT_LIMIT) {
       replaceMessages(
@@ -817,7 +826,9 @@ export async function agentLoop(
     } catch (e) {
       const msg = errMsg(e).toLowerCase();
       if (
-        (msg.includes("prompt_too_long") || msg.includes("too many tokens")) &&
+        (msg.includes("prompt_too_long") ||
+          msg.includes("prompt is too long") ||
+          msg.includes("too many tokens")) &&
         reactiveRetries < MAX_REACTIVE_RETRIES
       ) {
         logger.console("[COMPACT reactive] triggered", "yellow");
@@ -947,7 +958,8 @@ if (import.meta.main) {
       break; // stdin 关闭（Ctrl+D）
     }
     const q = query.trim().toLowerCase();
-    if (q === "" || q === "q" || q === "exit") break;
+    if (q === "") continue;
+    if (q === "q" || q === "exit") break;
 
     logger.userInput(query);
     await hooks.trigger("UserPromptSubmit", query);
@@ -959,6 +971,7 @@ if (import.meta.main) {
       hooks,
       skills,
       memoryDir: MEMORY_DIR,
+      activeRequest: query,
       sessionDir: import.meta.dirname,
     });
     print(finalText, "green");

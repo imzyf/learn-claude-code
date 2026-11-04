@@ -776,7 +776,13 @@ export class ExecutionState {
 
   // 等齐屏障：全部并发跑，任意一个失败就让整个 workflow 失败。
   async parallel<T>(thunks: (() => Promise<T>)[]): Promise<T[]> {
-    return Promise.all(thunks.map((thunk) => thunk()));
+    const results = await Promise.allSettled(
+      thunks.map(async (thunk) => thunk()),
+    );
+    return results.map((result) => {
+      if (result.status === "rejected") throw result.reason;
+      return result.value;
+    });
   }
 
   // 每个 item 独立走完所有 stage，stage 之间没有屏障：item A 可能在第 3 阶段，
@@ -787,7 +793,9 @@ export class ExecutionState {
       for (const stage of stages) value = await stage(value, item, index);
       return value;
     };
-    return Promise.all(items.map(runItem));
+    return this.parallel(
+      items.map((item, index) => () => runItem(item, index)),
+    );
   }
 
   // 把另一个保存好的 workflow 当子流程跑（只允许一层），

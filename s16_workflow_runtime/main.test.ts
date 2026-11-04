@@ -336,6 +336,33 @@ describe("编排原语", () => {
     expect(out.result).toEqual(["slow", "fast"]);
   });
 
+  it.each(["parallel", "pipeline"] as const)(
+    "%s 分支失败后仍等成功分支写入 journal",
+    async (mode) => {
+      let finished = false;
+      const out = await runScript(
+        async (ctx) => {
+          const branch = async (item: string) => {
+            if (item === "fail") throw new Error("branch failed");
+            await sleep(10);
+            await ctx.agent("saved result", { label: "survivor" });
+            finished = true;
+            return item;
+          };
+          return mode === "parallel"
+            ? ctx.parallel([() => branch("fail"), () => branch("slow")])
+            : ctx.pipeline(["fail", "slow"], branch);
+        },
+        { runtime: makeRuntime({ createRunner: () => echoRunner() }) },
+      );
+      expect(finished).toBe(true);
+      expect(out.task.status).toBe("failed");
+      expect(out.result).toEqual({
+        error: expect.stringContaining("branch failed"),
+      });
+    },
+  );
+
   it("pipeline 的 stage 之间没有屏障", async () => {
     const order: string[] = [];
     const out = await runScript(async (ctx) =>

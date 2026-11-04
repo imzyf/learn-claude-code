@@ -102,7 +102,7 @@ function parallelToolRound(
 
 // ── compaction preprocessors (pure, no I/O) ───────────────
 describe("snipCompact", () => {
-  it("历史条数没超上限时原样返回", () => {
+  it("历史条数未达到触发阈值时原样返回", () => {
     const messages: Anthropic.MessageParam[] = [
       { role: "user", content: "hi" },
     ];
@@ -117,7 +117,7 @@ describe("snipCompact", () => {
         content: `m${i}`,
       }),
     );
-    const out = snipCompact(messages, 10, noopLogger, tmp);
+    const out = snipCompact(messages, 20, noopLogger, tmp, 10);
     // 存档标记自己也占一条：裁完的长度不超过上限，下一轮不会立刻又被裁一次。
     expect(out.length).toBe(10); // head(3) + 1 placeholder + tail(6)
     expect(out[0]).toBe(messages[0]); // head kept
@@ -131,6 +131,50 @@ describe("snipCompact", () => {
       .trim()
       .split("\n");
     expect(archived).toHaveLength(20);
+  });
+
+  it("默认达到 50 条才裁到 30 条，并为后续消息留出空间", () => {
+    const messages: Anthropic.MessageParam[] = Array.from(
+      { length: 50 },
+      (_, i) => ({ role: "user", content: `m${i}` }),
+    );
+    expect(
+      snipCompact(messages.slice(0, 49), 50, noopLogger, tmp),
+    ).toHaveLength(49);
+    const out = snipCompact(messages, 50, noopLogger, tmp);
+    expect(out).toHaveLength(30);
+    out.push({ role: "assistant", content: "next" });
+    expect(snipCompact(out, 50, noopLogger, tmp)).toBe(out);
+  });
+
+  it("拒绝不合法的裁剪目标", () => {
+    for (const target of [4, 50, 51])
+      expect(() => snipCompact([], 50, noopLogger, tmp, target)).toThrow(
+        "Require 5 <= targetMessages < triggerMessages",
+      );
+  });
+
+  it("仅在裁剪移除当前请求全部副本后补回请求", () => {
+    const request = "keep working";
+    const history = (): Anthropic.MessageParam[] =>
+      Array.from({ length: 50 }, (_, i) => ({
+        role: "user",
+        content: i === 10 ? request : `m${i}`,
+      }));
+    const out = snipCompact(history(), 50, noopLogger, tmp, 30, request);
+    expect(out.at(-1)).toEqual({ role: "user", content: request });
+    for (const visible of [
+      request,
+      `Current user request:\n${request}\n\nConversation summary (reference only): old work`,
+    ]) {
+      const messages = history();
+      messages[0].content = visible;
+      expect(
+        snipCompact(messages, 50, noopLogger, tmp, 30, request),
+      ).toHaveLength(30);
+    }
+    const short = history().slice(0, 20);
+    expect(snipCompact(short, 50, noopLogger, tmp, 30, "missing")).toBe(short);
   });
 
   // 头部边界会跨过 tool_result 往后推，中间可能只剩上一轮的存档标记。
@@ -152,11 +196,11 @@ describe("snipCompact", () => {
     ];
 
     const messages = withMarker(`[9 messages archived at ${transcript}]`);
-    expect(snipCompact(messages, 8, noopLogger, tmp)).toBe(messages);
+    expect(snipCompact(messages, 9, noopLogger, tmp, 8)).toBe(messages);
 
     // 文案一样但存档不存在的，只是历史里的普通文本，照常裁。
     const faked = withMarker("[9 messages archived at /nope/fake.jsonl]");
-    expect(snipCompact(faked, 8, noopLogger, tmp)).not.toBe(faked);
+    expect(snipCompact(faked, 9, noopLogger, tmp, 8)).not.toBe(faked);
   });
 });
 

@@ -713,7 +713,8 @@ if (import.meta.main) {
       break; // stdin 关闭（Ctrl+D）
     }
     const q = query.trim().toLowerCase();
-    if (q === "" || q === "q" || q === "exit") break;
+    if (q === "") continue;
+    if (q === "q" || q === "exit") break;
 
     // 阻塞式获取锁：等队列处理器跑完当前一轮。
     while (agentBusy) await sleep(100);
