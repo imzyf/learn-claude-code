@@ -237,7 +237,15 @@ Owner alice must complete task_xxxxxxxx before claiming another task
   [idle] alice claimed task_yyyyyyyy: append a line to README
 ```
 
-优先级是收件箱在前、扫描在后：`waitForWork` 先等消息，超时没消息才扫任务板。要看这一点，在有 ready 任务挂着的时候让 Lead 给 idle 队友发一条 `send_message`，队友应该先处理那条消息。
+优先级是收件箱、自己没做完的任务、任务板依次往后：`waitForWork` 先等消息，超时没消息时先接回自己名下还在 `in_progress` 的任务，没有才扫任务板。要看收件箱优先，在有 ready 任务挂着的时候让 Lead 给 idle 队友发一条 `send_message`，队友应该先处理那条消息。
+
+接回自己的任务要模型配合才撞得出来：队友没调 `complete_task` 就结束一轮时，任务还挂在它名下。期望两秒内出现紫字，`[idle]` 后面是 `resuming` 而不是 `claimed`：
+
+```plaintext
+  [idle] alice resuming task_xxxxxxxx: write config.json
+```
+
+模型每次都老实完成任务、没撞出来，不算运行时有问题，`main.test.ts` 有对应断言。
 
 被依赖挡住的任务不会被自动认领：`scanUnclaimedTasks` 只收 `pending`、无 owner、依赖已完成、worktree 绑定可用的任务。任务 C 就是现成的例子，A 和 B 都完成之前，idle 队友扫到它也不会认领；两个前置完成后 `complete_task` 的返回里会多一行 `Unblocked: ...`，终端上出现黄字 `  [unblocked] verify both files`，之后它才进候选。
 

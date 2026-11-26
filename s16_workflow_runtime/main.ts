@@ -1093,11 +1093,18 @@ export const WORKFLOW_INPUT = z.strictObject({
   resume_from_run_id: z.string().optional(),
 });
 
-export const WORKFLOW_TOOL: Anthropic.Tool = zodTool(
-  "Workflow",
-  "Run a saved workflow by name. Pass input in args.",
-  WORKFLOW_INPUT,
-);
+// 描述和 name 的枚举都来自 runtime 的 registry，模型看得到能调用哪些 workflow。
+// 枚举只写进给模型看的 schema；handler 仍按 WORKFLOW_INPUT 解析，未知名称由 runWorkflow 报错。
+export function workflowTool(workflows: WorkflowRegistry): Anthropic.Tool {
+  const available = Object.entries(workflows)
+    .map(([name, { meta }]) => `${name}: ${meta.description}`)
+    .join("\n");
+  return zodTool(
+    "Workflow",
+    `Run a saved workflow by name. Pass input in args. Available workflows:\n${available}`,
+    WORKFLOW_INPUT.extend({ name: z.enum(Object.keys(workflows)) }),
+  );
+}
 
 export type WorkflowToolResult = {
   launched: Launched;
@@ -1127,7 +1134,7 @@ export async function runWorkflow(
 // 宿主循环照常继续。
 export function workflowToolPool(runtime: WorkflowRuntime): ToolPool {
   return {
-    tools: [WORKFLOW_TOOL],
+    tools: [workflowTool(runtime.workflows)],
     handlers: {
       Workflow: async (input: unknown) => {
         try {

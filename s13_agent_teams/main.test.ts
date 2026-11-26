@@ -14,7 +14,8 @@
  *     权限规则按命令 / 路径给不同指引；hook 照跑但跳过 permissionHook，
  *     且它的返回值不拦截工具
  *   - spawnTeammateThread：重名 / 保留名 / 认领失败拒绝；队友跑完发 result +
- *     idle_notification 并转 IDLE；IDLE 自动认领任务板上的 ready task；关机握手退出
+ *     idle_notification 并转 IDLE；IDLE 先接回自己没完成的任务，再认领任务板上的
+ *     ready task，计划等审批时不接任务；关机握手退出
  *   - 工具集：Lead 带团队工具，队友工具集不含 create_task / spawn_teammate
  *   - agentLoop：工具调用端到端 + 团队事件注入
  * 任务存储本身（TaskStore / canStart）已在 s10 覆盖，这里不再重复。
@@ -25,7 +26,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 
 import type Anthropic from "@anthropic-ai/sdk";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { SessionLogger } from "../lib/logger";
 import {
@@ -662,6 +663,83 @@ describe("spawnTeammateThread", () => {
     // 退出时把没完成的任务放回任务板。
     expect(team.tasks.load(task.id).status).toBe("pending");
     expect(team.tasks.load(task.id).owner).toBeNull();
+  });
+
+  it("空闲时先接回自己没完成的任务", async () => {
+    const team = newTeam();
+    const task = team.tasks.create("migrate", "move the config");
+    const client = fakeClient(
+      fakeMessage([textBlock("halfway there")], "end_turn"),
+      fakeMessage(
+        [toolUseBlock("tu_1", "complete_task", { task_id: task.id })],
+        "tool_use",
+      ),
+      fakeMessage([textBlock("migrated")], "end_turn"),
+    );
+
+    spawnTeammateThread(
+      team,
+      client,
+      noopLogger,
+      newHooks(),
+      "erin",
+      "dev",
+      "do it",
+      task.id,
+    );
+    await waitFor(() => team.tasks.load(task.id).status === "completed");
+
+    expect(
+      vi.mocked(client.messages.create).mock.calls[1][0].messages,
+    ).toContainEqual({
+      role: "user",
+      content: expect.stringContaining(`[Resume task ${task.id}] migrate`),
+    });
+
+    makeTeamHandlers(team, client, noopLogger, newHooks()).request_shutdown?.({
+      teammate: "erin",
+    });
+    await waitFor(() => !team.activeTeammates.has("erin"));
+  });
+
+  it("计划等审批期间空闲也不认领新任务", async () => {
+    const team = newTeam();
+    const client = fakeClient(
+      fakeMessage(
+        [toolUseBlock("tu_1", "submit_plan", { plan: "draft the docs" })],
+        "tool_use",
+      ),
+      fakeMessage([textBlock("waiting for approval")], "end_turn"),
+    );
+
+    spawnTeammateThread(
+      team,
+      client,
+      noopLogger,
+      newHooks(),
+      "frank",
+      "writer",
+      "plan first",
+      null,
+      true,
+    );
+    await waitFor(
+      () => team.activeTeammates.get("frank") === "waiting_approval",
+    );
+    await waitFor(
+      () => vi.mocked(client.messages.create).mock.calls.length === 2,
+    );
+    const task = team.tasks.create("write docs", "cover the API");
+    // 扫描间隔是 20ms，等 5 轮。认领了任务就会再调一次模型。
+    await new Promise((r) => setTimeout(r, 100));
+    expect(vi.mocked(client.messages.create).mock.calls).toHaveLength(2);
+    expect(team.activeTeammates.get("frank")).toBe("waiting_approval");
+    expect(team.tasks.load(task.id).owner).toBeNull();
+
+    makeTeamHandlers(team, client, noopLogger, newHooks()).request_shutdown?.({
+      teammate: "frank",
+    });
+    await waitFor(() => !team.activeTeammates.has("frank"));
   });
 
   it("通过队友工具循环运行分配的任务", async () => {

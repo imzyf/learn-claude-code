@@ -260,6 +260,15 @@ jq -s '[.[] | select(.config)][0].config.tools | map(.name) | length' "$A"      
 jq -s '[.[] | select(.config)][0].config.tools | map(.name) | last' "$A"        # 期望 "Workflow"
 ```
 
+`Workflow` 的描述会列出 registry 里每个 workflow 的名称和用途，`name` 的枚举也来自同一个 registry：
+
+```sh
+jq -s '[.[] | select(.config)][0].config.tools | last | .description' "$A"
+# 期望末尾一行是 "review-changes: Review changed files across dimensions, verify each finding"
+jq -s '[.[] | select(.config)][0].config.tools | last | .input_schema.properties.name.enum' "$A"
+# 期望 ["review-changes"]
+```
+
 - `Read s16_workflow_runtime/code.py and run the saved review-changes workflow with that file content as args.changes.`
   读 `s16_workflow_runtime/code.py`，把内容作为 `args.changes` 跑保存好的 `review-changes` workflow。
 

@@ -32,7 +32,8 @@
  *     队友的 bash / 文件工具都从 assignment 读目录；绑定损坏就认领失败，不回退仓库目录
  *   + createWorktree（Lead 工具）与 removeWorktree（宿主函数，不给模型）
  *   + owner 维度的 claimTask / completeTask：一个 owner 同时只能有一项进行中的任务
- *   + TeammateRuntime：持久队友的 WORK / IDLE 循环 + 空闲时扫描共享任务板认领
+ *   + TeammateRuntime：持久队友的 WORK / IDLE 循环 + 空闲时先接回自己没做完的任务，
+ *     再扫描共享任务板认领
  *   + 类型化协议：shutdown 与 plan_approval 用 request_id 关联请求与回复；
  *     计划闸门在工具分发层拦住 bash / write_file / edit_file
  *   + 7 个 Lead 工具：spawn_teammate / list_teammates / send_message /
@@ -1362,7 +1363,8 @@ export class TeammateRuntime {
     return "idle";
   }
 
-  // IDLE：先等消息，没消息再扫任务板。关机和 Lead 的直接指令优先于自己找活。
+  // IDLE：先等消息，没消息时先接回自己没做完的任务，最后才扫任务板。
+  // 关机、计划审批和 Lead 的直接指令优先于任务工作；计划等审批期间不接任何任务。
   async waitForWork(): Promise<boolean> {
     while (true) {
       const inbox = await this.team.bus.waitForMessages(
@@ -1376,16 +1378,20 @@ export class TeammateRuntime {
         continue;
       }
 
-      const task = claimNextTask(this.team, this.name, this.logger);
+      if (this.team.gateOf(this.name) === "pending") continue;
+
+      const owned = ownerInProgress(this.team, this.name);
+      const task = owned ?? claimNextTask(this.team, this.name, this.logger);
       if (!task) continue;
       this.messages.push({
         role: "user",
         content:
-          `[Auto-claimed task ${task.id}] ${task.subject}\n${task.description}\n` +
+          `[${owned ? "Resume" : "Auto-claimed"} task ${task.id}] ${task.subject}\n` +
+          `${task.description}\n` +
           `Work directory: ${assignmentCwd(this.team, this.name)}`,
       });
       this.logger.console(
-        `  [idle] ${this.name} claimed ${task.id}: ${task.subject}`,
+        `  [idle] ${this.name} ${owned ? "resuming" : "claimed"} ${task.id}: ${task.subject}`,
         "magenta",
       );
       return true;

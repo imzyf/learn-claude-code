@@ -49,7 +49,8 @@ import {
   SAMPLE_META,
   validateJson,
   validateMeta,
-  WORKFLOW_TOOL,
+  WORKFLOWS,
+  workflowTool,
   type WorkflowArgs,
   WorkflowInputError,
   WorkflowJournal,
@@ -133,7 +134,7 @@ describe("元数据与权限", () => {
   });
 
   it("模型可见的输入只有 name / args / resume_from_run_id", () => {
-    const schema = WORKFLOW_TOOL.input_schema as unknown as {
+    const schema = workflowTool(WORKFLOWS).input_schema as unknown as {
       properties: Record<string, unknown>;
       required: string[];
       additionalProperties: boolean;
@@ -145,6 +146,25 @@ describe("元数据与权限", () => {
     ]);
     expect(schema.required).toEqual(["name"]);
     expect(schema.additionalProperties).toBe(false);
+  });
+
+  it("工具描述和 name 枚举列出 registry 里的 workflow", () => {
+    const tool = workflowTool({
+      [TEST_META.name]: { meta: TEST_META, script: async () => null },
+      [SAMPLE_META.name]: { meta: SAMPLE_META, script: async () => null },
+    });
+    expect(tool.description).toBe(
+      "Run a saved workflow by name. Pass input in args. Available workflows:\n" +
+        "test-flow: for tests\n" +
+        `review-changes: ${SAMPLE_META.description}`,
+    );
+    const schema = tool.input_schema as unknown as {
+      properties: { name: { enum: string[] } };
+    };
+    expect(schema.properties.name.enum).toEqual([
+      TEST_META.name,
+      SAMPLE_META.name,
+    ]);
   });
 });
 
